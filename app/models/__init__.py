@@ -1,0 +1,29 @@
+"""Import every model module so ``Base.metadata`` is fully populated.
+
+Alembic's ``env.py`` imports this package (not individual model modules) so
+autogeneration always sees the complete schema.
+"""
+
+from app.models import (
+    agents,
+    artifacts_eval,
+    execution,
+    governance,
+    identity,
+    observability,
+    providers,
+    tasks,
+    workflow,
+)
+
+__all__ = [
+    "agents",
+    "artifacts_eval",
+    "execution",
+    "governance",
+    "identity",
+    "observability",
+    "providers",
+    "tasks",
+    "workflow",
+]

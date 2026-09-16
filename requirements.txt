@@ -1,0 +1,8 @@
+fastapi>=0.110,<0.116
+uvicorn>=0.27,<0.35
+sqlalchemy>=2.0,<2.1
+alembic>=1.13,<1.14
+pydantic>=2.5,<3
+pydantic-settings>=2.1,<3
+httpx>=0.26,<0.28
+python-dateutil>=2.8,<3

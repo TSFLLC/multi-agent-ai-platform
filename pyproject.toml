@@ -1,0 +1,33 @@
+[tool.black]
+line-length = 110
+target-version = ["py38"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py38"
+
+[tool.ruff.lint]
+extend-select = ["I"]
+ignore = [
+    # FastAPI's Depends()/Query() *must* be called in argument defaults —
+    # that's the framework's dependency-injection mechanism, not a bug.
+    "B008",
+    # Would require `from __future__ import annotations` everywhere,
+    # which changes how SQLAlchemy 2.0 Mapped[] / Pydantic v2 resolve
+    # annotations at class-definition time — not worth the risk for a
+    # pure style simplification.
+    "FA100",
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app", "alembic"]
+
+[tool.mypy]
+python_version = "3.8"
+plugins = ["sqlalchemy.ext.mypy.plugin"]
+ignore_missing_imports = true
+warn_unused_ignores = true
+exclude = ["alembic/versions/"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
