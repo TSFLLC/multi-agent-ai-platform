@@ -20,7 +20,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["app", "alembic"]
+known-first-party = ["app"]
 
 [tool.mypy]
 python_version = "3.8"

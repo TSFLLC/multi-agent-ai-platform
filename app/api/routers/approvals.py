@@ -10,6 +10,8 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_db, not_implemented
 from app.schemas.approvals import ApprovalRead, ApprovalResolveRequest
 from app.schemas.common import FingerprintMismatch
+from app.schemas.events import AuditEventRead
+from app.services.audit_service import AuditService
 
 router = APIRouter(tags=["approvals"])
 
@@ -31,9 +33,11 @@ def resolve_approval(approval_id: str, body: ApprovalResolveRequest, db: Session
     not_implemented()
 
 
-@router.get("/audit-events")
-def list_audit_events(db: Session = Depends(get_db)):
-    """Admin/Owner-only, RBAC-restricted (Section 20.5, 25.5) — separate
-    from GET /events (Flight Recorder). RBAC enforcement lands in MA1; this
-    is contract-only in MA0."""
-    not_implemented()
+@router.get("/audit-events", response_model=List[AuditEventRead])
+def list_audit_events(org_id: str = Query(...), db: Session = Depends(get_db)):
+    """Structurally separate from GET /events (Flight Recorder) — Section
+    20.5, 25.5. Should be Admin/Owner-only, RBAC-restricted; RBAC/auth
+    doesn't exist yet (deferred past MA1 per Owner instruction), so this
+    endpoint is unauthenticated for now. Do not treat it as
+    access-controlled until an auth phase lands."""
+    return AuditService(db).list_for_org(org_id=org_id)

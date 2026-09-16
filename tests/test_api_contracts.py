@@ -46,7 +46,7 @@ EXPECTED_PATHS = [
 def test_health_endpoint_works():
     resp = client.get("/health")
     assert resp.status_code == 200
-    assert resp.json()["phase"] == "MA0"
+    assert resp.json()["phase"] == "MA1"
 
 
 def test_openapi_schema_generates():
@@ -57,9 +57,13 @@ def test_openapi_schema_generates():
 
 
 def test_stub_endpoints_return_not_implemented_not_a_crash():
+    """Section K: every error response uses the {"error": {code, message}}
+    envelope (app.errors), including the MA0-era 501 contract stubs."""
     resp = client.get("/agents")
     assert resp.status_code == 501
-    assert "detail" in resp.json()
+    body = resp.json()
+    assert body["error"]["code"] == "not_implemented"
+    assert "message" in body["error"]
 
 
 def test_approval_resolve_declares_409_fingerprint_mismatch_response():

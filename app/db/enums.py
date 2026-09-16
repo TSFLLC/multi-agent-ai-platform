@@ -286,6 +286,11 @@ class JobType(str, enum.Enum):
     AGENT_RUN = "agent_run"
     WORKFLOW_NODE = "workflow_node"
     EVALUATION = "evaluation"
+    # MA1 addition: a harmless, side-effect-free job used only to prove the
+    # worker's claim/heartbeat/fencing/complete lifecycle end-to-end before
+    # real Agent execution exists (MA3). Never dispatches to a real
+    # provider, tool, or agent.
+    INTERNAL_TEST = "internal_test"
 
 
 # --- Budgets / Usage (Section 19, 24.4 #13) ---------------------------------

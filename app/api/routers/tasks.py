@@ -3,11 +3,14 @@
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, Header
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_db, not_implemented
+from app.api.deps import get_db, get_session_factory, not_implemented
 from app.schemas.events import ExecutionEventRead
 from app.schemas.tasks import AgentRunAttemptRead, AgentRunRead, TaskCreate, TaskRead, TaskRunRead
+from app.services.flight_recorder import FlightRecorderService
+from app.sse import stream_task_run_events as _sse_stream
 
 router = APIRouter(tags=["tasks"])
 
@@ -59,17 +62,30 @@ def approve_continue_task_run(task_id: str, run_id: str, db: Session = Depends(g
 
 
 @router.get("/tasks/{task_id}/runs/{run_id}/events", response_model=List[ExecutionEventRead])
-def get_task_run_events(task_id: str, run_id: str, db: Session = Depends(get_db)):
+def get_task_run_events(
+    task_id: str,
+    run_id: str,
+    db: Session = Depends(get_db),
+    after_sequence: Optional[int] = None,
+):
     """Queries execution_events (Section 24.4 #4), never audit_events."""
-    not_implemented()
+    recorder = FlightRecorderService(db)
+    return recorder.list_for_task_run(task_run_id=run_id, after_sequence=after_sequence)
 
 
 @router.get("/tasks/{task_id}/runs/{run_id}/stream")
-def stream_task_run_events(task_id: str, run_id: str, last_event_id: Optional[int] = None):
+def stream_task_run_events(
+    task_id: str,
+    run_id: str,
+    last_event_id: Optional[int] = None,
+    session_factory=Depends(get_session_factory),
+):
     """SSE stream. Reconnection resumes from ``last_event_id`` against
-    execution_events.sequence_number (Section 25.3) — not implemented in
-    MA0; declared for OpenAPI contract completeness."""
-    not_implemented()
+    execution_events.sequence_number (Section 25.3)."""
+    return StreamingResponse(
+        _sse_stream(run_id, last_event_id=last_event_id, session_factory=session_factory),
+        media_type="text/event-stream",
+    )
 
 
 @router.get("/agent-runs/{agent_run_id}", response_model=AgentRunRead)

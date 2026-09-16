@@ -1,7 +1,9 @@
 import pytest
+from fastapi.testclient import TestClient
 from sqlalchemy.orm import sessionmaker
 
 from app import models  # noqa: F401 — populates Base.metadata
+from app.api.deps import get_db, get_session_factory
 from app.db.base import Base
 from app.db.enums import (
     AgentRunStatus,
@@ -12,11 +14,13 @@ from app.db.enums import (
     VersionStatus,
 )
 from app.db.session import build_engine
+from app.main import app as fastapi_app
 from app.models.agents import Agent, AgentVersion
 from app.models.artifacts_eval import Artifact
 from app.models.governance import Budget
 from app.models.identity import Organization, Project
 from app.models.tasks import AgentRun, Task, TaskRun
+from app.worker import Worker
 
 
 @pytest.fixture()
@@ -44,6 +48,44 @@ def db(session_factory):
         yield session
     finally:
         session.close()
+
+
+@pytest.fixture()
+def client(session_factory):
+    """A TestClient wired to the same temp DB as the ``db``/``engine``
+    fixtures via FastAPI's dependency_overrides — never the real
+    data/multi_agent_platform.db. Deliberately not used as a context
+    manager, so app startup/shutdown (lifespan) never fires against the
+    real engine either; lifespan itself is tested separately with an
+    explicitly monkeypatched engine."""
+
+    def _override_get_db():
+        session = session_factory()
+        try:
+            yield session
+        finally:
+            session.close()
+
+    fastapi_app.dependency_overrides[get_db] = _override_get_db
+    fastapi_app.dependency_overrides[get_session_factory] = lambda: session_factory
+    try:
+        yield TestClient(fastapi_app)
+    finally:
+        fastapi_app.dependency_overrides.clear()
+
+
+@pytest.fixture()
+def fast_worker(session_factory):
+    """A Worker tuned for fast, deterministic tests — short lease, tiny
+    heartbeat/work intervals, few iterations — bound to the shared temp DB."""
+    return Worker(
+        session_factory=session_factory,
+        poll_interval_seconds=0.02,
+        lease_seconds=2,
+        heartbeat_interval_seconds=0.05,
+        internal_test_work_seconds=0.02,
+        internal_test_iterations=2,
+    )
 
 
 # --- Minimal entity factories, shared across test modules -----------------

@@ -11,11 +11,22 @@ for "the endpoint works."
 from typing import NoReturn
 
 from fastapi import HTTPException
+from sqlalchemy.orm import sessionmaker
 
-from app.db.session import get_db
+from app.db.session import SessionLocal, get_db
 
-__all__ = ["get_db", "not_implemented"]
+__all__ = ["get_db", "get_session_factory", "not_implemented"]
 
 
 def not_implemented(detail: str = "Not implemented in MA0 — contract stub only.") -> NoReturn:
     raise HTTPException(status_code=501, detail=detail)
+
+
+def get_session_factory() -> sessionmaker:
+    """Overridable indirection for code (e.g. the SSE generator) that
+    can't use the per-request ``Depends(get_db)`` session because it
+    needs to open a fresh short-lived session on every poll iteration of
+    a long-lived streaming response. Tests override this the same way
+    they override ``get_db``, so the SSE stream reads from the same test
+    database as the rest of a request."""
+    return SessionLocal
