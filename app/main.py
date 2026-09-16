@@ -27,9 +27,11 @@ from app.api.routers import (
     usage,
     workflows,
 )
+from app.auth import ensure_local_auth_token
+from app.bootstrap import ensure_local_bootstrap
 from app.config import settings
 from app.db.lifecycle import get_current_revision, get_head_revision, is_schema_up_to_date
-from app.db.session import engine
+from app.db.session import SessionLocal, engine
 from app.errors import register_exception_handlers
 from app.logging_config import configure_logging
 
@@ -61,6 +63,23 @@ async def lifespan(app: FastAPI):
         )
     else:
         logger.info("schema_up_to_date revision=%s", get_head_revision())
+        # Local bootstrap identity (MA1B) — idempotent; needs the migrated
+        # schema to exist, so it only runs once the revision check above
+        # passes. A stale/unmigrated DB simply skips bootstrap rather than
+        # crashing startup — /ready already reports that state clearly.
+        db = SessionLocal()
+        try:
+            identities = ensure_local_bootstrap(db)
+            logger.info(
+                "local_bootstrap_ready org_id=%s user_id=%s project_id=%s",
+                identities.organization.id,
+                identities.user.id,
+                identities.project.id,
+            )
+        finally:
+            db.close()
+
+    ensure_local_auth_token()
 
     yield
 
@@ -71,12 +90,12 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Multi-Agent AI Platform / Agent Control Plane",
-    version="0.1.0-ma1",
+    version="0.1.0-ma1b",
     description=(
-        "Local-first Agent Control Plane. MA1: platform foundation (bootstrap, "
-        "worker, Flight Recorder, idempotency, audit, SSE, error/logging "
-        "contracts) — still no agent execution, no live model calls, no "
-        "deployment."
+        "Local-first Agent Control Plane. MA1B: local identity/access foundation "
+        "(bootstrap Organization/Owner/Project/Membership, local token auth, "
+        "project-scoped authorization) on top of MA1's platform foundation — "
+        "still no agent execution, no live model calls, no deployment."
     ),
     lifespan=lifespan,
 )
@@ -102,7 +121,7 @@ for router in (
 @app.get("/health", tags=["health"])
 def health() -> dict:
     """Liveness only — does not touch the database. See /ready for that."""
-    return {"status": "ok", "phase": "MA1"}
+    return {"status": "ok", "phase": "MA1B"}
 
 
 @app.get("/ready", tags=["health"])

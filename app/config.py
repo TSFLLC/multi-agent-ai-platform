@@ -35,6 +35,13 @@ class Settings(BaseSettings):
     logs_dir: Path = DATA_DIR / "logs"
     workspaces_dir: Path = DATA_DIR / "workspaces"
     backups_dir: Path = DATA_DIR / "backups"
+    # Local authentication boundary (MA1B) — a random per-install token,
+    # never a password/OAuth flow. Not a "secret" in the Section 20.1/20.2
+    # sense (no provider credential is derived from or grants access to
+    # it), so it deliberately does not go through secret_references — it
+    # is this local install's own front-door key, analogous to Jupyter's
+    # local token auth.
+    auth_token_path: Path = DATA_DIR / "local_auth_token"
 
     sqlite_busy_timeout_ms: int = 5000
 

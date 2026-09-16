@@ -8,6 +8,8 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db, not_implemented
+from app.authz import require_org_admin
+from app.models.identity import User
 from app.schemas.approvals import ApprovalRead, ApprovalResolveRequest
 from app.schemas.common import FingerprintMismatch
 from app.schemas.events import AuditEventRead
@@ -34,10 +36,14 @@ def resolve_approval(approval_id: str, body: ApprovalResolveRequest, db: Session
 
 
 @router.get("/audit-events", response_model=List[AuditEventRead])
-def list_audit_events(org_id: str = Query(...), db: Session = Depends(get_db)):
+def list_audit_events(
+    org_id: str = Query(...),
+    db: Session = Depends(get_db),
+    _caller: User = Depends(require_org_admin),
+):
     """Structurally separate from GET /events (Flight Recorder) — Section
-    20.5, 25.5. Should be Admin/Owner-only, RBAC-restricted; RBAC/auth
-    doesn't exist yet (deferred past MA1 per Owner instruction), so this
-    endpoint is unauthenticated for now. Do not treat it as
-    access-controlled until an auth phase lands."""
+    20.5, 25.5. Admin/Owner-only (MA1B): require_org_admin checks the
+    caller's own users.role AND that org_id matches the caller's own
+    org_id — an arbitrary/other org_id is rejected the same way an
+    unauthorized one is, never used to bypass authorization."""
     return AuditService(db).list_for_org(org_id=org_id)

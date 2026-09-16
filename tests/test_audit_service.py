@@ -46,13 +46,11 @@ def test_audit_writes_never_appear_as_flight_recorder_events(db):
     assert db.query(ExecutionEvent).count() == 1
 
 
-def test_audit_events_endpoint_is_wired(client, db):
-    org = make_org(db)
-    db.commit()
-    AuditService(db).record(org_id=org.id, event_type="login")
+def test_audit_events_endpoint_is_wired(client, db, auth_headers, bootstrap):
+    AuditService(db).record(org_id=bootstrap.organization.id, event_type="login")
     db.commit()
 
-    resp = client.get("/audit-events", params={"org_id": org.id})
+    resp = client.get("/audit-events", params={"org_id": bootstrap.organization.id}, headers=auth_headers)
     assert resp.status_code == 200
     body = resp.json()
     assert len(body) == 1

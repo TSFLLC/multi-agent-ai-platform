@@ -36,6 +36,23 @@ class NotFoundError(AppError):
     code = "not_found"
 
 
+class UnauthorizedError(AppError):
+    """No/invalid local auth token (MA1B) — the caller was never
+    identified at all."""
+
+    status_code = status.HTTP_401_UNAUTHORIZED
+    code = "unauthorized"
+
+
+class ForbiddenError(AppError):
+    """Identified, but not authorized for this project/action (MA1B) —
+    either no project_memberships row exists for this user+project, or
+    the existing role doesn't permit the requested action."""
+
+    status_code = status.HTTP_403_FORBIDDEN
+    code = "forbidden"
+
+
 class ConflictError(AppError):
     status_code = status.HTTP_409_CONFLICT
     code = "conflict"

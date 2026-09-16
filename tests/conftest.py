@@ -75,6 +75,36 @@ def client(session_factory):
 
 
 @pytest.fixture()
+def auth_token(tmp_path, monkeypatch):
+    """Points app.config.settings.auth_token_path at a temp file so each
+    test gets its own isolated local auth token, never the real
+    data/local_auth_token."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "auth_token_path", tmp_path / "local_auth_token")
+
+    from app.auth import ensure_local_auth_token
+
+    return ensure_local_auth_token()
+
+
+@pytest.fixture()
+def auth_headers(auth_token):
+    return {"Authorization": f"Bearer {auth_token}"}
+
+
+@pytest.fixture()
+def bootstrap(db):
+    """Runs the real idempotent bootstrap against the temp DB, committing
+    so it's visible to the client fixture's separate sessions too."""
+    from app.bootstrap import ensure_local_bootstrap
+
+    identities = ensure_local_bootstrap(db)
+    db.commit()
+    return identities
+
+
+@pytest.fixture()
 def fast_worker(session_factory):
     """A Worker tuned for fast, deterministic tests — short lease, tiny
     heartbeat/work intervals, few iterations — bound to the shared temp DB."""
