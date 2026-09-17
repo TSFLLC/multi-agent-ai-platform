@@ -21,6 +21,28 @@ export function formatCost(costAmount) {
   return `$${amount.toFixed(4)}`;
 }
 
+// Catalog-browsing price display (MA5-UI Post-UAT Enhancement 1B) --
+// distinct from formatCostForClassification/formatCost above, which
+// format an already-*incurred* execution cost. This formats the
+// registry's per-model *rate* (provider_models.cost_input_per_mtok /
+// cost_output_per_mtok) for browsing before anything has run. Never
+// calculates a price — only formats one the backend already supplied, or
+// says plainly that none is known.
+export function formatPricePerMillion(value) {
+  const n = toNumber(value);
+  if (n === null) return null;
+  return `$${n.toFixed(2)}`;
+}
+
+export function formatPriceSummary(classification, costInputPerMtok, costOutputPerMtok) {
+  const cls = (classification || "unknown").toLowerCase();
+  if (cls === "free") return "FREE — $0";
+  if (cls === "unknown") return "UNKNOWN";
+  const inStr = formatPricePerMillion(costInputPerMtok) || "—";
+  const outStr = formatPricePerMillion(costOutputPerMtok) || "—";
+  return `In: ${inStr}/1M · Out: ${outStr}/1M`;
+}
+
 export function pricingBadgeClass(classification) {
   const cls = (classification || "unknown").toLowerCase();
   if (cls === "free") return "badge badge-free";

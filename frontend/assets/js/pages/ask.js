@@ -8,20 +8,28 @@
 // driven and bounded (frontend/assets/js/modelFilter.js holds the pure,
 // unit-tested filtering/selection logic); a persistent Selected Models
 // section keeps a choice visible no matter what the active filter hides.
+//
+// MA5-UI Post-UAT Enhancement 1B: adds a Model Developer / Family filter
+// (frontend/assets/js/modelDeveloper.js) derived from the existing
+// canonical_model_id namespace — a purely presentational grouping, never
+// a new backend Provider (OpenRouter remains the one configured
+// Provider throughout).
 
 import { api } from "../api.js";
 import { el, mount, clear } from "../dom.js";
 import { getProjectId } from "../state.js";
 import { navigate } from "../router.js";
-import { pricingBadgeClass, pricingLabel, truncate } from "../format.js";
+import { formatPriceSummary, pricingBadgeClass, pricingLabel, truncate } from "../format.js";
 import {
   PRICING_FILTER_ALL,
   boundedResults,
   canRunComparison,
   filterModels,
   selectedModelsList,
+  toggleModelSelection,
   uniqueProviderIds,
 } from "../modelFilter.js";
+import { developerLabel, extractDeveloperKey, uniqueDevelopers } from "../modelDeveloper.js";
 
 const MAX_AUTO_FREE_SELECTIONS = 3;
 const DEFAULT_VISIBLE_COUNT = 24;
@@ -45,6 +53,7 @@ export async function renderAsk(root) {
     searchQuery: "",
     pricingFilter: "free", // Section: default the Ask Agents selector to FREE for local operation.
     providerFilter: "",
+    developerKeys: new Set(), // empty == "All" developers
     visibleCount: DEFAULT_VISIBLE_COUNT,
     submitting: false,
     error: null,
@@ -207,10 +216,13 @@ function buildModelSelectorCard(state) {
     el("div", { class: "row between" }, [el("label", { style: "margin:0" }, "Models (select 2 or more)"), countLabel])
   );
   card.appendChild(selectedSection);
-  card.appendChild(buildFilterBar(state, () => {
+  const onFilterChange = () => {
     state.visibleCount = DEFAULT_VISIBLE_COUNT;
     refreshResults();
-  }));
+  };
+  const developerFilter = buildDeveloperFilter(state, onFilterChange);
+  if (developerFilter) card.appendChild(developerFilter);
+  card.appendChild(buildFilterBar(state, onFilterChange));
   card.appendChild(resultsSection);
 
   refreshAll();
@@ -231,8 +243,8 @@ function buildSelectedModelsBlock(state, onChange) {
     { class: "chip-row" },
     selected.map((model) =>
       el("span", { class: "model-chip" }, [
+        el("span", { class: "chip-name" }, `${developerLabel(extractDeveloperKey(model))} · ${model.canonical_model_id}`),
         el("span", { class: pricingBadgeClass(model.pricing_classification) }, pricingLabel(model.pricing_classification)),
-        el("span", { class: "chip-name" }, model.canonical_model_id),
         el(
           "button",
           {
@@ -240,7 +252,7 @@ function buildSelectedModelsBlock(state, onChange) {
             "aria-label": `Remove ${model.canonical_model_id}`,
             onclick: () => {
               state.userTouchedModels = true;
-              state.selectedModelIds.delete(model.id);
+              state.selectedModelIds = toggleModelSelection(state.selectedModelIds, model.id);
               onChange();
             },
           },
@@ -249,6 +261,51 @@ function buildSelectedModelsBlock(state, onChange) {
       ])
     )
   );
+}
+
+function buildDeveloperFilter(state, onFilterChange) {
+  const developers = uniqueDevelopers(state.models);
+  if (developers.length <= 1) return null; // nothing meaningful to filter by
+
+  const allPill = el(
+    "button",
+    {
+      type: "button",
+      class: `filter-pill${state.developerKeys.size === 0 ? " active" : ""}`,
+      onclick: (e) => {
+        state.developerKeys = new Set();
+        e.currentTarget.parentElement.querySelectorAll(".filter-pill").forEach((btn) => btn.classList.remove("active"));
+        e.currentTarget.classList.add("active");
+        onFilterChange();
+      },
+    },
+    "All"
+  );
+
+  const devPills = developers.map(({ key, label, count }) =>
+    el(
+      "button",
+      {
+        type: "button",
+        class: `filter-pill${state.developerKeys.has(key) ? " active" : ""}`,
+        onclick: (e) => {
+          const next = new Set(state.developerKeys);
+          if (next.has(key)) next.delete(key);
+          else next.add(key);
+          state.developerKeys = next;
+          e.currentTarget.classList.toggle("active");
+          allPill.classList.toggle("active", state.developerKeys.size === 0);
+          onFilterChange();
+        },
+      },
+      `${label} (${count})`
+    )
+  );
+
+  return el("div", { class: "stack", style: "gap:6px; margin-bottom: 4px" }, [
+    el("label", { style: "margin:0" }, "Model Developers"),
+    el("div", { class: "filter-pills wrap" }, [allPill, ...devPills]),
+  ]);
 }
 
 function buildFilterBar(state, onFilterChange) {
@@ -315,6 +372,7 @@ function buildResultsBlock(state, refreshResults, refreshAll) {
     query: state.searchQuery,
     pricing: state.pricingFilter,
     providerId: state.providerFilter,
+    developerKeys: state.developerKeys,
   });
 
   if (!filtered.length) {
@@ -361,22 +419,32 @@ function buildModelOption(model, state, onToggle) {
     type: "checkbox",
     checked,
     disabled,
-    onchange: (e) => {
+    onchange: () => {
       state.userTouchedModels = true;
-      if (e.target.checked) state.selectedModelIds.add(model.id);
-      else state.selectedModelIds.delete(model.id);
+      state.selectedModelIds = toggleModelSelection(state.selectedModelIds, model.id);
       onToggle();
     },
   });
+
+  // Only a capability the registry reliably represents (Section 3:
+  // "useful capability indicators only when reliably represented") --
+  // never inferred from the model's name.
+  const toolCalling =
+    model.tool_calling_support && model.tool_calling_support !== "none" ? `tools: ${model.tool_calling_support}` : null;
 
   return el("label", { class: `model-option${checked ? " checked" : ""}${disabled ? " disabled" : ""}` }, [
     checkbox,
     el("div", {}, [
       el("div", { class: "model-name" }, model.canonical_model_id),
       el("div", { class: "model-meta" }, [
-        el("span", { class: pricingBadgeClass(model.pricing_classification) }, pricingLabel(model.pricing_classification)),
+        developerLabel(extractDeveloperKey(model)),
         model.context_window ? ` · ${model.context_window.toLocaleString("en-US")} ctx` : "",
+        toolCalling ? ` · ${toolCalling}` : "",
         disabled ? " · unavailable" : "",
+      ]),
+      el("div", { class: "model-meta" }, [
+        el("span", { class: pricingBadgeClass(model.pricing_classification) }, pricingLabel(model.pricing_classification)),
+        ` ${formatPriceSummary(model.pricing_classification, model.cost_input_per_mtok, model.cost_output_per_mtok)}`,
       ]),
     ]),
   ]);

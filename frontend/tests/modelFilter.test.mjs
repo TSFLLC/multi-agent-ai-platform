@@ -8,6 +8,7 @@ import {
   selectedModelsList,
   boundedResults,
   canRunComparison,
+  toggleModelSelection,
 } from "../assets/js/modelFilter.js";
 
 const MODELS = [
@@ -107,4 +108,92 @@ test("canRunComparison requires a question, an agent, and at least 2 selected mo
 
 test("canRunComparison imposes no artificial maximum", () => {
   assert.equal(canRunComparison({ question: "Hi", agentId: "a1", selectedCount: 50 }), true);
+});
+
+// -- Developer / Family filter (MA5-UI Post-UAT Enhancement 1B) -------------
+
+const DEVELOPER_MODELS = [
+  { id: "pm-g1", model_id: "m-g1", provider_id: "prov-a", canonical_model_id: "google/gemini-2.5-flash", pricing_classification: "free" },
+  { id: "pm-g2", model_id: "m-g2", provider_id: "prov-a", canonical_model_id: "google/gemma-4-26b", pricing_classification: "paid" },
+  { id: "pm-d1", model_id: "m-d1", provider_id: "prov-a", canonical_model_id: "deepseek/deepseek-v3-flash", pricing_classification: "free" },
+  { id: "pm-d2", model_id: "m-d2", provider_id: "prov-a", canonical_model_id: "deepseek/deepseek-pro", pricing_classification: "paid" },
+  { id: "pm-n1", model_id: "m-n1", provider_id: "prov-a", canonical_model_id: "nex-agi/nex-n2.5-mini", pricing_classification: "free" },
+  { id: "pm-a1", model_id: "m-a1", provider_id: "prov-a", canonical_model_id: "anthropic/claude-fable", pricing_classification: "paid" },
+];
+
+test("developer filter with a single key isolates exactly that developer (DeepSeek)", () => {
+  const result = filterModels(DEVELOPER_MODELS, { developerKeys: new Set(["deepseek"]) });
+  assert.deepEqual(result.map((m) => m.id).sort(), ["pm-d1", "pm-d2"]);
+});
+
+test("developer filter with a single key isolates exactly that developer (Google)", () => {
+  const result = filterModels(DEVELOPER_MODELS, { developerKeys: new Set(["google"]) });
+  assert.deepEqual(result.map((m) => m.id).sort(), ["pm-g1", "pm-g2"]);
+});
+
+test("multi-developer filter (Google + DeepSeek + Nex AGI) includes only those groups", () => {
+  const result = filterModels(DEVELOPER_MODELS, { developerKeys: new Set(["google", "deepseek", "nex-agi"]) });
+  assert.deepEqual(result.map((m) => m.id).sort(), ["pm-d1", "pm-d2", "pm-g1", "pm-g2", "pm-n1"]);
+  assert.ok(!result.some((m) => m.id === "pm-a1"), "Anthropic must not leak in when it wasn't selected");
+});
+
+test("an empty/null developerKeys means 'All' -- no developer filtering applied", () => {
+  assert.equal(filterModels(DEVELOPER_MODELS, { developerKeys: new Set() }).length, DEVELOPER_MODELS.length);
+  assert.equal(filterModels(DEVELOPER_MODELS, { developerKeys: null }).length, DEVELOPER_MODELS.length);
+});
+
+test("developer + pricing + search combine with AND semantics", () => {
+  // Developer=DeepSeek AND Pricing=FREE AND search='flash' -> exactly the one matching model.
+  const result = filterModels(DEVELOPER_MODELS, {
+    developerKeys: new Set(["deepseek"]),
+    pricing: "free",
+    query: "flash",
+  });
+  assert.deepEqual(result.map((m) => m.id), ["pm-d1"]);
+});
+
+test("developer + pricing AND semantics excludes a same-developer PAID model when filtering FREE", () => {
+  const result = filterModels(DEVELOPER_MODELS, { developerKeys: new Set(["deepseek"]), pricing: "free" });
+  assert.deepEqual(result.map((m) => m.id), ["pm-d1"]);
+});
+
+test("selected models across different developers all persist through a developer filter change", () => {
+  const selected = new Set(["pm-g1", "pm-d1", "pm-n1"]);
+  // Switching the developer filter to just 'anthropic' would hide all three
+  // from the results view, but selection itself must never depend on it.
+  const filteredView = filterModels(DEVELOPER_MODELS, { developerKeys: new Set(["anthropic"]) });
+  assert.equal(filteredView.some((m) => selected.has(m.id)), false);
+  assert.deepEqual(
+    selectedModelsList(DEVELOPER_MODELS, selected)
+      .map((m) => m.id)
+      .sort(),
+    ["pm-d1", "pm-g1", "pm-n1"]
+  );
+});
+
+// -- Selection toggling: duplicate prevention + removal ----------------------
+
+test("toggleModelSelection adds a model that isn't selected yet", () => {
+  const next = toggleModelSelection(new Set(), "pm-g1");
+  assert.deepEqual([...next], ["pm-g1"]);
+});
+
+test("toggleModelSelection removes a model that is already selected (no duplicates possible)", () => {
+  const selected = new Set(["pm-g1", "pm-d1"]);
+  const next = toggleModelSelection(selected, "pm-g1");
+  assert.deepEqual([...next].sort(), ["pm-d1"]);
+});
+
+test("toggling the same model id twice returns to the original selection (never duplicates)", () => {
+  let selected = new Set(["pm-g1"]);
+  selected = toggleModelSelection(selected, "pm-d1");
+  selected = toggleModelSelection(selected, "pm-d1");
+  assert.deepEqual([...selected], ["pm-g1"]);
+  assert.equal(selected.size, 1);
+});
+
+test("toggleModelSelection never mutates the Set it was given", () => {
+  const original = new Set(["pm-g1"]);
+  toggleModelSelection(original, "pm-d1");
+  assert.deepEqual([...original], ["pm-g1"]);
 });
