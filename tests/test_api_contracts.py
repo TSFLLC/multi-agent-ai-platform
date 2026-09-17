@@ -20,6 +20,8 @@ EXPECTED_PATHS = [
     "/router/simulate",
     "/tasks",
     "/tasks/{task_id}/runs",
+    "/tasks/{task_id}/runs/reviewed",
+    "/tasks/{task_id}/runs/{run_id}/review",
     "/tasks/{task_id}/runs/{run_id}/cancel",
     "/tasks/{task_id}/runs/{run_id}/events",
     "/tasks/{task_id}/runs/{run_id}/stream",
@@ -46,7 +48,7 @@ EXPECTED_PATHS = [
 def test_health_endpoint_works():
     resp = client.get("/health")
     assert resp.status_code == 200
-    assert resp.json()["phase"] == "MA3"
+    assert resp.json()["phase"] == "MA4"
 
 
 def test_openapi_schema_generates():

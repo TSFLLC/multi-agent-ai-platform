@@ -3,7 +3,7 @@ from typing import Optional
 
 from pydantic import BaseModel
 
-from app.db.enums import AgentRunStatus, ExecutionMode, TaskRunStatus, TaskStatus
+from app.db.enums import AgentRunRole, AgentRunStatus, ExecutionMode, TaskRunStatus, TaskStatus
 
 
 class TaskCreate(BaseModel):
@@ -36,6 +36,7 @@ class TaskRunRead(BaseModel):
     task_id: str
     status: TaskRunStatus
     config_snapshot: Optional[dict] = None
+    final_artifact_id: Optional[str] = None
     created_at: datetime
     started_at: Optional[datetime] = None
     ended_at: Optional[datetime] = None
@@ -47,6 +48,7 @@ class AgentRunRead(BaseModel):
     task_run_id: str
     agent_version_id: str
     status: AgentRunStatus
+    role: Optional[AgentRunRole] = None
     model_id: Optional[str] = None
     provider_id: Optional[str] = None
     provider_model_snapshot_id: Optional[str] = None

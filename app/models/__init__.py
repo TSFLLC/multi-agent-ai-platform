@@ -12,6 +12,7 @@ from app.models import (
     identity,
     observability,
     providers,
+    reviews,
     tasks,
     workflow,
 )
@@ -24,6 +25,7 @@ __all__ = [
     "identity",
     "observability",
     "providers",
+    "reviews",
     "tasks",
     "workflow",
 ]

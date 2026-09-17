@@ -32,8 +32,19 @@ class PromptAssembly:
 
 
 def build_prompt(
-    *, agent_version: AgentVersion, prompt_version: Optional[PromptVersion], task: Task
+    *,
+    agent_version: AgentVersion,
+    prompt_version: Optional[PromptVersion],
+    task: Task,
+    extra_context: Optional[str] = None,
 ) -> PromptAssembly:
+    """``extra_context`` (MA4) is an opaque, already-rendered text block
+    appended after the Task-derived user prompt — e.g. a candidate
+    artifact + review instructions for a REVIEWER run, or a previous
+    candidate + reviewer issues + repair instructions for a REPAIR run
+    (see ``app.review_contract``). Defaults to ``None`` so a plain
+    SINGLE_AGENT run's prompt/``content_hash`` is byte-for-byte identical
+    to MA3's, unchanged."""
     system_prompt = prompt_version.content if prompt_version else None
 
     user_parts = [task.title]
@@ -41,6 +52,8 @@ def build_prompt(
         user_parts.append(task.description)
     if task.requirements:
         user_parts.append(json.dumps(task.requirements, sort_keys=True, default=str))
+    if extra_context:
+        user_parts.append(extra_context)
     user_prompt = "\n\n".join(user_parts)
 
     combined = f"{system_prompt or ''}\n---\n{user_prompt}"

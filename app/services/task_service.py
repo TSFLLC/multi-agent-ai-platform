@@ -16,7 +16,9 @@ from sqlalchemy import select
 
 from app.config import settings
 from app.db.enums import (
+    AgentRunRole,
     AgentRunStatus,
+    ExecutionMode,
     JobType,
     TaskRunStatus,
     TaskStatus,
@@ -141,6 +143,120 @@ class TaskService(BaseService):
         )
 
         return task_run
+
+    def start_reviewed_task_run(
+        self,
+        *,
+        task_id: str,
+        primary_agent_version_id: str,
+        reviewer_agent_version_id: str,
+        max_repair_iterations: Optional[int] = None,
+        review_instructions: Optional[str] = None,
+        budget_id: Optional[str] = None,
+    ) -> TaskRun:
+        """MA4: launches a BUILD_REVIEW Task Run. Creates only the
+        *primary* Agent Run/job here, exactly like start_task_run does for
+        SINGLE_AGENT -- the reviewer/repair Agent Runs are created later by
+        app.services.review_orchestration_service as each stage completes,
+        never all up front (a repair Agent Run that might never be needed
+        must not exist as a real row before the reviewer actually asks
+        for one).
+
+        Both primary and reviewer are referenced purely by Agent Version
+        id/configuration here, never by name -- this method has no
+        knowledge of which Agents they are (Section: "do not hard-code
+        Agent names into orchestration logic")."""
+        task = self.get_task(task_id)
+        if task.execution_mode != ExecutionMode.BUILD_REVIEW:
+            raise ConflictError(
+                f"Task {task_id} has execution_mode={task.execution_mode.value!r}, "
+                "not build_review -- cannot start a reviewed Task Run for it."
+            )
+
+        primary_agent_version = self._get_published_agent_version(primary_agent_version_id)
+        reviewer_agent_version = self._get_published_agent_version(reviewer_agent_version_id)
+
+        repair_limit = (
+            max_repair_iterations
+            if max_repair_iterations is not None
+            else settings.default_max_repair_iterations
+        )
+        if repair_limit < 0:
+            raise ConflictError("max_repair_iterations must be zero or greater.")
+
+        config_snapshot = {
+            "task_title": task.title,
+            "task_description": task.description,
+            "execution_mode": task.execution_mode.value,
+            "primary_agent_version_id": primary_agent_version.id,
+            "primary_agent_version_number": primary_agent_version.version,
+            "reviewer_agent_version_id": reviewer_agent_version.id,
+            "reviewer_agent_version_number": reviewer_agent_version.version,
+            "max_repair_iterations": repair_limit,
+            "review_instructions": review_instructions,
+            "budget_id": budget_id,
+        }
+
+        task_run = TaskRun(
+            task_id=task.id,
+            status=TaskRunStatus.CREATED,
+            budget_id=budget_id,
+            config_snapshot=config_snapshot,
+            timeout_seconds=settings.default_task_run_timeout_seconds,
+        )
+        self.db.add(task_run)
+        self.db.flush()
+
+        primary_run = AgentRun(
+            task_run_id=task_run.id,
+            agent_version_id=primary_agent_version.id,
+            role=AgentRunRole.PRIMARY,
+            status=AgentRunStatus.CREATED,
+            timeout_seconds=(
+                primary_agent_version.timeout_seconds or settings.default_agent_run_timeout_seconds
+            ),
+        )
+        self.db.add(primary_run)
+        self.db.flush()
+
+        self._recorder.record(
+            task_id=task.id,
+            task_run_id=task_run.id,
+            agent_run_id=primary_run.id,
+            agent_id=primary_agent_version.agent_id,
+            agent_version_id=primary_agent_version.id,
+            event_type="task_run.created",
+            decision_summary=(
+                f"reviewed task_run created for task {task.id}: primary={primary_agent_version.id} "
+                f"reviewer={reviewer_agent_version.id} max_repair_iterations={repair_limit}"
+            ),
+        )
+
+        task_run.status = TaskRunStatus.QUEUED
+        self.db.commit()
+        self.db.refresh(task_run)
+
+        self._jobs.enqueue(self.db, job_type=JobType.AGENT_RUN, payload_ref=primary_run.id)
+        self._recorder.record(
+            task_id=task.id,
+            task_run_id=task_run.id,
+            agent_run_id=primary_run.id,
+            event_type="task_run.queued",
+            decision_summary="primary agent_run job enqueued for worker pickup",
+        )
+
+        return task_run
+
+    def _get_published_agent_version(self, agent_version_id: str) -> AgentVersion:
+        agent_version = self.db.get(AgentVersion, agent_version_id)
+        if agent_version is None:
+            raise NotFoundError(f"Agent Version {agent_version_id} not found.")
+        if agent_version.status != VersionStatus.ACTIVE:
+            raise ConflictError(
+                f"Agent Version {agent_version_id} is not published (status="
+                f"{agent_version.status.value!r}) and cannot be run."
+            )
+        return agent_version
 
     def get_task_run(self, task_run_id: str) -> TaskRun:
         task_run = self.db.get(TaskRun, task_run_id)

@@ -316,6 +316,31 @@ class UsageSourceType(str, enum.Enum):
     TOOL_CALL = "tool_call"
 
 
+# --- Agent-to-Agent Review (Section: MA4 review contract) -------------------
+
+
+class AgentRunRole(str, enum.Enum):
+    """Tags an ``agent_runs`` row's place in a BUILD_REVIEW execution
+    cycle. NULL/unset for a plain SINGLE_AGENT run (Agent Run predates
+    MA4 or is not part of any review cycle) — this column is purely
+    additive and never required by MA0-MA3 code paths."""
+
+    PRIMARY = "primary"
+    REVIEWER = "reviewer"
+    REPAIR = "repair"
+
+
+class ReviewDecision(str, enum.Enum):
+    """Minimum decision set (MA4 — MA6 owns the real Evaluation Engine,
+    no scoring/ranking here). INVALID is a fail-safe sentinel for a
+    reviewer response the platform could not parse/validate — never
+    inferred as ACCEPT."""
+
+    ACCEPT = "accept"
+    REPAIR_REQUIRED = "repair_required"
+    INVALID = "invalid"
+
+
 # --- Artifacts / Evaluation / Comparison (Section 17, 18) -------------------
 
 

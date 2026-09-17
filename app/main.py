@@ -105,14 +105,16 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Multi-Agent AI Platform / Agent Control Plane",
-    version="0.1.0-ma2",
+    version="0.1.0-ma4",
     description=(
-        "Local-first Agent Control Plane. MA2: Agent + Model Registry — real "
-        "Agent/AgentVersion/PromptVersion lifecycle, OpenRouter catalog "
-        "discovery behind the generic Provider Adapter interface, "
-        "FREE/PAID/UNKNOWN pricing classification, local OS-keychain secret "
-        "storage — still no agent execution, no live model invocation, no "
-        "deployment."
+        "Local-first Agent Control Plane. MA4: Agent-to-Agent Review — a "
+        "primary Agent's candidate artifact is reviewed by an independently "
+        "versioned/modeled reviewer Agent (structured ACCEPT/REPAIR_REQUIRED "
+        "decisions, bounded repair loop), built on MA3's real single-Agent "
+        "execution engine (queue/worker, provider invocation, budget "
+        "governor, Flight Recorder, cancellation/recovery/fencing) and "
+        "MA2's Agent + Model Registry — still no parallel comparison, "
+        "evaluation/judge engine, workflow/DAG engine, or tool execution."
     ),
     lifespan=lifespan,
 )
@@ -138,7 +140,7 @@ for router in (
 @app.get("/health", tags=["health"])
 def health() -> dict:
     """Liveness only — does not touch the database. See /ready for that."""
-    return {"status": "ok", "phase": "MA3"}
+    return {"status": "ok", "phase": "MA4"}
 
 
 @app.get("/ready", tags=["health"])

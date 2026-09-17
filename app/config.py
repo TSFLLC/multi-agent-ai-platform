@@ -80,6 +80,13 @@ class Settings(BaseSettings):
     # this model free" — only to size a reservation.
     unknown_pricing_reserve_amount: str = "1.00"
 
+    # Agent-to-Agent Review (MA4) — Owner-frozen default: a review cycle
+    # repairs at most this many times before the Task Run terminates
+    # without a reviewer-approved result (never silently marked accepted).
+    # Overridable per Task Run (task_runs.config_snapshot.max_repair_iterations),
+    # this is only the default new reviewed Task Runs are created with.
+    default_max_repair_iterations: int = 2
+
     @field_validator("log_level")
     @classmethod
     def _validate_log_level(cls, v: str) -> str:

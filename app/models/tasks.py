@@ -13,7 +13,14 @@ from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, UniqueConstr
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
-from app.db.enums import AgentRunAttemptStatus, AgentRunStatus, ExecutionMode, TaskRunStatus, TaskStatus
+from app.db.enums import (
+    AgentRunAttemptStatus,
+    AgentRunRole,
+    AgentRunStatus,
+    ExecutionMode,
+    TaskRunStatus,
+    TaskStatus,
+)
 from app.db.mixins import CreatedAtMixin, UUIDPrimaryKeyMixin, utcnow
 from app.db.types import sa_enum
 
@@ -54,8 +61,28 @@ class TaskRun(UUIDPrimaryKeyMixin, Base):
     budget_id: Mapped[Optional[str]] = mapped_column(ForeignKey("budgets.id"), nullable=True)
     # Section 24.4 #9 — point-in-time copy of the Task's requirements,
     # execution mode, agent/model selection, tool grants, budget refs, and
-    # approval rules as they were when this run started.
+    # approval rules as they were when this run started. A BUILD_REVIEW
+    # run's primary_agent_version_id/reviewer_agent_version_id/
+    # max_repair_iterations (MA4) live here too — no new columns needed
+    # for what is already, by contract, a point-in-time run configuration.
     config_snapshot: Mapped[Optional[dict]] = mapped_column("config_snapshot_json", nullable=True)
+    # MA4: set exactly once, only when a reviewer ACCEPTs a candidate
+    # (app.services.review_orchestration_service) — never guessed, never
+    # set on repair-limit exhaustion/failure/cancellation, so "is there an
+    # approved result" is always a plain NULL check, never inferred from
+    # TaskRunStatus alone.
+    # use_alter=True: artifacts.agent_run_id -> agent_runs.id and
+    # agent_runs.task_run_id -> task_runs.id already exist, so this column
+    # would close a 3-table cycle (task_runs -> artifacts -> agent_runs ->
+    # task_runs) without it — same reasoning as AgentRun.repair_of_review_id.
+    final_artifact_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey(
+            "artifacts.id",
+            use_alter=True,
+            name="fk_task_runs_final_artifact_id_artifacts",
+        ),
+        nullable=True,
+    )
 
     timeout_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=90 * 60)
 
@@ -105,6 +132,35 @@ class AgentRun(UUIDPrimaryKeyMixin, Base):
         nullable=False,
         default=AgentRunStatus.CREATED,
     )
+    # MA4: which stage of a BUILD_REVIEW execution cycle this run is
+    # (PRIMARY/REVIEWER/REPAIR) — NULL for a plain SINGLE_AGENT run
+    # (unset, never applicable pre-MA4).
+    role: Mapped[Optional[AgentRunRole]] = mapped_column(sa_enum(AgentRunRole), nullable=True)
+    # MA4: for a REPAIR run only — the REPAIR_REQUIRED review that caused
+    # it, completing the candidate -> review -> repair -> next candidate
+    # lineage without duplicating that review's content here.
+    # agent_reviews.candidate_agent_run_id/reviewer_agent_run_id already
+    # point *at* agent_runs, so this column pointing back would form a
+    # genuine table-creation cycle without use_alter=True (Alembic/
+    # create_all emit it as a separate ALTER TABLE after both tables
+    # exist) — same category of ordering issue Provider/SecretReference's
+    # docstring (app.models.providers.Provider) already calls out.
+    repair_of_review_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey(
+            "agent_reviews.id",
+            ondelete="SET NULL",
+            use_alter=True,
+            name="fk_agent_runs_repair_of_review_id_agent_reviews",
+        ),
+        nullable=True,
+    )
+    # MA4: deterministic pointers (never full content) a REVIEWER/REPAIR
+    # run's prompt is built from (app.prompt_builder's extra_context) — so
+    # a worker that reclaims this run's job after a crash reconstructs the
+    # exact same prompt from durable DB state alone, the same guarantee
+    # MA3 already gives a plain SINGLE_AGENT run. NULL/unused for
+    # SINGLE_AGENT and PRIMARY runs.
+    input_context_json: Mapped[Optional[dict]] = mapped_column(nullable=True)
     sandbox_ref: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
 
     timeout_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=30 * 60)

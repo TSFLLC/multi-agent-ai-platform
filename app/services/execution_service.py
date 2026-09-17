@@ -24,6 +24,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
+from pathlib import Path
 from typing import Optional
 
 from sqlalchemy.orm import Session
@@ -33,6 +34,7 @@ from app.db.enums import (
     AgentRunAttemptStatus,
     AgentRunStatus,
     ArtifactType,
+    ExecutionMode,
     ModelCallStatus,
     ModelSelectionMode,
     PricingClassification,
@@ -63,8 +65,10 @@ from app.providers.base import (
     ProviderTimeoutError,
 )
 from app.providers.factory import build_provider_adapter
+from app.review_contract import build_repair_extra_context, build_reviewer_extra_context
 from app.services.budget_service import BudgetExceededError, BudgetGovernor, estimate_cost
 from app.services.flight_recorder import FlightRecorderService
+from app.services.review_orchestration_service import ReviewOrchestrationService
 
 logger = logging.getLogger("app.services.execution_service")
 
@@ -259,8 +263,18 @@ class AgentExecutionService:
             raise ExecutionAborted("cancelled after budget reservation")
 
         # 3. Prompt assembly --------------------------------------------------
+        try:
+            extra_context = self._build_extra_context(agent_run)
+        except _MissingReviewContext as exc:
+            self.governor.release(reservation)
+            self._finalize_failed(ctx, category="review_context_error", message=str(exc), attempt=attempt)
+            raise ExecutionAborted(str(exc)) from exc
+
         assembly = build_prompt(
-            agent_version=ctx.agent_version, prompt_version=ctx.prompt_version, task=ctx.task
+            agent_version=ctx.agent_version,
+            prompt_version=ctx.prompt_version,
+            task=ctx.task,
+            extra_context=extra_context,
         )
         self._event(
             ctx,
@@ -386,6 +400,14 @@ class AgentExecutionService:
         self.db.commit()
         self._event(ctx, "agent_run.completed", decision_summary="agent run completed successfully")
 
+        if ctx.task.execution_mode == ExecutionMode.BUILD_REVIEW:
+            # MA4: this Agent Run was one stage (primary/reviewer/repair)
+            # of a review cycle -- what happens to the Task Run next
+            # depends on that cycle's state, not on "one Agent Run means
+            # the Task Run is done" (true only for SINGLE_AGENT, below).
+            ReviewOrchestrationService(self.db).on_agent_run_succeeded(ctx, agent_run, artifact)
+            return
+
         task_run.status = TaskRunStatus.VERIFYING
         self.db.commit()
         self._event(ctx, "task_run.verifying", decision_summary="no objective evaluation configured (MA3)")
@@ -412,6 +434,50 @@ class AgentExecutionService:
         if not auto_policy_value:
             raise ModelUnavailableError("Agent Version model_policy is auto but has no auto_policy.")
         return resolve_auto(self.db, RouterFreePolicy(auto_policy_value))
+
+    # -- extra prompt context (MA4 reviewer/repair runs only) --------------
+
+    def _build_extra_context(self, agent_run: AgentRun) -> Optional[str]:
+        """Resolves ``agent_run.input_context_json`` (set only for
+        REVIEWER/REPAIR Agent Runs by ReviewOrchestrationService) into the
+        rendered text block ``build_prompt`` appends to the user prompt.
+        Stores only durable pointers (artifact ids/hashes), never full
+        content, so a worker that reclaims this job after a crash
+        reconstructs the exact same prompt from DB state alone -- the same
+        guarantee MA3 already gives a plain SINGLE_AGENT run."""
+        input_context = agent_run.input_context_json
+        if not input_context:
+            return None
+
+        kind = input_context.get("kind")
+        if kind == "review_request":
+            artifact_id = input_context.get("candidate_artifact_id")
+            candidate_artifact = self.db.get(Artifact, artifact_id) if artifact_id else None
+            if candidate_artifact is None:
+                raise _MissingReviewContext(f"Candidate artifact {artifact_id} for review no longer exists.")
+            candidate_text = Path(candidate_artifact.storage_ref).read_text(encoding="utf-8")
+            return build_reviewer_extra_context(
+                candidate_text=candidate_text,
+                candidate_artifact_id=candidate_artifact.id,
+                candidate_artifact_hash=candidate_artifact.content_hash or "",
+                review_instructions=input_context.get("review_instructions"),
+            )
+
+        if kind == "repair_request":
+            artifact_id = input_context.get("previous_artifact_id")
+            previous_artifact = self.db.get(Artifact, artifact_id) if artifact_id else None
+            if previous_artifact is None:
+                raise _MissingReviewContext(
+                    f"Previous candidate artifact {artifact_id} for repair no longer exists."
+                )
+            previous_text = Path(previous_artifact.storage_ref).read_text(encoding="utf-8")
+            return build_repair_extra_context(
+                previous_candidate_text=previous_text,
+                issues=input_context.get("issues") or [],
+                repair_instructions=input_context.get("repair_instructions"),
+            )
+
+        return None
 
     # -- provider invocation -------------------------------------------------
 
@@ -565,3 +631,11 @@ class _RetryableFailure(Exception):
         self.category = category
         self.message = message
         super().__init__(message)
+
+
+class _MissingReviewContext(Exception):
+    """MA4: a REVIEWER/REPAIR run's input_context_json points at an
+    artifact that no longer exists -- should never happen (artifacts are
+    immutable and never deleted while their owning Agent Run exists), but
+    handled as a proper categorized failure rather than an unhandled I/O
+    error, consistent with every other failure category in this module."""

@@ -25,6 +25,12 @@ from app.models.identity import User
 from app.models.tasks import AgentRun, AgentRunAttempt, Task, TaskRun
 from app.schemas.artifacts import ArtifactRead
 from app.schemas.events import ExecutionEventRead
+from app.schemas.reviews import (
+    AgentReviewRead,
+    ReviewedTaskRunCreate,
+    ReviewedTaskRunSummary,
+    TaskRunUsageTotal,
+)
 from app.schemas.tasks import (
     AgentRunAttemptRead,
     AgentRunRead,
@@ -36,6 +42,7 @@ from app.schemas.tasks import (
 from app.schemas.usage import ModelCallRead
 from app.services.flight_recorder import FlightRecorderService
 from app.services.idempotency_service import BeginOutcome, IdempotencyService
+from app.services.review_orchestration_service import get_review_summary
 from app.services.task_service import TaskService
 from app.sse import stream_task_run_events as _sse_stream
 
@@ -164,6 +171,83 @@ def start_task_run(
     except Exception:
         idempotency.fail(key)
         raise
+
+
+@router.post("/tasks/{task_id}/runs/reviewed", response_model=TaskRunRead, status_code=201)
+def start_reviewed_task_run(
+    task_id: str,
+    body: ReviewedTaskRunCreate,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+    idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
+):
+    """MA4: launches a BUILD_REVIEW Task Run (primary Agent -> reviewer
+    Agent -> optional bounded repair). Primary/reviewer are independent
+    Agent Versions and may use independent models -- Agent != Model."""
+    task = _get_task_or_404(db, task_id)
+    _require_task_access(db, user, task, ProjectAction.MODIFY)
+
+    key = idempotency_key or f"auto:{uuid.uuid4()}"
+    idempotency = IdempotencyService(db)
+    begin = idempotency.begin(key, scope=IdempotencyScope.API_REQUEST, resource_type="task_run")
+    if begin.outcome == BeginOutcome.ALREADY_COMPLETED:
+        run_id = (begin.key_row.result_ref or {}).get("task_run_id")
+        if run_id is None:
+            raise NotFoundError(f"Idempotency key {key!r} completed with no recorded task_run_id.")
+        return _get_task_run_or_404(db, task_id, run_id)
+
+    try:
+        task_run = TaskService(db).start_reviewed_task_run(
+            task_id=task_id,
+            primary_agent_version_id=body.primary_agent_version_id,
+            reviewer_agent_version_id=body.reviewer_agent_version_id,
+            max_repair_iterations=body.max_repair_iterations,
+            review_instructions=body.review_instructions,
+            budget_id=body.budget_id,
+        )
+        idempotency.complete(key, result_ref={"task_run_id": task_run.id})
+        return task_run
+    except Exception:
+        idempotency.fail(key)
+        raise
+
+
+@router.get("/tasks/{task_id}/runs/{run_id}/review", response_model=ReviewedTaskRunSummary)
+def get_task_run_review_summary(
+    task_id: str, run_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)
+):
+    """MA4: one consolidated view of a BUILD_REVIEW Task Run -- its
+    configuration, every Agent Run it produced (tagged primary/reviewer/
+    repair), every candidate artifact and structured review, the final
+    (accepted) artifact if any, and aggregate usage/cost across the whole
+    cycle. Returns 404 for a Task Run that was never run in review mode
+    (no config_snapshot review fields) exactly as it would for a missing
+    Task Run -- there is nothing review-shaped to summarize either way."""
+    task = _get_task_or_404(db, task_id)
+    _require_task_access(db, user, task, ProjectAction.READ)
+    task_run = _get_task_run_or_404(db, task_id, run_id)
+
+    summary = get_review_summary(db, run_id)
+    if summary is None or "primary_agent_version_id" not in (task_run.config_snapshot or {}):
+        raise NotFoundError(f"Task Run {run_id} is not a reviewed (build_review) Task Run.")
+
+    return ReviewedTaskRunSummary(
+        task_run_id=summary.task_run.id,
+        status=summary.task_run.status.value,
+        outcome=summary.outcome,
+        primary_agent_version_id=summary.primary_agent_version_id,
+        reviewer_agent_version_id=summary.reviewer_agent_version_id,
+        max_repair_iterations=summary.max_repair_iterations,
+        agent_runs=[AgentRunRead.model_validate(r, from_attributes=True) for r in summary.agent_runs],
+        reviews=[AgentReviewRead.model_validate(r, from_attributes=True) for r in summary.reviews],
+        final_artifact=(
+            ArtifactRead.model_validate(summary.final_artifact, from_attributes=True)
+            if summary.final_artifact is not None
+            else None
+        ),
+        usage=[TaskRunUsageTotal.model_validate(u, from_attributes=True) for u in summary.usage],
+        total_cost=summary.total_cost,
+    )
 
 
 @router.get("/tasks/{task_id}/runs", response_model=List[TaskRunRead])

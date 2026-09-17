@@ -81,6 +81,41 @@ def test_stream_terminates_when_no_events_and_max_empty_polls_set(db, session_fa
     assert chunks == []
 
 
+def test_stream_resumes_mid_review_cycle(db, session_factory):
+    """SSE resume needs no MA4-specific change: a review cycle's events
+    (review.queued, review.decision_*, repair.queued, ...) are ordinary
+    execution_events rows like any MA3 event, ordered the same way."""
+    task = make_task(db)
+    run = make_task_run(db, task=task)
+    recorder = FlightRecorderService(db)
+    review_cycle_events = [
+        "agent_run.completed",
+        "review.queued",
+        "agent_run.completed",
+        "review.decision_repair_required",
+        "repair.queued",
+    ]
+    for event_type in review_cycle_events:
+        recorder.record(task_id=task.id, task_run_id=run.id, event_type=event_type)
+
+    async def collect():
+        chunks = []
+        async for chunk in sse_module.stream_task_run_events(
+            run.id,
+            last_event_id=2,
+            poll_interval_seconds=0.01,
+            max_empty_polls=1,
+            session_factory=session_factory,
+        ):
+            chunks.append(chunk)
+        return chunks
+
+    chunks = _run(collect)
+    assert len(chunks) == 3  # everything strictly after sequence_number=2
+    assert "event: review.decision_repair_required" in chunks[1]
+    assert "event: repair.queued" in chunks[2]
+
+
 def test_stream_endpoint_is_wired_and_returns_event_stream_media_type(db, session_factory, bootstrap):
     """Calls the route function directly rather than over a live HTTP
     connection: the real endpoint's generator polls forever by design
