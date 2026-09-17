@@ -245,6 +245,7 @@ class ModelRegistryService:
                 continue
             entries.append(
                 {
+                    "id": provider_model.id,
                     "model_id": model.id,
                     "canonical_model_id": model.canonical_model_id,
                     "provider_id": provider_model.provider_id,

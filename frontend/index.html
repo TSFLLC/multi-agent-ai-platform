@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Local Operator Console — Multi-Agent AI Platform</title>
+  <link rel="icon" href="data:," />
+  <link rel="stylesheet" href="/assets/css/app.css" />
+</head>
+<body>
+  <script>
+    // Injected server-side (app.web.serve_console) from the same local
+    // MA1B token every API endpoint already validates — never hard-coded,
+    // never shown as visible text, never written to localStorage.
+    window.__MAP_LOCAL_TOKEN__ = "%%MAP_LOCAL_TOKEN_VALUE%%";
+  </script>
+
+  <div id="app-shell">
+    <nav id="app-nav" aria-label="Primary">
+      <div class="brand">Operator Console</div>
+      <a href="#/ask" data-route="ask">Ask Agents</a>
+      <a href="#/comparisons" data-route="comparisons">Comparisons</a>
+      <a href="#/agents" data-route="agents">Agents</a>
+      <a href="#/models" data-route="models">Models</a>
+      <a href="#/activity" data-route="activity">Activity</a>
+    </nav>
+    <main id="app-root" aria-live="polite"></main>
+  </div>
+
+  <script type="module" src="/assets/js/main.js"></script>
+</body>
+</html>

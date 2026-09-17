@@ -310,6 +310,53 @@ def test_select_winner_rejected_while_still_running(client, auth_headers, bootst
     assert resp.status_code == 409
 
 
+# -- list (MA5-UI addition) -------------------------------------------------
+
+
+def test_list_comparisons_requires_auth(client, bootstrap):
+    resp = client.get(f"/comparisons?project_id={bootstrap.project.id}")
+    assert resp.status_code == 401
+
+
+def test_list_comparisons_scoped_to_project_newest_first(client, auth_headers, bootstrap, db):
+    from app.db.enums import ExecutionMode
+    from tests.conftest import make_org, make_project, make_task
+
+    av1 = _publish_agent_with_free_model(client, auth_headers, bootstrap.project.id, name="List A")
+    av2 = _publish_agent_with_free_model(client, auth_headers, bootstrap.project.id, name="List B")
+    task1 = _create_comparison_task(client, auth_headers, bootstrap.project.id, title="First")
+    task2 = _create_comparison_task(client, auth_headers, bootstrap.project.id, title="Second")
+
+    candidates = [{"agent_version_id": av1, "label": "A"}, {"agent_version_id": av2, "label": "B"}]
+    first = client.post(
+        "/comparisons", headers=auth_headers, json={"task_id": task1["id"], "candidates": candidates}
+    ).json()
+    second = client.post(
+        "/comparisons", headers=auth_headers, json={"task_id": task2["id"], "candidates": candidates}
+    ).json()
+
+    # A comparison in a different project must never leak into this list.
+    other_project = make_project(db, org=make_org(db, name="Other Org MA5 List"))
+    other_task = make_task(db, project=other_project, execution_mode=ExecutionMode.PARALLEL_COMPARISON)
+    db.commit()
+    from app.services.comparison_service import ComparisonService
+
+    ComparisonService(db).create_comparison(
+        task_id=other_task.id,
+        candidates=[
+            {"agent_version_id": av1, "label": "X"},
+            {"agent_version_id": av2, "label": "Y"},
+        ],
+    )
+
+    resp = client.get(f"/comparisons?project_id={bootstrap.project.id}", headers=auth_headers)
+    assert resp.status_code == 200
+    body = resp.json()
+    ids = [c["id"] for c in body]
+    assert ids == [second["id"], first["id"]]  # newest first
+    assert all(c["task_id"] in (task1["id"], task2["id"]) for c in body)
+
+
 def test_cancel_comparison_via_api(client, auth_headers, bootstrap, db):
     launched = _launched_comparison(client, auth_headers, bootstrap, db)
 

@@ -11,14 +11,15 @@ Task Run -> Task for Agent Runs.
 """
 
 import uuid
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, Header
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db
 from app.auth import get_current_user
-from app.authz import ProjectAction, check_project_access
+from app.authz import ProjectAction, check_project_access, require_project_access
 from app.db.enums import IdempotencyScope
 from app.errors import NotFoundError
 from app.models.artifacts_eval import ComparisonRun
@@ -126,6 +127,29 @@ def _read(db: Session, comparison_id: str) -> ComparisonRunRead:
 
 
 # -- endpoints -------------------------------------------------------------------
+
+
+@router.get("/comparisons", response_model=List[ComparisonRunRead])
+def list_comparisons(
+    db: Session = Depends(get_db),
+    membership=Depends(require_project_access(ProjectAction.READ)),
+):
+    """MA5-UI addition: lets the operator console list and reopen
+    previous comparisons (Section 25.2 already exposes GET /tasks and GET
+    /agents the same project-scoped-list way — this fills the equivalent
+    gap for comparisons, which MA5 never needed since every comparison was
+    reached by an id the caller already had). Newest first; no new state,
+    purely a read over the existing ComparisonRun/TaskRun/Task chain
+    ``_read`` already resolves for the single-comparison GET."""
+    stmt = (
+        select(ComparisonRun.id)
+        .join(TaskRun, TaskRun.id == ComparisonRun.task_run_id)
+        .join(Task, Task.id == TaskRun.task_id)
+        .where(Task.project_id == membership.project_id)
+        .order_by(ComparisonRun.created_at.desc())
+    )
+    comparison_ids = [row[0] for row in db.execute(stmt)]
+    return [_read(db, comparison_id) for comparison_id in comparison_ids]
 
 
 @router.post("/comparisons", response_model=ComparisonRunRead, status_code=201)

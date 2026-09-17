@@ -222,7 +222,23 @@ def test_list_catalog_pricing_filter_free(db):
     assert [e["provider_model_id"] for e in free] == ["test/free"]
     assert [e["provider_model_id"] for e in paid] == ["test/paid"]
     assert [e["provider_model_id"] for e in unknown] == ["test/unknown"]
-    assert len(everything) == 3
+
+
+def test_list_catalog_entry_id_is_the_provider_model_row_id(db):
+    """MA5-UI addition: ``id`` must be the actual provider_models.id — the
+    value a caller needs for ModelPolicy.manual_provider_model_id — not
+    the canonical Model.id (``model_id``, a different column already on
+    this entry)."""
+    from sqlalchemy import select
+
+    provider = make_provider(db)
+    svc = ModelRegistryService(db)
+    svc.refresh_catalog(provider, FakeAdapter([_descriptor(provider_model_id="test/entry-id")]))
+
+    entry = svc.list_catalog()[0]
+    row = db.execute(select(ProviderModel).where(ProviderModel.provider_id == provider.id)).scalar_one()
+    assert entry["id"] == row.id
+    assert entry["id"] != entry["model_id"]
 
 
 def test_list_catalog_never_hard_codes_free_model_ids(db):

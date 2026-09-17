@@ -13,6 +13,7 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 
 from app.api.routers import (
     agents,
@@ -36,6 +37,8 @@ from app.db.session import SessionLocal, engine
 from app.errors import register_exception_handlers
 from app.logging_config import configure_logging
 from app.starter_agents import ensure_starter_agents
+from app.web import FRONTEND_DIR
+from app.web import router as ui_router
 
 logger = logging.getLogger("app.main")
 
@@ -139,6 +142,12 @@ for router in (
     internal.router,
 ):
     app.include_router(router)
+
+# Local Operator Console (MA5-UI) — a frontend/operator-console slice on
+# top of the API above, never a second backend. Mounted after every real
+# API router so "/assets/*" and "/" can never shadow a resource route.
+app.mount("/assets", StaticFiles(directory=FRONTEND_DIR / "assets"), name="ui-assets")
+app.include_router(ui_router)
 
 
 @app.get("/health", tags=["health"])

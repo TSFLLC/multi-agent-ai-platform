@@ -69,8 +69,17 @@ class ModelCatalogEntryRead(BaseModel):
     the Section 11 "model selection API" questions in one shape: which
     provider supplies it, current pricing + derived classification,
     capabilities (None where the provider doesn't reliably expose one —
-    never guessed), and when the entry was last refreshed."""
+    never guessed), and when the entry was last refreshed.
 
+    MA5-UI addition: ``id`` is the underlying ``provider_models`` row id —
+    the exact value ``ModelPolicy.manual_provider_model_id`` needs (see
+    app.schemas.agents.ModelPolicy) to actually select this offering for
+    an Agent Version/comparison candidate. Selecting a model was
+    previously only possible by cross-referencing
+    GET /models/{model_id}/provider-models separately; additive field,
+    nothing removed."""
+
+    id: str
     model_id: str
     canonical_model_id: str
     provider_id: str
