@@ -48,15 +48,28 @@ def test_run_once_leaves_pending_job_untouched_if_no_job_exists(db, fast_worker)
 
 
 def test_worker_releases_unsupported_job_type_back_to_pending(db, fast_worker):
-    job = _repo.enqueue(db, job_type=JobType.AGENT_RUN, payload_ref="unsupported-1")
+    # WORKFLOW_NODE dispatch is post-MA3; the worker claims it (proving the
+    # generic claim path works for any job_type) then releases it back to
+    # pending rather than silently dropping or falsely completing it.
+    job = _repo.enqueue(db, job_type=JobType.WORKFLOW_NODE, payload_ref="unsupported-1")
 
     fast_worker.run_once()
 
     db.expire_all()
     released = db.get(JobQueue, job.id)
-    # Real Agent Run dispatch is MA3+; the worker claims it (proving the
-    # generic claim path works for any job_type) then releases it back to
-    # pending rather than silently dropping or falsely completing it.
+    assert released.status == JobQueueStatus.PENDING
+
+
+def test_worker_releases_agent_run_job_when_agent_run_row_is_missing(db, fast_worker):
+    """AGENT_RUN dispatch is real (MA3) — but a payload_ref that doesn't
+    resolve to an actual AgentRun row must be released, not crash the
+    worker or falsely complete."""
+    job = _repo.enqueue(db, job_type=JobType.AGENT_RUN, payload_ref="does-not-exist")
+
+    fast_worker.run_once()
+
+    db.expire_all()
+    released = db.get(JobQueue, job.id)
     assert released.status == JobQueueStatus.PENDING
 
 

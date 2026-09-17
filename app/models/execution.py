@@ -105,6 +105,11 @@ class ModelCall(UUIDPrimaryKeyMixin, Base):
 
     latency_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     structured_output_ok: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    # MA3 addition: the provider's own request/generation ID (e.g.
+    # OpenRouter's response "id" field), when the provider returns one —
+    # lets an operator cross-reference a call against the provider's own
+    # dashboard/logs without us storing anything provider-secret.
+    provider_request_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     status: Mapped[ModelCallStatus] = mapped_column(
         sa_enum(ModelCallStatus),
         nullable=False,

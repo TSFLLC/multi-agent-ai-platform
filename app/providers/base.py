@@ -8,8 +8,10 @@ nothing in ``ModelRegistryService`` references "openrouter" by name
 means implementing this interface, not touching the registry, Agent,
 Task, or Flight Recorder contracts.
 
-``invoke()`` is reserved but intentionally unimplemented in MA2 — MA3 owns
-real model execution.
+``invoke()`` (MA3) is real model execution — every OpenRouter-specific
+request/response detail still lives only in ``OpenRouterAdapter``; the
+execution service depends on ``InvokeRequest``/``InvokeResponse`` here,
+never on OpenRouter's own JSON shape.
 """
 
 from dataclasses import dataclass, field
@@ -56,6 +58,49 @@ class ProviderConnectionError(Exception):
     """Network-level or provider-side failure not specific to auth."""
 
 
+class ProviderTimeoutError(ProviderConnectionError):
+    """The request exceeded the caller's timeout — distinct from a
+    generic connection error so the execution service can categorize it
+    for the Agent Run Attempt's error record."""
+
+
+class ProviderInvalidResponseError(ProviderConnectionError):
+    """The provider responded (2xx) but the body didn't contain what a
+    normal completion must have (e.g. no choices) — never surfaced as a
+    silent empty result."""
+
+
+@dataclass
+class InvokeRequest:
+    """Generic chat-style invocation request — the shape the execution
+    service builds, regardless of provider. Never carries a raw API key;
+    the adapter already holds its own credential."""
+
+    provider_model_id: str
+    user_prompt: str
+    system_prompt: Optional[str] = None
+    timeout_seconds: float = 60.0
+    max_tokens: Optional[int] = None
+
+
+@dataclass
+class InvokeResponse:
+    """Normalized result of one real model call — Section 6 "Model calls"
+    contract fields the execution service needs. ``cost_amount`` is only
+    populated when the provider itself reports actual spend; otherwise the
+    execution service computes an estimate from the pricing snapshot and
+    flags it accordingly (Acceptance Criterion 4 — never an ambiguous
+    number)."""
+
+    text: str
+    tokens_in: Optional[int] = None
+    tokens_out: Optional[int] = None
+    latency_ms: int = 0
+    provider_request_id: Optional[str] = None
+    cost_amount: Optional[Decimal] = None
+    raw: Dict[str, Any] = field(default_factory=dict)
+
+
 class ProviderAdapter(Protocol):
     def list_models(self) -> List[ModelDescriptor]: ...
 
@@ -63,6 +108,9 @@ class ProviderAdapter(Protocol):
 
     def health_check(self) -> ProviderHealth: ...
 
-    def invoke(self, *args: Any, **kwargs: Any) -> Any:
-        """Reserved for MA3 — real model execution is out of MA2 scope."""
+    def invoke(self, request: InvokeRequest) -> InvokeResponse:
+        """Real model execution (MA3). Raises ProviderAuthenticationError/
+        ProviderTimeoutError/ProviderConnectionError/
+        ProviderInvalidResponseError on failure — never returns a
+        response object representing a failed call."""
         ...

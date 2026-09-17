@@ -16,16 +16,21 @@ this adapter normalizes out of the *current* catalog response.
 """
 
 import logging
+import time
 from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, List, Optional
 
 import httpx
 
 from app.providers.base import (
+    InvokeRequest,
+    InvokeResponse,
     ModelDescriptor,
     ProviderAuthenticationError,
     ProviderConnectionError,
     ProviderHealth,
+    ProviderInvalidResponseError,
+    ProviderTimeoutError,
 )
 
 logger = logging.getLogger("app.providers.openrouter")
@@ -134,6 +139,26 @@ class OpenRouterAdapter:
             raise ProviderConnectionError(f"OpenRouter returned HTTP {response.status_code} for {path}.")
         return response
 
+    def _post(self, path: str, json_body: Dict[str, Any], *, timeout_seconds: float) -> httpx.Response:
+        try:
+            response = self._client.post(
+                path, json=json_body, headers=self._headers(), timeout=timeout_seconds
+            )
+        except httpx.TimeoutException as exc:
+            raise ProviderTimeoutError(
+                f"OpenRouter request to {path} timed out after {timeout_seconds}s."
+            ) from exc
+        except httpx.RequestError as exc:
+            raise ProviderConnectionError(f"Network error contacting OpenRouter: {exc}") from exc
+
+        if response.status_code == 401:
+            raise ProviderAuthenticationError("OpenRouter rejected the configured API key (401).")
+        if response.status_code >= 400:
+            raise ProviderConnectionError(
+                f"OpenRouter returned HTTP {response.status_code} for {path}: {response.text[:500]}"
+            )
+        return response
+
     def list_models(self) -> List[ModelDescriptor]:
         response = self._get("/models")
         payload = response.json()
@@ -163,5 +188,47 @@ class OpenRouterAdapter:
         except ProviderConnectionError as exc:
             return ProviderHealth(status="down", detail=f"connection_failed: {exc}")
 
-    def invoke(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError("OpenRouterAdapter.invoke() lands in MA3 — MA2 is catalog-only.")
+    def invoke(self, request: InvokeRequest) -> InvokeResponse:
+        """POSTs OpenRouter's chat-completions endpoint. All of
+        OpenRouter's specific request/response shape lives here — the
+        execution service only ever sees InvokeRequest/InvokeResponse."""
+        messages = []
+        if request.system_prompt:
+            messages.append({"role": "system", "content": request.system_prompt})
+        messages.append({"role": "user", "content": request.user_prompt})
+
+        body: Dict[str, Any] = {"model": request.provider_model_id, "messages": messages}
+        if request.max_tokens is not None:
+            body["max_tokens"] = request.max_tokens
+
+        started = time.monotonic()
+        response = self._post("/chat/completions", body, timeout_seconds=request.timeout_seconds)
+        latency_ms = int((time.monotonic() - started) * 1000)
+
+        payload = response.json()
+        choices = payload.get("choices")
+        if not choices or not isinstance(choices, list):
+            raise ProviderInvalidResponseError("OpenRouter response had no choices.")
+        message = choices[0].get("message") or {}
+        text = message.get("content")
+        if not isinstance(text, str):
+            raise ProviderInvalidResponseError("OpenRouter response's message had no text content.")
+
+        usage = payload.get("usage") or {}
+        tokens_in = usage.get("prompt_tokens")
+        tokens_out = usage.get("completion_tokens")
+
+        return InvokeResponse(
+            text=text,
+            tokens_in=tokens_in if isinstance(tokens_in, int) else None,
+            tokens_out=tokens_out if isinstance(tokens_out, int) else None,
+            latency_ms=latency_ms,
+            provider_request_id=payload.get("id"),
+            # OpenRouter's /chat/completions response does not include an
+            # actual-cost figure in the normal (non-streaming) response
+            # body — cost_amount stays None here deliberately; the
+            # execution service computes an estimate from the pricing
+            # snapshot and flags it cost_is_estimated=True (Acceptance
+            # Criterion 4), rather than this adapter guessing.
+            raw=payload,
+        )

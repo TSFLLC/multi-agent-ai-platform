@@ -1,3 +1,4 @@
+from datetime import datetime
 from decimal import Decimal
 from typing import Optional
 
@@ -34,3 +35,27 @@ class UsageRead(BaseModel):
     source_type: str
     amount: Decimal
     currency: str
+
+
+class ModelCallRead(BaseModel):
+    """Usage/cost accounting view of one Model Call (Section 6 "Model
+    calls" contract) — ``cost_is_estimated`` makes explicit whether
+    ``cost_amount`` is a real provider-reported/priced figure or a
+    conservative estimate, never an ambiguous number (Acceptance
+    Criterion 4)."""
+
+    id: str
+    agent_run_id: str
+    model_id: str
+    provider_id: str
+    provider_model_snapshot_id: Optional[str] = None
+    tokens_in: Optional[int] = None
+    tokens_out: Optional[int] = None
+    cost_amount: Optional[Decimal] = None
+    cost_currency: str
+    cost_is_estimated: bool
+    latency_ms: Optional[int] = None
+    provider_request_id: Optional[str] = None
+    status: str
+    started_at: datetime
+    completed_at: Optional[datetime] = None

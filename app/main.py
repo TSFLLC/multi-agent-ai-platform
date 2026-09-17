@@ -138,7 +138,7 @@ for router in (
 @app.get("/health", tags=["health"])
 def health() -> dict:
     """Liveness only — does not touch the database. See /ready for that."""
-    return {"status": "ok", "phase": "MA2"}
+    return {"status": "ok", "phase": "MA3"}
 
 
 @app.get("/ready", tags=["health"])

@@ -61,6 +61,25 @@ class Settings(BaseSettings):
     worker_heartbeat_interval_seconds: float = 10.0
     worker_id_prefix: str = "worker"
 
+    # Agent Run / Task Run defaults (Owner decision, frozen) — overridable
+    # per-row (agent_runs.timeout_seconds / task_runs.timeout_seconds),
+    # these are only the defaults new rows are created with.
+    default_agent_run_timeout_seconds: int = 30 * 60
+    default_task_run_timeout_seconds: int = 90 * 60
+    max_agent_run_attempts: int = 2
+
+    # Budget estimation (MA3) — deliberately simple, deterministic
+    # heuristics, not MA8 optimization. Used only to size a
+    # budget_reservations row *before* an invocation; the actual recorded
+    # cost always comes from real token usage once the call completes.
+    budget_estimate_tokens_in: int = 2000
+    budget_estimate_tokens_out: int = 500
+    # Reserved amount for a manually-selected UNKNOWN-priced model when a
+    # budget applies — conservative on purpose so an unpriced model can
+    # never quietly bypass budget enforcement. Never used to answer "is
+    # this model free" — only to size a reservation.
+    unknown_pricing_reserve_amount: str = "1.00"
+
     @field_validator("log_level")
     @classmethod
     def _validate_log_level(cls, v: str) -> str:

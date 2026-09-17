@@ -12,7 +12,14 @@ import pytest
 
 from app.db.enums import PricingClassification
 from app.domain.pricing import classify_pricing
-from app.providers.base import ModelDescriptor, ProviderAuthenticationError, ProviderConnectionError
+from app.providers.base import (
+    InvokeRequest,
+    ModelDescriptor,
+    ProviderAuthenticationError,
+    ProviderConnectionError,
+    ProviderInvalidResponseError,
+    ProviderTimeoutError,
+)
 from app.providers.openrouter import OpenRouterAdapter, normalize_model
 
 # --- fixture payloads, shaped like OpenRouter's real /models entries -------
@@ -253,7 +260,85 @@ def test_get_model_returns_none_when_absent():
     assert adapter.get_model("nonexistent/model") is None
 
 
-def test_invoke_not_implemented_in_ma2():
-    adapter = OpenRouterAdapter(api_key=None)
-    with pytest.raises(NotImplementedError):
-        adapter.invoke()
+# --- invoke() — real model execution (MA3) ---------------------------------
+
+
+def test_invoke_success_returns_normalized_response():
+    def handler(request):
+        assert request.method == "POST"
+        return httpx.Response(
+            200,
+            json={
+                "id": "gen-abc123",
+                "choices": [{"message": {"role": "assistant", "content": "MA3_EXECUTION_OK"}}],
+                "usage": {"prompt_tokens": 12, "completion_tokens": 4},
+            },
+        )
+
+    adapter = _adapter_with_transport(handler)
+    response = adapter.invoke(
+        InvokeRequest(provider_model_id="some-org/some-model:free", user_prompt="say the magic words")
+    )
+    assert response.text == "MA3_EXECUTION_OK"
+    assert response.tokens_in == 12
+    assert response.tokens_out == 4
+    assert response.provider_request_id == "gen-abc123"
+    assert response.cost_amount is None  # never fabricated; the caller prices it
+
+
+def test_invoke_sends_system_and_user_messages():
+    seen = {}
+
+    def handler(request):
+        import json
+
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}], "usage": {}})
+
+    adapter = _adapter_with_transport(handler)
+    adapter.invoke(
+        InvokeRequest(
+            provider_model_id="some-org/some-model:free",
+            system_prompt="You are terse.",
+            user_prompt="Hello",
+        )
+    )
+    messages = seen["body"]["messages"]
+    assert messages[0] == {"role": "system", "content": "You are terse."}
+    assert messages[1] == {"role": "user", "content": "Hello"}
+
+
+def test_invoke_no_choices_raises_invalid_response():
+    def handler(request):
+        return httpx.Response(200, json={"choices": []})
+
+    adapter = _adapter_with_transport(handler)
+    with pytest.raises(ProviderInvalidResponseError):
+        adapter.invoke(InvokeRequest(provider_model_id="x/y", user_prompt="hi"))
+
+
+def test_invoke_authentication_failure_raises_specific_error():
+    def handler(request):
+        return httpx.Response(401, json={"error": "invalid key"})
+
+    adapter = _adapter_with_transport(handler)
+    with pytest.raises(ProviderAuthenticationError):
+        adapter.invoke(InvokeRequest(provider_model_id="x/y", user_prompt="hi"))
+
+
+def test_invoke_timeout_raises_provider_timeout_error():
+    def handler(request):
+        raise httpx.TimeoutException("timed out")
+
+    adapter = _adapter_with_transport(handler)
+    with pytest.raises(ProviderTimeoutError):
+        adapter.invoke(InvokeRequest(provider_model_id="x/y", user_prompt="hi", timeout_seconds=0.01))
+
+
+def test_invoke_network_failure_raises_connection_error():
+    def handler(request):
+        raise httpx.ConnectError("connection refused")
+
+    adapter = _adapter_with_transport(handler)
+    with pytest.raises(ProviderConnectionError):
+        adapter.invoke(InvokeRequest(provider_model_id="x/y", user_prompt="hi"))

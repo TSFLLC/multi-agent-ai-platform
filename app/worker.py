@@ -35,6 +35,7 @@ from app.config import settings
 from app.db.enums import JobQueueStatus, JobType
 from app.db.session import SessionLocal as _default_session_factory
 from app.models.execution import JobQueue
+from app.models.tasks import AgentRun
 from app.repositories.job_queue_repository import JobQueueRepository
 
 logger = logging.getLogger("app.worker")
@@ -140,9 +141,14 @@ class Worker:
             self._run_internal_test_job(job)
             return
 
-        # Real dispatch (Agent Runs, Workflow nodes) is MA3+. A job of a
-        # type this worker doesn't know how to run yet is released back
-        # to pending rather than silently dropped or marked done.
+        if job.job_type == JobType.AGENT_RUN:
+            self._run_agent_run_job(job)
+            return
+
+        # Real dispatch of remaining job types (Workflow nodes) is post-MA3.
+        # A job of a type this worker doesn't know how to run yet is
+        # released back to pending rather than silently dropped or marked
+        # done.
         logger.warning(
             "job_type_not_yet_supported worker_id=%s job_id=%s job_type=%s",
             self.worker_id,
@@ -150,6 +156,114 @@ class Worker:
             job.job_type.value,
         )
         self._release(job)
+
+    def _run_agent_run_job(self, job: JobQueue) -> None:
+        """MA3: real Agent execution, dispatched to AgentExecutionService.
+
+        ``job.payload_ref`` is the Agent Run id (Section 24.4 #12 — one
+        durable job maps to one Agent Run). Before doing any real work, the
+        lease is extended to cover the Agent Run's own timeout — a single
+        blocking provider call cannot be safely interrupted mid-flight to
+        heartbeat, so instead of a background heartbeat thread (unnecessary
+        complexity for MA3), the lease is sized up front to outlive the
+        call it's about to make.
+        """
+        # Imported here, not at module scope, so a worker that never
+        # touches an AGENT_RUN job never needs the execution service (and
+        # its provider/budget dependencies) importable.
+        from app.services.execution_service import AgentExecutionService
+
+        agent_run_id = job.payload_ref
+        fencing_token = job.fencing_token
+
+        db = self._session_factory()
+        try:
+            agent_run = db.get(AgentRun, agent_run_id)
+            if agent_run is None:
+                logger.error(
+                    "agent_run_job_missing_agent_run worker_id=%s job_id=%s agent_run_id=%s",
+                    self.worker_id,
+                    job.id,
+                    agent_run_id,
+                )
+                self._release(job, fencing_token=fencing_token)
+                return
+            required_lease_seconds = agent_run.timeout_seconds + 60
+        finally:
+            db.close()
+
+        db = self._session_factory()
+        try:
+            still_ours = self._repo.heartbeat(
+                db,
+                job_id=job.id,
+                worker_id=self.worker_id,
+                fencing_token=fencing_token,
+                lease_seconds=required_lease_seconds,
+            )
+        finally:
+            db.close()
+
+        if not still_ours:
+            logger.warning(
+                "worker_lost_lease_before_execution worker_id=%s job_id=%s agent_run_id=%s",
+                self.worker_id,
+                job.id,
+                agent_run_id,
+            )
+            return
+
+        db = self._session_factory()
+        try:
+            service = AgentExecutionService(db)
+            try:
+                service.execute(agent_run_id, worker_id=self.worker_id)
+                job_status = JobQueueStatus.DONE
+            except Exception:
+                # AgentExecutionService already finalizes the Agent
+                # Run / Task Run to a terminal FAILED state on any error it
+                # can categorize (and even on ones it can't, via its own
+                # last-resort handler) — this except is only a safety net
+                # so a truly catastrophic failure (e.g. this session
+                # itself is broken) still frees the job row instead of
+                # leaving it LEASED until the lease expires.
+                logger.exception(
+                    "agent_run_job_execution_error worker_id=%s job_id=%s agent_run_id=%s",
+                    self.worker_id,
+                    job.id,
+                    agent_run_id,
+                )
+                job_status = JobQueueStatus.FAILED
+        finally:
+            db.close()
+
+        db = self._session_factory()
+        try:
+            completed = self._repo.complete(
+                db,
+                job_id=job.id,
+                worker_id=self.worker_id,
+                fencing_token=fencing_token,
+                status=job_status,
+            )
+        finally:
+            db.close()
+
+        if completed:
+            logger.info(
+                "agent_run_job_finished worker_id=%s job_id=%s agent_run_id=%s status=%s",
+                self.worker_id,
+                job.id,
+                agent_run_id,
+                job_status.value,
+            )
+        else:
+            logger.warning(
+                "agent_run_job_complete_rejected_stale_fencing worker_id=%s job_id=%s agent_run_id=%s",
+                self.worker_id,
+                job.id,
+                agent_run_id,
+            )
 
     def _run_internal_test_job(self, job: JobQueue) -> None:
         fencing_token = job.fencing_token

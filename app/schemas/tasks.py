@@ -22,13 +22,24 @@ class TaskRead(BaseModel):
     status: TaskStatus
 
 
+class TaskRunCreate(BaseModel):
+    """The Agent Version to run is selected per Task Run, not stored on
+    the Task itself — a Task is a reusable definition (Section 26.1) that
+    may, in principle, be run by different Agent Versions over time."""
+
+    agent_version_id: str
+    budget_id: Optional[str] = None
+
+
 class TaskRunRead(BaseModel):
     id: str
     task_id: str
     status: TaskRunStatus
     config_snapshot: Optional[dict] = None
+    created_at: datetime
     started_at: Optional[datetime] = None
     ended_at: Optional[datetime] = None
+    cancellation_requested_at: Optional[datetime] = None
 
 
 class AgentRunRead(BaseModel):
@@ -38,6 +49,10 @@ class AgentRunRead(BaseModel):
     status: AgentRunStatus
     model_id: Optional[str] = None
     provider_id: Optional[str] = None
+    provider_model_snapshot_id: Optional[str] = None
+    created_at: datetime
+    started_at: Optional[datetime] = None
+    ended_at: Optional[datetime] = None
 
 
 class AgentRunAttemptRead(BaseModel):
@@ -45,3 +60,7 @@ class AgentRunAttemptRead(BaseModel):
     agent_run_id: str
     attempt_number: int
     status: str
+    started_at: datetime
+    ended_at: Optional[datetime] = None
+    error: Optional[dict] = None
+    worker_id: Optional[str] = None

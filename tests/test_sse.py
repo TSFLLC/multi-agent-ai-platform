@@ -81,7 +81,7 @@ def test_stream_terminates_when_no_events_and_max_empty_polls_set(db, session_fa
     assert chunks == []
 
 
-def test_stream_endpoint_is_wired_and_returns_event_stream_media_type(db, session_factory):
+def test_stream_endpoint_is_wired_and_returns_event_stream_media_type(db, session_factory, bootstrap):
     """Calls the route function directly rather than over a live HTTP
     connection: the real endpoint's generator polls forever by design
     (``max_empty_polls=None``), and driving a genuinely open-ended SSE
@@ -89,10 +89,12 @@ def test_stream_endpoint_is_wired_and_returns_event_stream_media_type(db, sessio
     checks the response is correctly shaped without consuming the body."""
     from app.api.routers.tasks import stream_task_run_events
 
-    task = make_task(db)
+    task = make_task(db, project=bootstrap.project)
     run = make_task_run(db, task=task)
     db.commit()
 
-    response = stream_task_run_events(task.id, run.id, session_factory=session_factory)
+    response = stream_task_run_events(
+        task.id, run.id, db=db, user=bootstrap.user, session_factory=session_factory
+    )
     assert response.media_type == "text/event-stream"
     assert response.body_iterator is not None
