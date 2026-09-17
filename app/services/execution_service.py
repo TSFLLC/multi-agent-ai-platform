@@ -67,6 +67,7 @@ from app.providers.base import (
 from app.providers.factory import build_provider_adapter
 from app.review_contract import build_repair_extra_context, build_reviewer_extra_context
 from app.services.budget_service import BudgetExceededError, BudgetGovernor, estimate_cost
+from app.services.comparison_progress_service import notify_task_run_terminal
 from app.services.flight_recorder import FlightRecorderService
 from app.services.review_orchestration_service import ReviewOrchestrationService
 
@@ -400,7 +401,7 @@ class AgentExecutionService:
         self.db.commit()
         self._event(ctx, "agent_run.completed", decision_summary="agent run completed successfully")
 
-        if ctx.task.execution_mode == ExecutionMode.BUILD_REVIEW:
+        if self._is_build_review(ctx):
             # MA4: this Agent Run was one stage (primary/reviewer/repair)
             # of a review cycle -- what happens to the Task Run next
             # depends on that cycle's state, not on "one Agent Run means
@@ -416,11 +417,17 @@ class AgentExecutionService:
         task_run.ended_at = _utcnow()
         self.db.commit()
         self._event(ctx, "task_run.completed", decision_summary="task run completed")
+        notify_task_run_terminal(self.db, task_run)
 
     # -- model resolution --------------------------------------------------
 
     def _resolve_model(self, ctx: _Context) -> ResolvedModel:
-        policy = ctx.agent_version.model_policy or {}
+        # MA5: a comparison candidate may override its Agent Version's own
+        # (immutable, shared, published) model_policy to resolve a
+        # *different* concrete model without needing a second Agent
+        # Version just to vary the model ("same Agent, different models").
+        # Absent an override (the MA3/MA4 default), behavior is unchanged.
+        policy = ctx.agent_run.model_policy_override_json or ctx.agent_version.model_policy or {}
         mode = policy.get("mode", ModelSelectionMode.MANUAL.value)
         if mode == ModelSelectionMode.MANUAL.value:
             provider_model_id = policy.get("manual_provider_model_id")
@@ -577,6 +584,7 @@ class AgentExecutionService:
         self._event(
             ctx, "task_run.failed", error={"category": category, "message": message}, decision_summary=message
         )
+        notify_task_run_terminal(self.db, ctx.task_run)
 
     def _finalize_cancelled(
         self, ctx: _Context, attempt: AgentRunAttempt, *, already_produced: bool = False
@@ -598,6 +606,25 @@ class AgentExecutionService:
         ctx.task_run.ended_at = _utcnow()
         self.db.commit()
         self._event(ctx, "task_run.cancelled", decision_summary="task run cancelled")
+        notify_task_run_terminal(self.db, ctx.task_run)
+
+    # -- comparison compatibility (MA5) --------------------------------------
+
+    def _is_build_review(self, ctx: _Context) -> bool:
+        """True for MA4's own BUILD_REVIEW Task Runs (unchanged), and also
+        for an MA5 comparison candidate that opted into review
+        (Section 11) even though the *shared* comparison Task's
+        execution_mode isn't BUILD_REVIEW (candidates within one
+        comparison may mix reviewed and plain — one shared Task can only
+        carry one execution_mode, but each candidate's own Task Run
+        config_snapshot is independent). Purely additive: for every
+        existing MA3/MA4 Task Run this evaluates identically to the old
+        ``ctx.task.execution_mode == ExecutionMode.BUILD_REVIEW`` check,
+        since that flow always sets both together."""
+        if ctx.task.execution_mode == ExecutionMode.BUILD_REVIEW:
+            return True
+        config_snapshot = ctx.task_run.config_snapshot or {}
+        return config_snapshot.get("reviewer_agent_version_id") is not None
 
     # -- flight recorder helper -----------------------------------------------
 

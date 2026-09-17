@@ -365,6 +365,18 @@ class ComparisonRunStatus(str, enum.Enum):
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+    # MA5 addition: every sibling lifecycle enum in this module already has
+    # an explicit cancelled/stopped terminal value (TaskRunStatus.CANCELLED,
+    # AgentRunStatus.STOPPED, WorkflowRunStatus.CANCELLED) — this one was
+    # simply never exercised before MA5 made comparisons real. "Ready for
+    # selection" (all candidates terminal, awaiting the human) is
+    # deliberately *not* a stored status here — it's a derived read-time
+    # fact (see app.services.comparison_service.compute_phase), matching
+    # the "map to existing names, don't invent unnecessary statuses"
+    # instruction: RUNNING already covers "still owns further work or is
+    # awaiting the human," and only the human's selection (or a hard
+    # failure/cancellation) ever moves it to a different stored value.
+    CANCELLED = "cancelled"
 
 
 # --- Provider catalog refresh (Section 13.3, MA2 addition) ------------------

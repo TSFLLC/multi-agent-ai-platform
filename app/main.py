@@ -105,16 +105,20 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Multi-Agent AI Platform / Agent Control Plane",
-    version="0.1.0-ma4",
+    version="0.1.0-ma5",
     description=(
-        "Local-first Agent Control Plane. MA4: Agent-to-Agent Review — a "
-        "primary Agent's candidate artifact is reviewed by an independently "
-        "versioned/modeled reviewer Agent (structured ACCEPT/REPAIR_REQUIRED "
-        "decisions, bounded repair loop), built on MA3's real single-Agent "
-        "execution engine (queue/worker, provider invocation, budget "
-        "governor, Flight Recorder, cancellation/recovery/fencing) and "
-        "MA2's Agent + Model Registry — still no parallel comparison, "
-        "evaluation/judge engine, workflow/DAG engine, or tool execution."
+        "Local-first Agent Control Plane. MA5: Parallel Comparison — one "
+        "Task executed independently by 2+ Agent/model candidates (same "
+        "Agent/different models, different Agents/same or different "
+        "models), each its own isolated Task Run + Agent Run on MA3's "
+        "execution engine, with every result and its execution evidence "
+        "preserved and NO automatic winner selection — a human always "
+        "selects the exact, hash-bound canonical artifact. Built on MA4's "
+        "Agent-to-Agent Review (optional per candidate), MA3's execution "
+        "engine (queue/worker, provider invocation, budget governor, "
+        "Flight Recorder, cancellation/recovery/fencing), and MA2's "
+        "Agent + Model Registry — still no evaluation/judge engine, "
+        "workflow/DAG engine, or tool execution."
     ),
     lifespan=lifespan,
 )

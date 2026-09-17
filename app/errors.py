@@ -80,6 +80,18 @@ class LeaseFencingConflictError(AppError):
     code = "lease_fencing_conflict"
 
 
+class ArtifactHashMismatchError(AppError):
+    """MA5: the caller's echoed ``artifact_hash`` for a comparison's
+    canonical-candidate selection no longer matches that candidate's actual
+    artifact content — same TOCTOU-style binding as
+    ``approvals.action_fingerprint`` (Section 24.4 #15). Rejected rather
+    than silently canonicalizing a different result than the human
+    reviewed."""
+
+    status_code = status.HTTP_409_CONFLICT
+    code = "artifact_hash_mismatch"
+
+
 def _error_response(status_code: int, code: str, message: str, detail: Any = None) -> JSONResponse:
     body: Dict[str, Any] = {"error": {"code": code, "message": message}}
     if detail is not None:

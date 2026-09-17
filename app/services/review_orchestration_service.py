@@ -43,6 +43,7 @@ from app.models.reviews import AgentReview
 from app.models.tasks import AgentRun, TaskRun
 from app.repositories.job_queue_repository import JobQueueRepository
 from app.review_contract import parse_review_response
+from app.services.comparison_progress_service import notify_task_run_terminal
 from app.services.flight_recorder import FlightRecorderService
 
 logger = logging.getLogger("app.services.review_orchestration_service")
@@ -313,6 +314,7 @@ class ReviewOrchestrationService:
             "task_run.completed",
             decision_summary="task run completed: reviewer accepted the candidate artifact",
         )
+        notify_task_run_terminal(self.db, task_run)
 
     def _finalize_failed(self, ctx: Any, *, category: str, message: str) -> None:
         task_run = ctx.task_run
@@ -322,6 +324,7 @@ class ReviewOrchestrationService:
         self._event(
             ctx, "task_run.failed", error={"category": category, "message": message}, decision_summary=message
         )
+        notify_task_run_terminal(self.db, task_run)
 
     def _finalize_cancelled(self, ctx: Any, *, decision_summary: str) -> None:
         task_run = ctx.task_run
@@ -329,6 +332,7 @@ class ReviewOrchestrationService:
         task_run.ended_at = _utcnow()
         self.db.commit()
         self._event(ctx, "task_run.cancelled", decision_summary=decision_summary)
+        notify_task_run_terminal(self.db, task_run)
 
     # -- Flight Recorder helper (mirrors AgentExecutionService._event) ----
 

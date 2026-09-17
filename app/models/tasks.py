@@ -161,6 +161,17 @@ class AgentRun(UUIDPrimaryKeyMixin, Base):
     # MA3 already gives a plain SINGLE_AGENT run. NULL/unused for
     # SINGLE_AGENT and PRIMARY runs.
     input_context_json: Mapped[Optional[dict]] = mapped_column(nullable=True)
+    # MA5: a per-run model_policy override (same shape as
+    # agent_versions.model_policy_json: {"mode": "manual",
+    # "manual_provider_model_id": ...} or {"mode": "auto", ...|}) — lets a
+    # comparison candidate resolve to a *different* concrete model than
+    # its (immutable, shared, published) Agent Version's own model_policy
+    # without needing a second Agent Version just to vary the model.
+    # app.services.execution_service._resolve_model prefers this over
+    # agent_version.model_policy when present; NULL (the default) means
+    # "use the Agent Version's own policy, unmodified" — MA3/MA4 behavior
+    # is exactly unchanged when this column is never populated.
+    model_policy_override_json: Mapped[Optional[dict]] = mapped_column(nullable=True)
     sandbox_ref: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
 
     timeout_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=30 * 60)
