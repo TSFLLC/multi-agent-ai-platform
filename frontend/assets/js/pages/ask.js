@@ -2,24 +2,50 @@
 // select 2-3 models -> Run Comparison. Uses the real MA5 comparison APIs
 // end to end (Task -> Comparison -> launch), never a frontend-only fake
 // (Section 5).
+//
+// MA5-UI Post-UAT Enhancement 1: with 400+ models the old always-visible
+// checkbox grid was unusable. The model picker below is search/filter-
+// driven and bounded (frontend/assets/js/modelFilter.js holds the pure,
+// unit-tested filtering/selection logic); a persistent Selected Models
+// section keeps a choice visible no matter what the active filter hides.
 
 import { api } from "../api.js";
-import { el, mount } from "../dom.js";
+import { el, mount, clear } from "../dom.js";
 import { getProjectId } from "../state.js";
 import { navigate } from "../router.js";
 import { pricingBadgeClass, pricingLabel, truncate } from "../format.js";
+import {
+  PRICING_FILTER_ALL,
+  boundedResults,
+  canRunComparison,
+  filterModels,
+  selectedModelsList,
+  uniqueProviderIds,
+} from "../modelFilter.js";
 
 const MAX_AUTO_FREE_SELECTIONS = 3;
+const DEFAULT_VISIBLE_COUNT = 24;
+const SHOW_MORE_STEP = 24;
+const PRICING_TABS = [
+  { value: "free", label: "FREE" },
+  { value: "paid", label: "PAID" },
+  { value: "unknown", label: "UNKNOWN" },
+  { value: PRICING_FILTER_ALL, label: "ALL" },
+];
 
 export async function renderAsk(root) {
   const state = {
     question: "",
     agents: [],
-    agentVersionById: new Map(), // agent.id -> active AgentVersion.id
     models: [],
+    providerNameById: new Map(),
     selectedModelIds: new Set(),
     userTouchedModels: false,
     selectedAgentId: null,
+    searchQuery: "",
+    pricingFilter: "free", // Section: default the Ask Agents selector to FREE for local operation.
+    providerFilter: "",
+    visibleCount: DEFAULT_VISIBLE_COUNT,
     submitting: false,
     error: null,
     loadError: null,
@@ -33,9 +59,14 @@ export async function renderAsk(root) {
     return;
   }
 
-  const [agents, models] = await Promise.all([loadAgentsWithActiveVersion(projectId, state), api.get("/models")]);
+  const [agents, models, providers] = await Promise.all([
+    loadAgentsWithActiveVersion(projectId, state),
+    api.get("/models"),
+    api.get("/providers").catch(() => []),
+  ]);
   state.agents = agents;
   state.models = models;
+  state.providerNameById = new Map(providers.map((p) => [p.id, p.name]));
   if (agents.length) state.selectedAgentId = agents[0].agent.id;
   applyDefaultFreeSelection(state);
 
@@ -95,7 +126,7 @@ function render(root, projectId, state) {
 
   container.appendChild(buildQuestionCard(state));
   container.appendChild(buildAgentCard(state));
-  container.appendChild(buildModelsCard(state));
+  container.appendChild(buildModelSelectorCard(state));
   container.appendChild(buildRunBar(root, projectId, state));
 
   mount(root, container);
@@ -135,7 +166,10 @@ function buildAgentCard(state) {
   return el("div", { class: "card" }, [el("label", {}, "Agent"), select]);
 }
 
-function buildModelsCard(state) {
+// -- Model selector (search + pricing/provider filters + bounded results,
+// with a persistent Selected Models section) -------------------------------
+
+function buildModelSelectorCard(state) {
   if (!state.models.length) {
     return el("div", { class: "card" }, [
       el("label", {}, "Models"),
@@ -148,22 +182,179 @@ function buildModelsCard(state) {
     ]);
   }
 
-  const grid = el(
-    "div",
-    { class: "model-picker" },
-    state.models.map((model) => buildModelOption(model, state))
-  );
+  const card = el("div", { class: "card" });
+  const countLabel = el("span", { class: "hint", id: "model-selected-count" }, selectedCountText(state));
+  const selectedSection = el("div", { class: "selected-models" });
+  const resultsSection = el("div", {});
 
-  return el("div", { class: "card" }, [
-    el("div", { class: "row between" }, [
-      el("label", { style: "margin:0" }, "Models (select 2 or more)"),
-      el("span", { class: "hint", id: "selected-model-count" }, `${state.selectedModelIds.size} selected`),
-    ]),
-    grid,
-  ]);
+  function refreshSelected() {
+    clear(selectedSection);
+    selectedSection.appendChild(buildSelectedModelsBlock(state, refreshAll));
+    countLabel.textContent = selectedCountText(state);
+  }
+
+  function refreshResults() {
+    clear(resultsSection);
+    resultsSection.appendChild(buildResultsBlock(state, refreshResults, refreshAll));
+  }
+
+  function refreshAll() {
+    refreshSelected();
+    refreshResults();
+  }
+
+  card.appendChild(
+    el("div", { class: "row between" }, [el("label", { style: "margin:0" }, "Models (select 2 or more)"), countLabel])
+  );
+  card.appendChild(selectedSection);
+  card.appendChild(buildFilterBar(state, () => {
+    state.visibleCount = DEFAULT_VISIBLE_COUNT;
+    refreshResults();
+  }));
+  card.appendChild(resultsSection);
+
+  refreshAll();
+  return card;
 }
 
-function buildModelOption(model, state) {
+function selectedCountText(state) {
+  return `${state.selectedModelIds.size} selected`;
+}
+
+function buildSelectedModelsBlock(state, onChange) {
+  const selected = selectedModelsList(state.models, state.selectedModelIds);
+  if (!selected.length) {
+    return el("p", { class: "hint" }, "No models selected yet — choose 2 or more below.");
+  }
+  return el(
+    "div",
+    { class: "chip-row" },
+    selected.map((model) =>
+      el("span", { class: "model-chip" }, [
+        el("span", { class: pricingBadgeClass(model.pricing_classification) }, pricingLabel(model.pricing_classification)),
+        el("span", { class: "chip-name" }, model.canonical_model_id),
+        el(
+          "button",
+          {
+            class: "chip-remove",
+            "aria-label": `Remove ${model.canonical_model_id}`,
+            onclick: () => {
+              state.userTouchedModels = true;
+              state.selectedModelIds.delete(model.id);
+              onChange();
+            },
+          },
+          "×"
+        ),
+      ])
+    )
+  );
+}
+
+function buildFilterBar(state, onFilterChange) {
+  const providerIds = uniqueProviderIds(state.models);
+  const showProviderFilter = providerIds.length > 1; // Section: never fake provider categories.
+
+  const searchInput = el("input", {
+    type: "text",
+    placeholder: "Search models by name…",
+    oninput: (e) => {
+      state.searchQuery = e.target.value;
+      onFilterChange();
+    },
+  });
+  searchInput.value = state.searchQuery;
+
+  const pricingPills = el(
+    "div",
+    { class: "filter-pills" },
+    PRICING_TABS.map((tab) =>
+      el(
+        "button",
+        {
+          type: "button",
+          class: `filter-pill${state.pricingFilter === tab.value ? " active" : ""}`,
+          onclick: (e) => {
+            state.pricingFilter = tab.value;
+            e.currentTarget.parentElement.querySelectorAll(".filter-pill").forEach((btn) => btn.classList.remove("active"));
+            e.currentTarget.classList.add("active");
+            onFilterChange();
+          },
+        },
+        tab.label
+      )
+    )
+  );
+
+  const children = [searchInput, pricingPills];
+
+  if (showProviderFilter) {
+    const providerSelect = el(
+      "select",
+      {
+        onchange: (e) => {
+          state.providerFilter = e.target.value;
+          onFilterChange();
+        },
+      },
+      [
+        el("option", { value: "" }, "All providers"),
+        ...providerIds.map((id) =>
+          el("option", { value: id, selected: id === state.providerFilter }, state.providerNameById.get(id) || "Unknown provider")
+        ),
+      ]
+    );
+    children.push(providerSelect);
+  }
+
+  return el("div", { class: "filter-bar" }, children);
+}
+
+function buildResultsBlock(state, refreshResults, refreshAll) {
+  const filtered = filterModels(state.models, {
+    query: state.searchQuery,
+    pricing: state.pricingFilter,
+    providerId: state.providerFilter,
+  });
+
+  if (!filtered.length) {
+    return el("div", { class: "empty-state" }, [
+      el("div", { class: "icon" }, "🔍"),
+      el("p", {}, "No models match this search/filter."),
+    ]);
+  }
+
+  const { visible, remaining } = boundedResults(filtered, state.visibleCount);
+
+  const wrapper = el("div", { class: "stack", style: "gap:10px" }, [
+    el("div", { class: "hint" }, `${filtered.length} model${filtered.length === 1 ? "" : "s"} match`),
+    el(
+      "div",
+      { class: "model-picker" },
+      visible.map((model) => buildModelOption(model, state, refreshAll))
+    ),
+  ]);
+
+  if (remaining > 0) {
+    wrapper.appendChild(
+      el(
+        "button",
+        {
+          class: "small",
+          onclick: () => {
+            state.visibleCount += SHOW_MORE_STEP;
+            refreshResults();
+          },
+        },
+        `Show more (${remaining} remaining)`
+      )
+    );
+  }
+
+  return wrapper;
+}
+
+function buildModelOption(model, state, onToggle) {
   const checked = state.selectedModelIds.has(model.id);
   const disabled = model.model_status !== "active";
   const checkbox = el("input", {
@@ -174,36 +365,32 @@ function buildModelOption(model, state) {
       state.userTouchedModels = true;
       if (e.target.checked) state.selectedModelIds.add(model.id);
       else state.selectedModelIds.delete(model.id);
-      label.classList.toggle("checked", e.target.checked);
-      const countEl = document.getElementById("selected-model-count");
-      if (countEl) countEl.textContent = `${state.selectedModelIds.size} selected`;
+      onToggle();
     },
   });
 
-  const label = el(
-    "label",
-    { class: `model-option${checked ? " checked" : ""}${disabled ? " disabled" : ""}` },
-    [
-      checkbox,
-      el("div", {}, [
-        el("div", { class: "model-name" }, model.canonical_model_id),
-        el("div", { class: "model-meta" }, [
-          el("span", { class: pricingBadgeClass(model.pricing_classification) }, pricingLabel(model.pricing_classification)),
-          model.context_window ? ` · ${model.context_window.toLocaleString("en-US")} ctx` : "",
-          disabled ? " · unavailable" : "",
-        ]),
+  return el("label", { class: `model-option${checked ? " checked" : ""}${disabled ? " disabled" : ""}` }, [
+    checkbox,
+    el("div", {}, [
+      el("div", { class: "model-name" }, model.canonical_model_id),
+      el("div", { class: "model-meta" }, [
+        el("span", { class: pricingBadgeClass(model.pricing_classification) }, pricingLabel(model.pricing_classification)),
+        model.context_window ? ` · ${model.context_window.toLocaleString("en-US")} ctx` : "",
+        disabled ? " · unavailable" : "",
       ]),
-    ]
-  );
-  return label;
+    ]),
+  ]);
 }
+
+// -- Run bar -----------------------------------------------------------------
 
 function buildRunBar(root, projectId, state) {
   const canRun = () =>
-    state.question.trim().length > 0 &&
-    state.selectedAgentId &&
-    state.selectedModelIds.size >= 2 &&
-    !state.submitting;
+    canRunComparison({
+      question: state.question,
+      agentId: state.selectedAgentId,
+      selectedCount: state.selectedModelIds.size,
+    }) && !state.submitting;
 
   const runButton = el(
     "button",
@@ -217,14 +404,14 @@ function buildRunBar(root, projectId, state) {
 
   const statusLine = el("span", { class: "hint" }, "");
 
-  // Re-evaluate the disabled state on every interaction inside this render
-  // pass by re-checking right before click too (cheap, no extra render loop).
+  // Model selection/removal is a click, not always an 'input'/'change' on
+  // the exact control (e.g. the chip remove button) — listening on all
+  // three at the root keeps this correct regardless of which control fired.
   const bar = el("div", { class: "row between" }, [statusLine, runButton]);
-  root.addEventListener("input", () => {
-    runButton.disabled = !canRun();
-  });
-  root.addEventListener("change", () => {
-    runButton.disabled = !canRun();
+  ["input", "change", "click"].forEach((evt) => {
+    root.addEventListener(evt, () => {
+      runButton.disabled = !canRun();
+    });
   });
   return bar;
 }
@@ -240,7 +427,7 @@ async function runComparison(root, projectId, state, runButton, statusLine) {
   try {
     const agentEntry = state.agents.find(({ agent }) => agent.id === state.selectedAgentId);
     if (!agentEntry) throw new Error("Select an Agent first.");
-    const selected = state.models.filter((m) => state.selectedModelIds.has(m.id));
+    const selected = selectedModelsList(state.models, state.selectedModelIds);
     if (selected.length < 2) throw new Error("Select at least 2 models.");
 
     const task = await api.post("/tasks", {
