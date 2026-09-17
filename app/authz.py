@@ -53,28 +53,42 @@ def get_project_membership(db: Session, *, project_id: str, user_id: str) -> Opt
     ).scalar_one_or_none()
 
 
+def check_project_access(
+    db: Session, *, user: User, project_id: str, action: ProjectAction
+) -> ProjectMembership:
+    """The actual authorization check, callable directly by any handler
+    that already has ``project_id`` in hand (e.g. from a request body
+    rather than a path/query parameter) — the single place this decision
+    is made, whether reached via ``require_project_access`` or called
+    inline."""
+    project = db.get(Project, project_id)
+    if project is None:
+        raise NotFoundError(f"Project {project_id} not found.")
+
+    membership = get_project_membership(db, project_id=project_id, user_id=user.id)
+    if membership is None:
+        raise ForbiddenError(f"No project membership for project {project_id}.")
+    if not role_permits(membership.role, action):
+        raise ForbiddenError(
+            f"Role {membership.role.value!r} does not permit {action.value!r} on project {project_id}."
+        )
+    return membership
+
+
 def require_project_access(action: ProjectAction) -> Callable[..., ProjectMembership]:
     """FastAPI dependency factory. The returned dependency reads
-    ``project_id`` from the route's path parameters, so every route using
-    it must declare a ``project_id`` path segment."""
+    ``project_id`` from the route's path/query parameters (whichever the
+    route pattern implies), so it fits routes shaped like
+    ``/projects/{project_id}/...`` or ``/agents?project_id=...`` directly.
+    A route where ``project_id`` instead lives in the request body should
+    call ``check_project_access`` directly."""
 
     def _dependency(
         project_id: str,
         user: User = Depends(get_current_user),
         db: Session = Depends(get_db),
     ) -> ProjectMembership:
-        project = db.get(Project, project_id)
-        if project is None:
-            raise NotFoundError(f"Project {project_id} not found.")
-
-        membership = get_project_membership(db, project_id=project_id, user_id=user.id)
-        if membership is None:
-            raise ForbiddenError(f"No project membership for project {project_id}.")
-        if not role_permits(membership.role, action):
-            raise ForbiddenError(
-                f"Role {membership.role.value!r} does not permit {action.value!r} on project {project_id}."
-            )
-        return membership
+        return check_project_access(db, user=user, project_id=project_id, action=action)
 
     return _dependency
 
@@ -91,4 +105,16 @@ def require_org_admin(org_id: str, user: User = Depends(get_current_user)) -> Us
         raise ForbiddenError(f"Not authorized for organization {org_id}.")
     if user.role not in (OrgRole.OWNER, OrgRole.ADMIN):
         raise ForbiddenError(f"Role {user.role.value!r} does not permit this administrative action.")
+    return user
+
+
+def require_platform_admin(user: User = Depends(get_current_user)) -> User:
+    """Provider/Model Registry administration (MA2) is platform-wide, not
+    project-scoped — ``providers``/``models`` carry no ``project_id`` at
+    all. Gated by the same org-level role as ``require_org_admin``,
+    without needing an ``org_id`` to match against: in V1 there is only
+    ever the caller's own org, so "platform admin" and "admin of my org"
+    are the same check."""
+    if user.role not in (OrgRole.OWNER, OrgRole.ADMIN):
+        raise ForbiddenError(f"Role {user.role.value!r} does not permit platform administration actions.")
     return user

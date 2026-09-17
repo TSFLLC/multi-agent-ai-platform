@@ -24,7 +24,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
-from app.db.enums import HealthStatus, ModelStatus, ProviderType, ToolCallingSupport
+from app.db.enums import CatalogRefreshStatus, HealthStatus, ModelStatus, ProviderType, ToolCallingSupport
 from app.db.mixins import CreatedAtMixin, UUIDPrimaryKeyMixin, utcnow
 from app.db.types import sa_enum
 from app.domain.pricing import classify_pricing
@@ -65,15 +65,22 @@ class Model(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     context_window: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     input_modalities: Mapped[Optional[list]] = mapped_column("input_modalities_json", nullable=True)
     output_modalities: Mapped[Optional[list]] = mapped_column("output_modalities_json", nullable=True)
-    tool_calling_support: Mapped[ToolCallingSupport] = mapped_column(
+    # MA2 correction: these three were originally NOT NULL with a
+    # false-ish default (NONE / False), which cannot represent "the
+    # provider doesn't reliably tell us" without literally guessing —
+    # directly contradicting the frozen "store unknown, never guess"
+    # pricing/capability principle (Section 3) once a real provider
+    # adapter existed to expose the gap. Widened to nullable; NULL now
+    # means unknown, never a guessed negative.
+    tool_calling_support: Mapped[Optional[ToolCallingSupport]] = mapped_column(
         sa_enum(ToolCallingSupport),
-        nullable=False,
-        default=ToolCallingSupport.NONE,
+        nullable=True,
+        default=None,
     )
-    structured_output_support: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    structured_output_support: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True, default=None)
     reasoning_tier: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
     coding_capability_tier: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
-    vision_capability: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    vision_capability: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True, default=None)
     status: Mapped[ModelStatus] = mapped_column(
         sa_enum(ModelStatus), nullable=False, default=ModelStatus.ACTIVE
     )
@@ -180,3 +187,26 @@ class ProviderModelSnapshot(UUIDPrimaryKeyMixin, Base):
     @property
     def pricing_classification(self):
         return classify_pricing(self.pricing_input_per_mtok, self.pricing_output_per_mtok)
+
+
+class ProviderCatalogRefresh(UUIDPrimaryKeyMixin, Base):
+    """Catalog refresh audit record — MA2 addition (Section 13.3).
+
+    Not part of the MA0 baseline (no prior contract covered "what
+    happened during the last refresh attempt"); additive only — no
+    existing table/column changed. A failed refresh is still recorded
+    (with ``error``) so the operator can see it happened without ever
+    mutating the last-known-good ``provider_models`` rows.
+    """
+
+    __tablename__ = "provider_catalog_refreshes"
+
+    provider_id: Mapped[str] = mapped_column(ForeignKey("providers.id", ondelete="CASCADE"), nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    status: Mapped[CatalogRefreshStatus] = mapped_column(sa_enum(CatalogRefreshStatus), nullable=False)
+    models_discovered: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    models_added: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    models_updated: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    models_unavailable: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    error: Mapped[Optional[dict]] = mapped_column("error_json", nullable=True)

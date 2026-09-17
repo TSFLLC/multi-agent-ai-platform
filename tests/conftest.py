@@ -20,7 +20,19 @@ from app.models.artifacts_eval import Artifact
 from app.models.governance import Budget
 from app.models.identity import Organization, Project
 from app.models.tasks import AgentRun, Task, TaskRun
+from app.secrets_store import InMemorySecretStore, set_secret_store
 from app.worker import Worker
+
+
+@pytest.fixture(autouse=True)
+def _isolated_secret_store():
+    """Every test gets a fresh in-memory secret store — never the real OS
+    keychain. Autouse so no test can accidentally leak a fixture "secret"
+    into the operator's actual Windows Credential Manager / macOS
+    Keychain / Secret Service."""
+    set_secret_store(InMemorySecretStore())
+    yield
+    set_secret_store(InMemorySecretStore())
 
 
 @pytest.fixture()
@@ -198,3 +210,39 @@ def make_budget(db, project=None, limit_amount="10.00"):
     db.add(budget)
     db.flush()
     return budget
+
+
+def make_provider(db, type_=None, name="OpenRouter"):
+    from app.db.enums import ProviderType
+    from app.models.providers import Provider
+
+    provider = Provider(type=type_ or ProviderType.OPENROUTER, name=name)
+    db.add(provider)
+    db.flush()
+    return provider
+
+
+def make_model(db, canonical_model_id="test/model-1", **kwargs):
+    from app.models.providers import Model
+
+    model = Model(canonical_model_id=canonical_model_id, **kwargs)
+    db.add(model)
+    db.flush()
+    return model
+
+
+def make_provider_model(db, model=None, provider=None, **kwargs):
+    from decimal import Decimal
+
+    from app.models.providers import ProviderModel
+
+    model = model or make_model(db)
+    provider = provider or make_provider(db)
+    kwargs.setdefault("cost_input_per_mtok", Decimal("1.00"))
+    kwargs.setdefault("cost_output_per_mtok", Decimal("2.00"))
+    pm = ProviderModel(
+        model_id=model.id, provider_id=provider.id, provider_model_id=model.canonical_model_id, **kwargs
+    )
+    db.add(pm)
+    db.flush()
+    return pm

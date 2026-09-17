@@ -340,3 +340,11 @@ class ComparisonRunStatus(str, enum.Enum):
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+
+
+# --- Provider catalog refresh (Section 13.3, MA2 addition) ------------------
+
+
+class CatalogRefreshStatus(str, enum.Enum):
+    SUCCESS = "success"
+    FAILED = "failed"

@@ -43,6 +43,12 @@ class Settings(BaseSettings):
     # local token auth.
     auth_token_path: Path = DATA_DIR / "local_auth_token"
 
+    # Pre-MA3 checkpoint (Owner requirement): a WAL-safe local backup
+    # (app.backup, VACUUM INTO) taken automatically at startup, bounded by
+    # this many most-recent backups kept in data/backups/.
+    backup_retention_count: int = 10
+    backup_on_startup: bool = True
+
     sqlite_busy_timeout_ms: int = 5000
 
     log_level: str = "INFO"

@@ -15,7 +15,7 @@ def test_health_is_liveness_only_no_db_touch(client):
     assert resp.status_code == 200
     body = resp.json()
     assert body["status"] == "ok"
-    assert body["phase"] == "MA1B"
+    assert body["phase"] == "MA2"
 
 
 def test_ready_reports_schema_state(monkeypatch, engine):

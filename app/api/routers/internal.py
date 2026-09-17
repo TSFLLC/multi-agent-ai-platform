@@ -5,8 +5,15 @@ worker (``app/worker.py``) claims, heartbeats, and completes doing
 nothing but a short, deterministic sleep.
 
 Not part of the frozen MA0 product API contract (Section 25.2/25.5) —
-this router exists only for MA1's own proof-of-life and may be removed
-once real Task/Agent Run endpoints (MA3) make it unnecessary.
+this router exists only for proof-of-life and may be removed once real
+Task/Agent Run endpoints (MA3) make it unnecessary.
+
+MA2 pre-MA3 checkpoint: this was flagged as an unrestricted operational
+mutation endpoint in the MA1 report. Smallest fix consistent with the
+existing architecture — require the same local auth token every other
+real endpoint requires (app.auth.get_current_user) — rather than a
+dev-mode flag or removing it outright (still needed to exercise the
+worker).
 """
 
 import uuid
@@ -16,8 +23,10 @@ from fastapi import APIRouter, Depends, Header
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db
+from app.auth import get_current_user
 from app.db.enums import IdempotencyScope, JobType
 from app.errors import NotFoundError
+from app.models.identity import User
 from app.repositories.job_queue_repository import JobQueueRepository
 from app.schemas.internal import InternalTestJobRead
 from app.services.idempotency_service import BeginOutcome, IdempotencyService
@@ -29,6 +38,7 @@ _job_repo = JobQueueRepository()
 @router.post("/test-jobs", response_model=InternalTestJobRead, status_code=201)
 def create_test_job(
     db: Session = Depends(get_db),
+    _user: User = Depends(get_current_user),
     idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
 ):
     key = idempotency_key or f"auto:{uuid.uuid4()}"
@@ -56,7 +66,7 @@ def create_test_job(
 
 
 @router.get("/test-jobs/{job_id}", response_model=InternalTestJobRead)
-def get_test_job(job_id: str, db: Session = Depends(get_db)):
+def get_test_job(job_id: str, db: Session = Depends(get_db), _user: User = Depends(get_current_user)):
     job = _job_repo.get(db, job_id)
     if job is None:
         raise NotFoundError(f"Job {job_id} not found.")

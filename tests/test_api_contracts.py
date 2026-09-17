@@ -46,7 +46,7 @@ EXPECTED_PATHS = [
 def test_health_endpoint_works():
     resp = client.get("/health")
     assert resp.status_code == 200
-    assert resp.json()["phase"] == "MA1B"
+    assert resp.json()["phase"] == "MA2"
 
 
 def test_openapi_schema_generates():
@@ -58,8 +58,10 @@ def test_openapi_schema_generates():
 
 def test_stub_endpoints_return_not_implemented_not_a_crash():
     """Section K: every error response uses the {"error": {code, message}}
-    envelope (app.errors), including the MA0-era 501 contract stubs."""
-    resp = client.get("/agents")
+    envelope (app.errors), including the still-501 contract stubs.
+    /agents became a real, authenticated endpoint in MA2 — /tools remains
+    an MA0-style stub (Tool Bus is out of scope through at least MA9)."""
+    resp = client.get("/tools")
     assert resp.status_code == 501
     body = resp.json()
     assert body["error"]["code"] == "not_implemented"

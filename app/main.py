@@ -28,12 +28,14 @@ from app.api.routers import (
     workflows,
 )
 from app.auth import ensure_local_auth_token
+from app.backup import create_backup
 from app.bootstrap import ensure_local_bootstrap
 from app.config import settings
 from app.db.lifecycle import get_current_revision, get_head_revision, is_schema_up_to_date
 from app.db.session import SessionLocal, engine
 from app.errors import register_exception_handlers
 from app.logging_config import configure_logging
+from app.starter_agents import ensure_starter_agents
 
 logger = logging.getLogger("app.main")
 
@@ -63,6 +65,17 @@ async def lifespan(app: FastAPI):
         )
     else:
         logger.info("schema_up_to_date revision=%s", get_head_revision())
+
+        # Pre-MA3 checkpoint: a WAL-safe backup (VACUUM INTO) before this
+        # startup's bootstrap/seeding writes anything new. Backup failure
+        # is logged, never fatal to startup.
+        if settings.backup_on_startup:
+            try:
+                backup_path = create_backup(engine)
+                logger.info("startup_backup_created path=%s", backup_path)
+            except Exception:
+                logger.exception("startup_backup_failed")
+
         # Local bootstrap identity (MA1B) — idempotent; needs the migrated
         # schema to exist, so it only runs once the revision check above
         # passes. A stale/unmigrated DB simply skips bootstrap rather than
@@ -76,6 +89,8 @@ async def lifespan(app: FastAPI):
                 identities.user.id,
                 identities.project.id,
             )
+            starter_agents = ensure_starter_agents(db, project_id=identities.project.id)
+            logger.info("starter_agents_ready count=%s", len(starter_agents))
         finally:
             db.close()
 
@@ -90,12 +105,14 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Multi-Agent AI Platform / Agent Control Plane",
-    version="0.1.0-ma1b",
+    version="0.1.0-ma2",
     description=(
-        "Local-first Agent Control Plane. MA1B: local identity/access foundation "
-        "(bootstrap Organization/Owner/Project/Membership, local token auth, "
-        "project-scoped authorization) on top of MA1's platform foundation — "
-        "still no agent execution, no live model calls, no deployment."
+        "Local-first Agent Control Plane. MA2: Agent + Model Registry — real "
+        "Agent/AgentVersion/PromptVersion lifecycle, OpenRouter catalog "
+        "discovery behind the generic Provider Adapter interface, "
+        "FREE/PAID/UNKNOWN pricing classification, local OS-keychain secret "
+        "storage — still no agent execution, no live model invocation, no "
+        "deployment."
     ),
     lifespan=lifespan,
 )
@@ -121,7 +138,7 @@ for router in (
 @app.get("/health", tags=["health"])
 def health() -> dict:
     """Liveness only — does not touch the database. See /ready for that."""
-    return {"status": "ok", "phase": "MA1B"}
+    return {"status": "ok", "phase": "MA2"}
 
 
 @app.get("/ready", tags=["health"])
