@@ -323,12 +323,65 @@ button.small { padding: 6px 12px; font-size: 0.82rem; }
   border: 1px solid var(--border-soft);
   border-radius: var(--radius);
   padding: 14px;
-  white-space: pre-wrap;
   word-break: break-word;
   font-size: 0.93rem;
   line-height: 1.55;
   max-height: 420px;
   overflow-y: auto;
+}
+.candidate-answer.answer-expanded {
+  max-height: 62vh;
+  font-size: 0.98rem;
+}
+
+/* Rendered-Markdown content (frontend/assets/js/markdown.js output) --
+   shared by the in-card answer box and the Expand Answer modal. */
+.rendered-answer > *:first-child { margin-top: 0; }
+.rendered-answer > *:last-child { margin-bottom: 0; }
+.rendered-answer h1, .rendered-answer h2, .rendered-answer h3,
+.rendered-answer h4, .rendered-answer h5, .rendered-answer h6 {
+  margin: 14px 0 6px;
+  line-height: 1.3;
+  color: var(--text);
+}
+.rendered-answer h1 { font-size: 1.25rem; }
+.rendered-answer h2 { font-size: 1.15rem; }
+.rendered-answer h3 { font-size: 1.05rem; }
+.rendered-answer h4, .rendered-answer h5, .rendered-answer h6 { font-size: 0.98rem; }
+.rendered-answer p { margin: 0 0 10px; color: var(--text); }
+.rendered-answer ul, .rendered-answer ol { margin: 0 0 10px; padding-left: 22px; }
+.rendered-answer li { margin: 3px 0; }
+.rendered-answer strong { font-weight: 700; }
+.rendered-answer em { font-style: italic; }
+.rendered-answer a { color: var(--accent); text-decoration: underline; }
+.rendered-answer blockquote {
+  margin: 0 0 10px;
+  padding: 4px 12px;
+  border-left: 3px solid var(--border);
+  color: var(--text-muted);
+}
+.rendered-answer code {
+  background: var(--bg-card);
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-family: "Cascadia Code", "Consolas", "SFMono-Regular", Menlo, monospace;
+  font-size: 0.88em;
+}
+.rendered-answer pre {
+  background: var(--bg-card);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+  padding: 12px;
+  margin: 0 0 10px;
+  overflow-x: auto;
+  white-space: pre;
+}
+.rendered-answer pre code {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 0.85rem;
 }
 .candidate-evidence {
   display: grid;
@@ -417,4 +470,55 @@ tr.clickable:hover { background: var(--bg-card-hover); }
   #app-nav .brand { padding: 6px 10px; }
   #app-root { padding: 20px 18px 48px; max-width: 100%; }
   .candidate-grid { grid-template-columns: 1fr; }
+}
+
+/* Expand Answer modal (frontend/assets/js/modal.js) ----------------------- */
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(4, 8, 18, 0.72);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  z-index: 1000;
+}
+
+.modal-panel {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  width: min(880px, 100%);
+  max-height: 90vh;
+  overflow-y: auto;
+  padding: 22px 24px;
+  outline: none;
+}
+
+.modal-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 4px;
+}
+.modal-header h2 { margin: 0; font-size: 1.1rem; }
+.modal-header .modal-subtitle { color: var(--text-muted); font-size: 0.85rem; margin-top: 2px; }
+
+.modal-close-btn {
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--text);
+  border-radius: 999px;
+  width: 32px;
+  height: 32px;
+  font-size: 1rem;
+  line-height: 1;
+  flex-shrink: 0;
+  padding: 0;
+}
+
+@media (max-width: 600px) {
+  .modal-panel { padding: 16px; }
 }

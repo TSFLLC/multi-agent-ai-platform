@@ -20,6 +20,8 @@ import {
   pricingBadgeClass,
   pricingLabel,
 } from "../format.js";
+import { renderMarkdown } from "../markdown.js";
+import { openModal, closeModal } from "../modal.js";
 
 const POLL_INTERVAL_MS = 1500;
 const POLL_BOUND_MS = 20 * 60 * 1000; // stop auto-polling after 20 minutes; manual refresh still works
@@ -204,11 +206,59 @@ function phaseBadgeClass(phase) {
 function buildCandidateCard(state, candidate, comparisonId, refresh) {
   const classification = resolveClassification(state, candidate);
   const isWinner = candidate.is_winner;
+  const content = candidate.artifact_id ? state.artifactContent.get(candidate.artifact_id) : undefined;
   const canSelect =
     state.comparison.phase === "ready_for_selection" &&
     candidate.status === "completed" &&
     candidate.artifact_hash &&
     state.comparison.status !== "completed";
+  // Expand Answer is a reading affordance only (Section 5) -- it never
+  // participates in canSelect/select-winner and never appears for a
+  // candidate that produced no real answer to read.
+  const canExpand = candidate.status === "completed" && typeof content === "string" && content.length > 0;
+
+  const actions = [];
+  if (canExpand) {
+    actions.push(
+      el(
+        "button",
+        {
+          class: "small",
+          onclick: () => openExpandedAnswer(candidate, content, classification),
+        },
+        "Expand Answer"
+      )
+    );
+  }
+  if (canSelect) {
+    actions.push(
+      el(
+        "button",
+        {
+          class: "primary small",
+          disabled: state.selecting === candidate.id,
+          onclick: async (e) => {
+            state.selecting = candidate.id;
+            e.target.disabled = true;
+            e.target.textContent = "Selecting…";
+            try {
+              await api.post(`/comparisons/${comparisonId}/select-winner`, {
+                comparison_candidate_id: candidate.id,
+                artifact_hash: candidate.artifact_hash,
+              });
+              state.selecting = null;
+              await refresh();
+            } catch (err) {
+              state.selecting = null;
+              state.error = err.message || "Failed to select this result.";
+              await refresh();
+            }
+          },
+        },
+        "Select This Result"
+      )
+    );
+  }
 
   const card = el("div", { class: `candidate-card${isWinner ? " winner" : ""}` }, [
     el("div", { class: "row between" }, [
@@ -216,51 +266,65 @@ function buildCandidateCard(state, candidate, comparisonId, refresh) {
       el("span", { class: candidateStatusBadgeClass(candidate.status) }, candidateStatusLabel(candidate.status)),
     ]),
     isWinner ? el("div", { class: "selected-note" }, "✓ Selected Result") : null,
-    buildAnswerBlock(state, candidate),
+    buildAnswerBlock(candidate, content),
     buildEvidenceGrid(candidate, classification),
     buildFailureBlock(state, candidate),
-    canSelect
-      ? el(
-          "button",
-          {
-            class: "primary small",
-            disabled: state.selecting === candidate.id,
-            onclick: async (e) => {
-              state.selecting = candidate.id;
-              e.target.disabled = true;
-              e.target.textContent = "Selecting…";
-              try {
-                await api.post(`/comparisons/${comparisonId}/select-winner`, {
-                  comparison_candidate_id: candidate.id,
-                  artifact_hash: candidate.artifact_hash,
-                });
-                state.selecting = null;
-                await refresh();
-              } catch (err) {
-                state.selecting = null;
-                state.error = err.message || "Failed to select this result.";
-                await refresh();
-              }
-            },
-          },
-          "Select This Result"
-        )
-      : null,
+    actions.length ? el("div", { class: "row" }, actions) : null,
   ]);
   return card;
 }
 
-function buildAnswerBlock(state, candidate) {
+// Model output is untrusted content -- the raw `content` string is NEVER
+// assigned to innerHTML directly. It only ever passes through
+// renderMarkdown() first, whose output is safe by construction (see
+// frontend/assets/js/markdown.js): escaped text plus a small fixed set of
+// tags the renderer builds itself, never raw HTML passthrough.
+function buildRenderedAnswer(content) {
+  const wrapper = el("div", { class: "rendered-answer" });
+  wrapper.innerHTML = renderMarkdown(content);
+  return wrapper;
+}
+
+function buildAnswerBlock(candidate, content) {
   if (!candidate.artifact_id) {
     if (candidate.status === "failed" || candidate.status === "cancelled") {
       return el("div", { class: "candidate-answer" }, "No result was produced.");
     }
     return el("div", { class: "candidate-answer" }, "Waiting for a result…");
   }
-  const content = state.artifactContent.get(candidate.artifact_id);
   if (content === undefined) return el("div", { class: "candidate-answer" }, [el("span", { class: "spinner" }), " Loading answer…"]);
   if (content === null) return el("div", { class: "candidate-answer" }, "Could not load this answer's content.");
-  return el("div", { class: "candidate-answer" }, content);
+  return el("div", { class: "candidate-answer" }, [buildRenderedAnswer(content)]);
+}
+
+function openExpandedAnswer(candidate, content, classification) {
+  const closeBtn = el(
+    "button",
+    { class: "modal-close-btn", "aria-label": "Close", onclick: () => closeModal() },
+    "×"
+  );
+  const header = el("div", { class: "modal-header" }, [
+    el("div", {}, [
+      el("h2", {}, candidate.label),
+      el("div", { class: "modal-subtitle" }, `Status: ${candidateStatusLabel(candidate.status)}`),
+    ]),
+    closeBtn,
+  ]);
+
+  const metaRow = el("div", { class: "candidate-evidence", style: "margin:14px 0" }, [
+    evidence("Input tokens", formatTokens(candidate.tokens_in)),
+    evidence("Output tokens", formatTokens(candidate.tokens_out)),
+    evidence("Latency", formatLatency(candidate.latency_ms)),
+    el("div", {}, [
+      el("div", { class: "metric-label" }, "Pricing"),
+      el("span", { class: pricingBadgeClass(classification) }, pricingLabel(classification)),
+    ]),
+    evidence("Cost", formatCostForClassification(candidate.cost_amount, classification)),
+  ]);
+
+  const answerBox = el("div", { class: "candidate-answer answer-expanded" }, [buildRenderedAnswer(content)]);
+
+  openModal(el("div", {}, [header, metaRow, answerBox]), { label: `${candidate.label} — full answer` });
 }
 
 function buildEvidenceGrid(candidate, classification) {
