@@ -67,15 +67,31 @@ export function developerLabel(key) {
     .join(" ");
 }
 
-// Developers actually present in the given catalog, each with how many
-// models fall under it -- never a fabricated/fixed list (Section 2).
+// Developers actually present in the given catalog, grouped by their
+// NORMALIZED display identity (developerLabel), not by raw namespace key
+// -- MA5-UI Post-UAT Enhancement 1C correction. Two raw namespaces that
+// alias to the same label (e.g. "meta" and "meta-llama" both -> "Meta")
+// must appear as one sidebar entry with a combined count; `keys` carries
+// every raw namespace that entry represents, so a caller can select all
+// of them together (see ask.js's buildDeveloperSidebar) without ever
+// touching persisted provider/model identity. This generalizes to any
+// alias collision, not just Meta -- the grouping key is always the
+// label, never a hardcoded per-developer special case.
 export function uniqueDevelopers(models) {
-  const counts = new Map();
+  const rawCounts = new Map(); // rawKey -> count
   for (const model of models) {
     const key = extractDeveloperKey(model);
-    counts.set(key, (counts.get(key) || 0) + 1);
+    rawCounts.set(key, (rawCounts.get(key) || 0) + 1);
   }
-  return [...counts.entries()]
-    .map(([key, count]) => ({ key, label: developerLabel(key), count }))
-    .sort((a, b) => a.label.localeCompare(b.label));
+
+  const byLabel = new Map(); // label -> { label, count, keys: Set<rawKey> }
+  for (const [key, count] of rawCounts) {
+    const label = developerLabel(key);
+    if (!byLabel.has(label)) byLabel.set(label, { label, count: 0, keys: new Set() });
+    const entry = byLabel.get(label);
+    entry.count += count;
+    entry.keys.add(key);
+  }
+
+  return [...byLabel.values()].sort((a, b) => a.label.localeCompare(b.label));
 }

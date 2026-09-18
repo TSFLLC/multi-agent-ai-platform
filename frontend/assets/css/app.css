@@ -295,13 +295,110 @@ button.small { padding: 6px 12px; font-size: 0.82rem; }
   border-radius: var(--radius);
   padding: 10px 12px;
   cursor: pointer;
+  width: 100%;
+  text-align: left;
+  font-family: inherit;
+  color: inherit;
 }
-.model-option:hover { border-color: var(--accent); }
+.model-option:hover:not(:disabled) { border-color: var(--accent); }
 .model-option.checked { border-color: var(--accent); background: var(--accent-soft); }
-.model-option.disabled { opacity: 0.45; cursor: not-allowed; }
+.model-option.disabled,
+.model-option:disabled { opacity: 0.45; cursor: not-allowed; }
 .model-option input { margin-top: 3px; }
 .model-option .model-name { font-weight: 600; font-size: 0.88rem; word-break: break-word; }
 .model-option .model-meta { font-size: 0.76rem; color: var(--text-faint); margin-top: 2px; }
+
+/* Candidate configuration (MA5-UI Post-UAT Enhancement 1C) ---------------- */
+
+.candidate-row {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+}
+.candidate-row.active { border-color: var(--accent); background: var(--accent-soft); }
+.candidate-row-title { font-weight: 700; font-size: 0.88rem; }
+.candidate-row-controls {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px;
+  margin-top: 10px;
+}
+.candidate-row-controls label { font-size: 0.72rem; margin-bottom: 4px; }
+
+.active-candidate-banner {
+  background: var(--accent-soft);
+  color: #cddaff;
+  border-radius: var(--radius);
+  padding: 8px 12px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  margin: 10px 0 14px;
+}
+
+/* Model Developer sidebar (desktop) --------------------------------------- */
+
+.model-workspace {
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  gap: 18px;
+  align-items: start;
+}
+.developer-sidebar {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  position: sticky;
+  top: 12px;
+}
+.developer-sidebar .sidebar-title {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-faint);
+}
+.dev-all {
+  align-self: flex-start;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-weight: 700;
+  font-size: 0.82rem;
+  padding: 2px 0;
+}
+.dev-all.active { color: var(--accent); }
+.dev-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 340px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+.dev-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 6px;
+  border-radius: 6px;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.dev-item:hover { background: var(--bg-card-hover); }
+.dev-item.active { background: var(--accent-soft); color: #cddaff; }
+.dev-item-label { flex: 1; word-break: break-word; }
+.dev-item .dev-count { color: var(--text-faint); font-size: 0.72rem; }
+
+@media (max-width: 900px) {
+  .model-workspace { grid-template-columns: 1fr; }
+  .developer-sidebar { position: static; }
+  .dev-list { max-height: 160px; }
+}
 
 .candidate-grid {
   display: grid;
@@ -324,6 +421,12 @@ button.small { padding: 6px 12px; font-size: 0.82rem; }
 .candidate-card .candidate-title {
   font-weight: 700;
   font-size: 0.98rem;
+}
+.candidate-card .candidate-model-name {
+  font-weight: 600;
+  font-size: 0.86rem;
+  color: var(--accent);
+  margin-top: 1px;
 }
 .candidate-answer {
   background: var(--bg-elevated);

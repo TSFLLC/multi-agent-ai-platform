@@ -56,6 +56,84 @@ test("uniqueDevelopers reflects only developers actually present, with real coun
     developers.map((d) => d.label),
     ["Anthropic", "DeepSeek", "Google"] // alphabetical
   );
-  const google = developers.find((d) => d.key === "google");
+  const google = developers.find((d) => d.label === "Google");
   assert.equal(google.count, 2);
+  assert.deepEqual([...google.keys], ["google"]);
+});
+
+// -- Sidebar label-collision fix (post-1C correction): two raw namespaces
+// that alias to the same developer label must merge into ONE sidebar
+// entry with the combined count, and selecting it must match models from
+// every raw namespace it represents. Generic -- applies to any alias
+// collision, not a Meta-specific special case. -----------------------------
+
+test("meta + meta-llama normalize to one 'Meta' entry, not two", () => {
+  const models = [
+    { canonical_model_id: "meta/llama-4-scout" },
+    { canonical_model_id: "meta-llama/llama-3.1-70b" },
+    { canonical_model_id: "meta-llama/llama-3.1-8b" },
+  ];
+  const developers = uniqueDevelopers(models);
+  const metaEntries = developers.filter((d) => d.label === "Meta");
+  assert.equal(metaEntries.length, 1, "must be exactly one Meta row, not one per raw namespace");
+});
+
+test("the merged Meta entry's count is the sum across every raw namespace it represents", () => {
+  const models = [
+    { canonical_model_id: "meta/llama-4-scout" },
+    { canonical_model_id: "meta-llama/llama-3.1-70b" },
+    { canonical_model_id: "meta-llama/llama-3.1-8b" },
+  ];
+  const meta = uniqueDevelopers(models).find((d) => d.label === "Meta");
+  assert.equal(meta.count, 3);
+  assert.deepEqual([...meta.keys].sort(), ["meta", "meta-llama"]);
+});
+
+test("the merged entry's keys select models from every underlying raw namespace, via filterModels", async () => {
+  const { filterModels } = await import("../assets/js/modelFilter.js");
+  const models = [
+    { id: "pm-1", canonical_model_id: "meta/llama-4-scout" },
+    { id: "pm-2", canonical_model_id: "meta-llama/llama-3.1-70b" },
+    { id: "pm-3", canonical_model_id: "anthropic/claude-fable" },
+  ];
+  const meta = uniqueDevelopers(models).find((d) => d.label === "Meta");
+  const result = filterModels(models, { developerKeys: meta.keys });
+  assert.deepEqual(
+    result.map((m) => m.id).sort(),
+    ["pm-1", "pm-2"]
+  );
+});
+
+test("unrelated developers remain excluded when selecting the merged Meta entry", async () => {
+  const { filterModels } = await import("../assets/js/modelFilter.js");
+  const models = [
+    { id: "pm-1", canonical_model_id: "meta/llama-4-scout" },
+    { id: "pm-2", canonical_model_id: "meta-llama/llama-3.1-70b" },
+    { id: "pm-3", canonical_model_id: "google/gemini-2.5" },
+    { id: "pm-4", canonical_model_id: "deepseek/deepseek-v3" },
+  ];
+  const meta = uniqueDevelopers(models).find((d) => d.label === "Meta");
+  const result = filterModels(models, { developerKeys: meta.keys });
+  assert.deepEqual(result.map((m) => m.id).sort(), ["pm-1", "pm-2"]);
+  assert.ok(!result.some((m) => m.id === "pm-3" || m.id === "pm-4"));
+});
+
+test("this generalizes to any alias collision, not just Meta (mistral + mistralai)", () => {
+  const models = [
+    { canonical_model_id: "mistral/mistral-large" },
+    { canonical_model_id: "mistralai/mixtral-8x7b" },
+  ];
+  const developers = uniqueDevelopers(models);
+  const mistralEntries = developers.filter((d) => d.label === "Mistral AI");
+  assert.equal(mistralEntries.length, 1);
+  assert.equal(mistralEntries[0].count, 2);
+  assert.deepEqual([...mistralEntries[0].keys].sort(), ["mistral", "mistralai"]);
+});
+
+test("developers with no alias collision are unaffected -- one raw key, one entry", () => {
+  const models = [{ canonical_model_id: "deepseek/deepseek-v3" }, { canonical_model_id: "deepseek/deepseek-r1" }];
+  const developers = uniqueDevelopers(models);
+  assert.equal(developers.length, 1);
+  assert.equal(developers[0].label, "DeepSeek");
+  assert.deepEqual([...developers[0].keys], ["deepseek"]);
 });

@@ -22,6 +22,8 @@ import {
 } from "../format.js";
 import { renderMarkdown } from "../markdown.js";
 import { openModal, closeModal } from "../modal.js";
+import { buildVersionIndex, loadAgentCatalog, roleLabelFor } from "../agentDirectory.js";
+import { getProjectId } from "../state.js";
 
 const POLL_INTERVAL_MS = 1500;
 const POLL_BOUND_MS = 20 * 60 * 1000; // stop auto-polling after 20 minutes; manual refresh still works
@@ -31,6 +33,7 @@ export async function renderComparisonDetail(root, params) {
   const state = {
     comparison: null,
     task: null,
+    versionIndex: null, // agent_version_id -> { agent, version } -- Section 9 (Enhancement 1C)
     pricingByModel: new Map(), // model_id -> ProviderModelRead[] (all providers)
     artifactContent: new Map(), // artifact_id -> text
     attempts: new Map(), // agent_run_id -> attempts[]
@@ -47,6 +50,12 @@ export async function renderComparisonDetail(root, params) {
       state.comparison = await api.get(`/comparisons/${comparisonId}`);
       if (!state.task) {
         state.task = await api.get(`/tasks/${state.comparison.task_id}`).catch(() => null);
+      }
+      if (!state.versionIndex) {
+        state.versionIndex = await getProjectId()
+          .then(loadAgentCatalog)
+          .then(buildVersionIndex)
+          .catch(() => new Map());
       }
       await hydrateCandidateExtras(state);
       draw();
@@ -204,7 +213,8 @@ function phaseBadgeClass(phase) {
 }
 
 function buildCandidateCard(state, candidate, comparisonId, refresh) {
-  const classification = resolveClassification(state, candidate);
+  const { classification, modelName } = resolveModelInfo(state, candidate);
+  const { agentName, roleLabel } = resolveAgentRole(state, candidate);
   const isWinner = candidate.is_winner;
   const content = candidate.artifact_id ? state.artifactContent.get(candidate.artifact_id) : undefined;
   const canSelect =
@@ -224,7 +234,7 @@ function buildCandidateCard(state, candidate, comparisonId, refresh) {
         "button",
         {
           class: "small",
-          onclick: () => openExpandedAnswer(candidate, content, classification),
+          onclick: () => openExpandedAnswer(candidate, content, classification, agentName, roleLabel, modelName),
         },
         "Expand Answer"
       )
@@ -262,7 +272,7 @@ function buildCandidateCard(state, candidate, comparisonId, refresh) {
 
   const card = el("div", { class: `candidate-card${isWinner ? " winner" : ""}` }, [
     el("div", { class: "row between" }, [
-      el("div", { class: "candidate-title" }, candidate.label),
+      buildCandidateIdentity(agentName, roleLabel, modelName, candidate.label),
       el("span", { class: candidateStatusBadgeClass(candidate.status) }, candidateStatusLabel(candidate.status)),
     ]),
     isWinner ? el("div", { class: "selected-note" }, "✓ Selected Result") : null,
@@ -297,16 +307,17 @@ function buildAnswerBlock(candidate, content) {
   return el("div", { class: "candidate-answer" }, [buildRenderedAnswer(content)]);
 }
 
-function openExpandedAnswer(candidate, content, classification) {
+function openExpandedAnswer(candidate, content, classification, agentName, roleLabel, modelName) {
   const closeBtn = el(
     "button",
     { class: "modal-close-btn", "aria-label": "Close", onclick: () => closeModal() },
     "×"
   );
+  const subtitleParts = [roleLabel, modelName, `Status: ${candidateStatusLabel(candidate.status)}`].filter(Boolean);
   const header = el("div", { class: "modal-header" }, [
     el("div", {}, [
-      el("h2", {}, candidate.label),
-      el("div", { class: "modal-subtitle" }, `Status: ${candidateStatusLabel(candidate.status)}`),
+      el("h2", {}, agentName || candidate.label),
+      el("div", { class: "modal-subtitle" }, subtitleParts.join(" · ")),
     ]),
     closeBtn,
   ]);
@@ -324,7 +335,7 @@ function openExpandedAnswer(candidate, content, classification) {
 
   const answerBox = el("div", { class: "candidate-answer answer-expanded" }, [buildRenderedAnswer(content)]);
 
-  openModal(el("div", {}, [header, metaRow, answerBox]), { label: `${candidate.label} — full answer` });
+  openModal(el("div", {}, [header, metaRow, answerBox]), { label: `${agentName || candidate.label} — full answer` });
 }
 
 function buildEvidenceGrid(candidate, classification) {
@@ -359,9 +370,39 @@ function buildFailureBlock(state, candidate) {
   ]);
 }
 
-function resolveClassification(state, candidate) {
-  if (!candidate.model_id) return "unknown";
+function resolveModelInfo(state, candidate) {
+  if (!candidate.model_id) return { classification: "unknown", modelName: null };
   const rows = state.pricingByModel.get(candidate.model_id) || [];
   const match = rows.find((r) => r.provider_id === candidate.provider_id) || rows[0];
-  return match ? match.pricing_classification : "unknown";
+  return {
+    classification: match ? match.pricing_classification : "unknown",
+    modelName: match ? match.provider_model_id : null,
+  };
+}
+
+// "Role" is AgentVersion itself -- see frontend/assets/js/agentDirectory.js
+// for the architecture note. Resolved via agent_version_id (always present
+// on a configured candidate) against the project's Agent/AgentVersion
+// directory, never by parsing the candidate's own label string apart.
+// Falls back to the raw label for a candidate this lookup can't resolve
+// (e.g. one created before this enhancement, or via a script/test with an
+// arbitrary label) so nothing ever renders blank.
+function resolveAgentRole(state, candidate) {
+  const resolved = state.versionIndex ? state.versionIndex.get(candidate.agent_version_id) : null;
+  if (resolved) {
+    return { agentName: resolved.agent.name, roleLabel: roleLabelFor(resolved.version) };
+  }
+  return { agentName: candidate.label, roleLabel: null };
+}
+
+function buildCandidateIdentity(agentName, roleLabel, modelName, fallbackLabel) {
+  if (!roleLabel) {
+    // Resolution failed -- show the raw label rather than a broken/blank header.
+    return el("div", { class: "candidate-title" }, fallbackLabel);
+  }
+  return el("div", {}, [
+    el("div", { class: "candidate-title" }, agentName),
+    el("div", { class: "hint" }, roleLabel),
+    el("div", { class: "candidate-model-name" }, modelName || fallbackLabel),
+  ]);
 }
