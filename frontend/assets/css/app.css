@@ -439,10 +439,30 @@ button.small { padding: 6px 12px; font-size: 0.82rem; }
   max-height: 420px;
   overflow-y: auto;
 }
-.candidate-answer.answer-expanded {
-  max-height: 62vh;
-  font-size: 0.98rem;
+.candidate-answer.answer-focus {
+  max-height: none;
+  flex: 1;
+  min-height: 0;
+  font-size: 1rem;
+  line-height: 1.65;
 }
+.focus-answer-wrap {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.focus-nav {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  margin: 4px 0 14px;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+.focus-nav button { min-width: 110px; }
 
 /* Rendered-Markdown content (frontend/assets/js/markdown.js output) --
    shared by the in-card answer box and the Expand Answer modal. */
@@ -582,7 +602,8 @@ tr.clickable:hover { background: var(--bg-card-hover); }
   .candidate-grid { grid-template-columns: 1fr; }
 }
 
-/* Expand Answer modal (frontend/assets/js/modal.js) ----------------------- */
+/* Modal overlay (frontend/assets/js/modal.js) -- used by the Candidate
+   Focus View (large variant below) ----------------------------------------- */
 
 .modal-backdrop {
   position: fixed;
@@ -631,4 +652,30 @@ tr.clickable:hover { background: var(--bg-card-hover); }
 
 @media (max-width: 600px) {
   .modal-panel { padding: 16px; }
+}
+
+/* Candidate Focus View -- near-full-screen large modal variant, an
+   additive size option on the same modal.js overlay (Section: "Reuse/
+   extend the existing modal infrastructure rather than creating an
+   unrelated modal system"). ------------------------------------------------ */
+
+.modal-panel-large {
+  width: 96vw;
+  max-width: 1400px;
+  height: 92vh;
+  max-height: none;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden; /* only .candidate-answer.answer-focus scrolls internally */
+}
+.modal-panel-large .focus-view,
+.modal-panel-large .focus-content {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1;
+}
+
+@media (max-width: 700px) {
+  .modal-panel-large { width: 100vw; height: 100vh; border-radius: 0; }
 }

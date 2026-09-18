@@ -37,7 +37,7 @@ export function closeModal() {
   previousFocused = null;
 }
 
-export function openModal(contentNode, { label = "Dialog" } = {}) {
+export function openModal(contentNode, { label = "Dialog", size = null } = {}) {
   closeModal(); // never stack two overlays
 
   previousFocused = document.activeElement;
@@ -51,7 +51,10 @@ export function openModal(contentNode, { label = "Dialog" } = {}) {
   backdrop.setAttribute("aria-label", label);
 
   const panel = document.createElement("div");
-  panel.className = "modal-panel";
+  // `size` is an additive, optional variant (e.g. "large" for the MA5-UI
+  // Post-UAT Candidate Focus View) -- omitting it keeps every existing
+  // caller's normal-sized modal unchanged.
+  panel.className = size ? `modal-panel modal-panel-${size}` : "modal-panel";
   panel.tabIndex = -1;
   panel.appendChild(contentNode);
   backdrop.appendChild(panel);

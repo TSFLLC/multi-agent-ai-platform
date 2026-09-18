@@ -24,6 +24,7 @@ import { renderMarkdown } from "../markdown.js";
 import { openModal, closeModal } from "../modal.js";
 import { buildVersionIndex, loadAgentCatalog, roleLabelFor } from "../agentDirectory.js";
 import { getProjectId } from "../state.js";
+import { clampIndex, hasNext, hasPrevious, nextIndex, previousIndex } from "../focusNav.js";
 
 const POLL_INTERVAL_MS = 1500;
 const POLL_BOUND_MS = 20 * 60 * 1000; // stop auto-polling after 20 minutes; manual refresh still works
@@ -140,7 +141,7 @@ function buildPage(state, comparisonId, refresh) {
     el(
       "div",
       { class: "candidate-grid" },
-      comparison.candidates.map((c) => buildCandidateCard(state, c, comparisonId, refresh))
+      comparison.candidates.map((c, index) => buildCandidateCard(state, c, comparisonId, refresh, index))
     )
   );
 
@@ -212,7 +213,7 @@ function phaseBadgeClass(phase) {
   return "badge badge-running";
 }
 
-function buildCandidateCard(state, candidate, comparisonId, refresh) {
+function buildCandidateCard(state, candidate, comparisonId, refresh, index) {
   const { classification, modelName } = resolveModelInfo(state, candidate);
   const { agentName, roleLabel } = resolveAgentRole(state, candidate);
   const isWinner = candidate.is_winner;
@@ -222,24 +223,27 @@ function buildCandidateCard(state, candidate, comparisonId, refresh) {
     candidate.status === "completed" &&
     candidate.artifact_hash &&
     state.comparison.status !== "completed";
-  // Expand Answer is a reading affordance only (Section 5) -- it never
-  // participates in canSelect/select-winner and never appears for a
-  // candidate that produced no real answer to read.
-  const canExpand = candidate.status === "completed" && typeof content === "string" && content.length > 0;
 
-  const actions = [];
-  if (canExpand) {
-    actions.push(
-      el(
-        "button",
-        {
-          class: "small",
-          onclick: () => openExpandedAnswer(candidate, content, classification, agentName, roleLabel, modelName),
-        },
-        "Expand Answer"
-      )
-    );
-  }
+  const actions = [
+    // "View Large" (Final Readability Enhancement) cleanly supersedes the
+    // old "Expand Answer" -- it shows everything Expand Answer did
+    // (agent/role/model/status/answer/tokens/latency/pricing/cost) PLUS
+    // failure info, PLUS Select This Result, PLUS Previous/Next
+    // navigation across every candidate. Keeping a separate "Expand
+    // Answer" button alongside it would just be two buttons opening
+    // near-identical modals -- removed rather than duplicated. Shown on
+    // every card (not only successful ones) so a failed/in-progress
+    // candidate can also be read large.
+    el(
+      "button",
+      {
+        class: "small",
+        "aria-label": `View ${agentName || candidate.label} large`,
+        onclick: () => openCandidateFocusView(state, comparisonId, refresh, index),
+      },
+      "⤢ View Large"
+    ),
+  ];
   if (canSelect) {
     actions.push(
       el(
@@ -296,35 +300,73 @@ function buildRenderedAnswer(content) {
 }
 
 function buildAnswerBlock(candidate, content) {
-  if (!candidate.artifact_id) {
-    if (candidate.status === "failed" || candidate.status === "cancelled") {
-      return el("div", { class: "candidate-answer" }, "No result was produced.");
-    }
-    return el("div", { class: "candidate-answer" }, "Waiting for a result…");
-  }
-  if (content === undefined) return el("div", { class: "candidate-answer" }, [el("span", { class: "spinner" }), " Loading answer…"]);
-  if (content === null) return el("div", { class: "candidate-answer" }, "Could not load this answer's content.");
-  return el("div", { class: "candidate-answer" }, [buildRenderedAnswer(content)]);
+  return el("div", { class: "candidate-answer" }, [buildAnswerBlockContent(candidate, content)]);
 }
 
-function openExpandedAnswer(candidate, content, classification, agentName, roleLabel, modelName) {
-  const closeBtn = el(
-    "button",
-    { class: "modal-close-btn", "aria-label": "Close", onclick: () => closeModal() },
-    "×"
-  );
+// -- Candidate Focus View (MA5-UI Final Readability Enhancement) ------------
+// A near-full-screen modal (reusing frontend/assets/js/modal.js's existing
+// overlay -- never a second modal system) showing one candidate's complete
+// evidence with a dominant, comfortably wide answer area, plus Previous/
+// Next controls to move through every candidate without closing it. Never
+// touches comparison/selection state itself -- Select This Result inside
+// it calls the exact same POST /comparisons/{id}/select-winner as the
+// card's own button, then closes and lets the underlying page refresh.
+
+function openCandidateFocusView(state, comparisonId, refresh, startIndex) {
+  const container = el("div", { class: "focus-view" });
+  let index = clampIndex(startIndex, state.comparison.candidates.length);
+
+  function renderAt(newIndex) {
+    index = clampIndex(newIndex, state.comparison.candidates.length);
+    clear(container);
+    container.appendChild(buildFocusContent(state, comparisonId, refresh, index, renderAt));
+  }
+
+  renderAt(index);
+  openModal(container, { label: "Candidate detail", size: "large" });
+}
+
+function buildFocusContent(state, comparisonId, refresh, index, goTo) {
+  const candidates = state.comparison.candidates;
+  const candidate = candidates[index];
+  const { classification, modelName } = resolveModelInfo(state, candidate);
+  const { agentName, roleLabel } = resolveAgentRole(state, candidate);
+  const content = candidate.artifact_id ? state.artifactContent.get(candidate.artifact_id) : undefined;
+  const canSelect =
+    state.comparison.phase === "ready_for_selection" &&
+    candidate.status === "completed" &&
+    candidate.artifact_hash &&
+    state.comparison.status !== "completed";
+
+  const closeBtn = el("button", { class: "modal-close-btn", "aria-label": "Close", onclick: () => closeModal() }, "×");
   const subtitleParts = [roleLabel, modelName, `Status: ${candidateStatusLabel(candidate.status)}`].filter(Boolean);
   const header = el("div", { class: "modal-header" }, [
     el("div", {}, [
       el("h2", {}, agentName || candidate.label),
       el("div", { class: "modal-subtitle" }, subtitleParts.join(" · ")),
+      candidate.is_winner ? el("div", { class: "selected-note" }, "✓ Selected Result") : null,
     ]),
     closeBtn,
   ]);
 
-  const metaRow = el("div", { class: "candidate-evidence", style: "margin:14px 0" }, [
+  const nav = el("div", { class: "focus-nav" }, [
+    el(
+      "button",
+      { class: "small", disabled: !hasPrevious(index), onclick: () => goTo(previousIndex(index)) },
+      "← Previous"
+    ),
+    el("span", {}, `Candidate ${index + 1} of ${candidates.length}`),
+    el(
+      "button",
+      { class: "small", disabled: !hasNext(index, candidates.length), onclick: () => goTo(nextIndex(index)) },
+      "Next →"
+    ),
+  ]);
+
+  const metaRow = el("div", { class: "candidate-evidence", style: "margin:6px 0 14px" }, [
     evidence("Input tokens", formatTokens(candidate.tokens_in)),
     evidence("Output tokens", formatTokens(candidate.tokens_out)),
+    evidence("Total tokens", formatTokens((candidate.tokens_in || 0) + (candidate.tokens_out || 0))),
     evidence("Latency", formatLatency(candidate.latency_ms)),
     el("div", {}, [
       el("div", { class: "metric-label" }, "Pricing"),
@@ -333,9 +375,60 @@ function openExpandedAnswer(candidate, content, classification, agentName, roleL
     evidence("Cost", formatCostForClassification(candidate.cost_amount, classification)),
   ]);
 
-  const answerBox = el("div", { class: "candidate-answer answer-expanded" }, [buildRenderedAnswer(content)]);
+  const answerBox = el("div", { class: "focus-answer-wrap" }, [
+    el("div", { class: "candidate-answer answer-focus" }, [buildAnswerBlockContent(candidate, content)]),
+  ]);
 
-  openModal(el("div", {}, [header, metaRow, answerBox]), { label: `${agentName || candidate.label} — full answer` });
+  const failureBlock = buildFailureBlock(state, candidate);
+
+  const selectRow = canSelect
+    ? el(
+        "div",
+        { class: "row", style: "margin-top:14px" },
+        el(
+          "button",
+          {
+            class: "primary small",
+            disabled: state.selecting === candidate.id,
+            onclick: async (e) => {
+              state.selecting = candidate.id;
+              e.target.disabled = true;
+              e.target.textContent = "Selecting…";
+              try {
+                await api.post(`/comparisons/${comparisonId}/select-winner`, {
+                  comparison_candidate_id: candidate.id,
+                  artifact_hash: candidate.artifact_hash,
+                });
+                state.selecting = null;
+              } catch (err) {
+                state.selecting = null;
+                state.error = err.message || "Failed to select this result.";
+              }
+              closeModal();
+              await refresh();
+            },
+          },
+          "Select This Result"
+        )
+      )
+    : null;
+
+  return el("div", { class: "focus-content" }, [header, nav, metaRow, answerBox, failureBlock, selectRow]);
+}
+
+// Shared by the card's normal-size answer box and the Focus View's
+// dominant one -- same safe-Markdown path (frontend/assets/js/markdown.js),
+// never a second implementation.
+function buildAnswerBlockContent(candidate, content) {
+  if (!candidate.artifact_id) {
+    if (candidate.status === "failed" || candidate.status === "cancelled") {
+      return document.createTextNode("No result was produced.");
+    }
+    return document.createTextNode("Waiting for a result…");
+  }
+  if (content === undefined) return el("span", {}, [el("span", { class: "spinner" }), " Loading answer…"]);
+  if (content === null) return document.createTextNode("Could not load this answer's content.");
+  return buildRenderedAnswer(content);
 }
 
 function buildEvidenceGrid(candidate, classification) {
