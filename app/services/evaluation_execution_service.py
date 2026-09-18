@@ -47,6 +47,7 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -76,6 +77,8 @@ from app.models.evaluation_definitions import (
     EvaluationDefinitionVersion,
 )
 from app.models.evaluation_runs import EvaluationCriterionResult, EvaluationRun
+from app.models.execution import ModelCall
+from app.models.providers import Model, Provider
 from app.models.tasks import AgentRun, AgentRunAttempt, Task, TaskRun
 from app.repositories.job_queue_repository import JobQueueRepository
 from app.services.base import BaseService
@@ -979,3 +982,420 @@ class EvaluationExecutionService(BaseService):
             event_type=event_type,
             **fields,
         )
+
+
+# -- read-side: bounded provenance detail for MA6.4 UI, MA6 Slice 3D ------------
+#
+# Every function below is a pure read: no provider/model call, no job
+# enqueue, no EvaluationRun/Task/TaskRun/AgentRun row created or mutated,
+# and no ComparisonRun/ComparisonCandidate winner-selection column ever
+# read or written (that remains app.services.comparison_service's
+# exclusive surface). The normalized tables (EvaluationRun,
+# EvaluationCriterionResult, ModelCall, AgentRun/AgentVersion/Agent,
+# Model/Provider) remain the only source of truth -- nothing here is
+# stored; every value is assembled fresh at read time via the same plain,
+# explicitly-batched ``select(...).where(...in_(...))`` style already used
+# by app.services.comparison_service.get_comparison_detail and
+# app.services.review_orchestration_service.get_review_summary, so a
+# comparison-level read never issues one query per candidate/run
+# ("obvious N+1" -- Section: MA6 Slice 3D requirement) no matter how many
+# candidates/historical evaluations exist.
+
+
+@dataclass
+class ModelIdentity:
+    """A resolved Model/Provider identity -- always read off an AgentRun's
+    own ``model_id``/``provider_id``/``provider_model_snapshot_id`` FKs
+    (Section: "never infer a model from names/strings when a provenance
+    relation exists"), never parsed out of ``model_policy_json``. ``None``
+    (the whole block, not individual fields) means the Agent Run never
+    resolved a model -- e.g. it hasn't executed yet."""
+
+    model_id: Optional[str]
+    canonical_model_id: Optional[str]
+    provider_id: Optional[str]
+    provider_name: Optional[str]
+    provider_model_snapshot_id: Optional[str]
+
+
+@dataclass
+class AgentIdentity:
+    """An Agent/AgentVersion pair as they applied to one Agent Run --
+    ``agent_version_id`` is always present (the FK that actually ran is
+    never optional); ``agent_id``/``agent_name`` are ``None`` only if the
+    Agent Version's own parent Agent row was later deleted (never expected
+    in practice, defensive only)."""
+
+    agent_id: Optional[str]
+    agent_name: Optional[str]
+    agent_version_id: str
+    agent_version: Optional[int]
+    agent_version_role: Optional[str]
+
+
+@dataclass
+class ExecutionEvidence:
+    """Aggregated across every ``ModelCall`` row for one Agent Run --
+    summed exactly like app.services.comparison_service.CandidateUsage and
+    app.services.review_orchestration_service.get_review_summary already
+    do, never copied onto/stored on EvaluationRun itself. ``None`` (from
+    the caller) means zero ModelCall rows exist yet for that Agent Run --
+    never fabricated as zero."""
+
+    tokens_in: int
+    tokens_out: int
+    total_tokens: int
+    cost_amount: Decimal
+    cost_currency: str
+    cost_is_estimated: bool
+    latency_ms: int
+
+
+@dataclass
+class EvaluationSubjectDetail:
+    agent_run_id: str
+    agent: AgentIdentity
+    model: Optional[ModelIdentity]
+    artifact_id: str
+    artifact_content_hash: str
+
+
+@dataclass
+class EvaluatorDetail:
+    agent: AgentIdentity
+    agent_run_id: str
+    model: Optional[ModelIdentity]
+    execution_evidence: Optional[ExecutionEvidence]
+
+
+@dataclass
+class EvaluationDefinitionIdentity:
+    evaluation_definition_id: str
+    evaluation_definition_name: str
+    evaluation_definition_version_id: str
+    evaluation_definition_version: int
+
+
+@dataclass
+class CriterionResultDetail:
+    """One EvaluationCriterionResult plus its immutable registry
+    label/description (Section: "preserve rubric order and expose
+    criterion label/description where available") -- ``criterion_label``/
+    ``criterion_description`` are ``None`` only if the registry
+    EvaluationCriterion row itself was deleted out from under an
+    already-recorded result (never expected; the FK has no cascade from
+    that direction)."""
+
+    id: str
+    criterion_key: str
+    criterion_label: Optional[str]
+    criterion_description: Optional[str]
+    order_index: int
+    finding: EvaluationFinding
+    rationale: str
+    evidence_refs: Optional[list]
+
+
+@dataclass
+class EvaluationRunDetail:
+    run: EvaluationRun
+    subject: EvaluationSubjectDetail
+    evaluation_definition: EvaluationDefinitionIdentity
+    criterion_results: List[CriterionResultDetail]
+    evaluator: Optional[EvaluatorDetail]
+
+
+@dataclass
+class EvaluationRunSummary:
+    """One historical EvaluationRun as it appears within a comparison-level
+    grouping (app.api.routers.comparisons's GET .../evaluations) -- lighter
+    than ``EvaluationRunDetail`` (no subject/full evaluator Agent identity
+    resolution) on purpose, since this list is per-comparison and must stay
+    N+1-free regardless of candidate/history count; ``evaluator_model``
+    (batched, cheap) is included because "different evaluator models
+    remain distinguishable" is an explicit requirement for this view even
+    without opening each run's own detail."""
+
+    run: EvaluationRun
+    criterion_results: List[CriterionResultDetail]
+    evaluator_model: Optional[ModelIdentity]
+
+
+@dataclass
+class ComparisonCandidateEvaluations:
+    comparison_candidate_id: str
+    subject_agent_run_id: Optional[str]
+    evaluation_runs: List[EvaluationRunSummary]
+
+
+@dataclass
+class ComparisonEvaluationsDetail:
+    comparison_id: str
+    candidates: List[ComparisonCandidateEvaluations]
+
+
+def _agent_identity(db: Session, agent_version_id: str) -> AgentIdentity:
+    agent_version = db.get(AgentVersion, agent_version_id)
+    agent = db.get(Agent, agent_version.agent_id) if agent_version is not None else None
+    return AgentIdentity(
+        agent_id=agent.id if agent is not None else None,
+        agent_name=agent.name if agent is not None else None,
+        agent_version_id=agent_version_id,
+        agent_version=agent_version.version if agent_version is not None else None,
+        agent_version_role=agent_version.role if agent_version is not None else None,
+    )
+
+
+def _model_identity(agent_run: AgentRun, models_by_id: Dict[str, Model], providers_by_id: Dict[str, Provider]) -> Optional[ModelIdentity]:
+    if agent_run.model_id is None and agent_run.provider_id is None:
+        return None
+    model = models_by_id.get(agent_run.model_id) if agent_run.model_id else None
+    provider = providers_by_id.get(agent_run.provider_id) if agent_run.provider_id else None
+    return ModelIdentity(
+        model_id=agent_run.model_id,
+        canonical_model_id=model.canonical_model_id if model is not None else None,
+        provider_id=agent_run.provider_id,
+        provider_name=provider.name if provider is not None else None,
+        provider_model_snapshot_id=agent_run.provider_model_snapshot_id,
+    )
+
+
+def _models_and_providers_for(
+    db: Session, agent_runs: List[AgentRun]
+) -> Tuple[Dict[str, Model], Dict[str, Provider]]:
+    """Batched, not per-``AgentRun`` -- one query for every distinct
+    ``model_id``/``provider_id`` among the given Agent Runs, regardless of
+    how many there are."""
+    model_ids = {ar.model_id for ar in agent_runs if ar.model_id}
+    provider_ids = {ar.provider_id for ar in agent_runs if ar.provider_id}
+    models_by_id = (
+        {m.id: m for m in db.execute(select(Model).where(Model.id.in_(model_ids))).scalars().all()}
+        if model_ids
+        else {}
+    )
+    providers_by_id = (
+        {p.id: p for p in db.execute(select(Provider).where(Provider.id.in_(provider_ids))).scalars().all()}
+        if provider_ids
+        else {}
+    )
+    return models_by_id, providers_by_id
+
+
+def _execution_evidence(db: Session, agent_run_id: str) -> Optional[ExecutionEvidence]:
+    calls = list(db.execute(select(ModelCall).where(ModelCall.agent_run_id == agent_run_id)).scalars().all())
+    if not calls:
+        return None
+    tokens_in = sum(c.tokens_in or 0 for c in calls)
+    tokens_out = sum(c.tokens_out or 0 for c in calls)
+    cost_amount = sum((c.cost_amount or Decimal(0) for c in calls), Decimal(0))
+    latency_ms = sum(c.latency_ms or 0 for c in calls)
+    return ExecutionEvidence(
+        tokens_in=tokens_in,
+        tokens_out=tokens_out,
+        total_tokens=tokens_in + tokens_out,
+        cost_amount=cost_amount,
+        cost_currency=calls[0].cost_currency,
+        cost_is_estimated=any(c.cost_is_estimated for c in calls),
+        latency_ms=latency_ms,
+    )
+
+
+def _criterion_result_details_by_run_id(
+    db: Session, evaluation_run_ids: List[str]
+) -> Dict[str, List[CriterionResultDetail]]:
+    """Batched across every given ``evaluation_run_id`` -- one query for
+    the results, one more for their registry criteria, regardless of how
+    many runs are being read at once. Order is preserved exactly as
+    ``EvaluationRun.criterion_results``'s own relationship already
+    guarantees (``order_by=EvaluationCriterionResult.order_index``)."""
+    if not evaluation_run_ids:
+        return {}
+    results = list(
+        db.execute(
+            select(EvaluationCriterionResult)
+            .where(EvaluationCriterionResult.evaluation_run_id.in_(evaluation_run_ids))
+            .order_by(EvaluationCriterionResult.order_index)
+        )
+        .scalars()
+        .all()
+    )
+    criterion_ids = {r.evaluation_criterion_id for r in results}
+    criteria_by_id = (
+        {
+            c.id: c
+            for c in db.execute(
+                select(EvaluationCriterion).where(EvaluationCriterion.id.in_(criterion_ids))
+            )
+            .scalars()
+            .all()
+        }
+        if criterion_ids
+        else {}
+    )
+
+    grouped: Dict[str, List[CriterionResultDetail]] = {}
+    for r in results:
+        criterion = criteria_by_id.get(r.evaluation_criterion_id)
+        grouped.setdefault(r.evaluation_run_id, []).append(
+            CriterionResultDetail(
+                id=r.id,
+                criterion_key=r.criterion_key,
+                criterion_label=criterion.label if criterion is not None else None,
+                criterion_description=criterion.description if criterion is not None else None,
+                order_index=r.order_index,
+                finding=r.finding,
+                rationale=r.rationale,
+                evidence_refs=r.evidence_refs,
+            )
+        )
+    return grouped
+
+
+def get_evaluation_run_detail(db: Session, evaluation_run_id: str) -> Optional[EvaluationRunDetail]:
+    """The full single-EvaluationRun provenance read (Section: MA6 Slice
+    3D "Required evaluation detail read model") -- one bounded set of
+    queries (subject chain, evaluation definition identity, evaluator
+    chain when applicable, one batched criterion-results fetch); never a
+    list, so no N+1 concern applies here the way it does for the
+    comparison-level grouping below."""
+    run = db.get(EvaluationRun, evaluation_run_id)
+    if run is None:
+        return None
+
+    # subject_agent_run_id is a NOT NULL FK with ondelete=CASCADE from
+    # agent_runs -- this EvaluationRun row could not exist if its subject
+    # Agent Run didn't (same guarantee create_run/create_agent_evaluator_run
+    # already rely on at creation time).
+    subject_agent_run = db.get(AgentRun, run.subject_agent_run_id)
+    assert subject_agent_run is not None
+    subject_models_by_id, subject_providers_by_id = _models_and_providers_for(db, [subject_agent_run])
+    subject = EvaluationSubjectDetail(
+        agent_run_id=run.subject_agent_run_id,
+        agent=_agent_identity(db, subject_agent_run.agent_version_id),
+        model=_model_identity(subject_agent_run, subject_models_by_id, subject_providers_by_id),
+        artifact_id=run.subject_artifact_id,
+        artifact_content_hash=run.subject_artifact_content_hash,
+    )
+
+    # evaluation_definition_version_id is a NOT NULL FK to an immutable,
+    # never-deleted registry row (same as evaluation_definition_id on it).
+    definition_version = db.get(EvaluationDefinitionVersion, run.evaluation_definition_version_id)
+    assert definition_version is not None
+    definition = db.get(EvaluationDefinition, definition_version.evaluation_definition_id)
+    assert definition is not None
+    evaluation_definition = EvaluationDefinitionIdentity(
+        evaluation_definition_id=definition.id,
+        evaluation_definition_name=definition.name,
+        evaluation_definition_version_id=definition_version.id,
+        evaluation_definition_version=definition_version.version,
+    )
+
+    evaluator: Optional[EvaluatorDetail] = None
+    if run.evaluator_agent_version_id and run.evaluator_agent_run_id:
+        evaluator_agent_run = db.get(AgentRun, run.evaluator_agent_run_id)
+        assert evaluator_agent_run is not None
+        evaluator_models_by_id, evaluator_providers_by_id = _models_and_providers_for(
+            db, [evaluator_agent_run]
+        )
+        evaluator = EvaluatorDetail(
+            agent=_agent_identity(db, run.evaluator_agent_version_id),
+            agent_run_id=run.evaluator_agent_run_id,
+            model=_model_identity(evaluator_agent_run, evaluator_models_by_id, evaluator_providers_by_id),
+            execution_evidence=_execution_evidence(db, run.evaluator_agent_run_id),
+        )
+
+    criterion_results = _criterion_result_details_by_run_id(db, [run.id]).get(run.id, [])
+
+    return EvaluationRunDetail(
+        run=run,
+        subject=subject,
+        evaluation_definition=evaluation_definition,
+        criterion_results=criterion_results,
+        evaluator=evaluator,
+    )
+
+
+def list_comparison_evaluations(db: Session, comparison_id: str) -> Optional[ComparisonEvaluationsDetail]:
+    """Every independent EvaluationRun already created for this
+    comparison's candidates, grouped by candidate (Section: MA6 Slice 3D
+    "Comparison evaluation read surface") -- a bounded, fixed number of
+    batched queries regardless of candidate/history count, never one query
+    per candidate or per run. Read-only: never starts/reruns an
+    evaluation, never touches ComparisonRun/ComparisonCandidate
+    winner-selection state, never ranks/scores."""
+    comparison = db.get(ComparisonRun, comparison_id)
+    if comparison is None:
+        return None
+
+    candidates = list(
+        db.execute(
+            select(ComparisonCandidate)
+            .where(ComparisonCandidate.comparison_run_id == comparison_id)
+            .order_by(ComparisonCandidate.created_at)
+        )
+        .scalars()
+        .all()
+    )
+    agent_run_ids = [c.agent_run_id for c in candidates if c.agent_run_id]
+
+    runs: List[EvaluationRun] = []
+    if agent_run_ids:
+        runs = list(
+            db.execute(
+                select(EvaluationRun)
+                .where(EvaluationRun.subject_agent_run_id.in_(agent_run_ids))
+                .order_by(EvaluationRun.created_at)
+            )
+            .scalars()
+            .all()
+        )
+
+    criterion_results_by_run = _criterion_result_details_by_run_id(db, [r.id for r in runs])
+
+    evaluator_agent_run_ids = [r.evaluator_agent_run_id for r in runs if r.evaluator_agent_run_id]
+    evaluator_agent_runs_by_id: Dict[str, AgentRun] = (
+        {
+            ar.id: ar
+            for ar in db.execute(
+                select(AgentRun).where(AgentRun.id.in_(evaluator_agent_run_ids))
+            )
+            .scalars()
+            .all()
+        }
+        if evaluator_agent_run_ids
+        else {}
+    )
+    models_by_id, providers_by_id = _models_and_providers_for(
+        db, list(evaluator_agent_runs_by_id.values())
+    )
+
+    def _evaluator_model_for(run: EvaluationRun) -> Optional[ModelIdentity]:
+        evaluator_agent_run_id = run.evaluator_agent_run_id
+        if not evaluator_agent_run_id:
+            return None
+        evaluator_agent_run = evaluator_agent_runs_by_id.get(evaluator_agent_run_id)
+        if evaluator_agent_run is None:
+            return None
+        return _model_identity(evaluator_agent_run, models_by_id, providers_by_id)
+
+    runs_by_agent_run_id: Dict[str, List[EvaluationRun]] = {}
+    for r in runs:
+        runs_by_agent_run_id.setdefault(r.subject_agent_run_id, []).append(r)
+
+    candidate_details = [
+        ComparisonCandidateEvaluations(
+            comparison_candidate_id=c.id,
+            subject_agent_run_id=c.agent_run_id,
+            evaluation_runs=[
+                EvaluationRunSummary(
+                    run=r,
+                    criterion_results=criterion_results_by_run.get(r.id, []),
+                    evaluator_model=_evaluator_model_for(r),
+                )
+                for r in (runs_by_agent_run_id.get(c.agent_run_id, []) if c.agent_run_id else [])
+            ],
+        )
+        for c in candidates
+    ]
+
+    return ComparisonEvaluationsDetail(comparison_id=comparison_id, candidates=candidate_details)

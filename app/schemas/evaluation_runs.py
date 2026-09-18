@@ -1,4 +1,5 @@
-"""Evaluation Run execution contracts — MA6 Slice 2, extended by Slice 3C.
+"""Evaluation Run execution contracts — MA6 Slice 2, extended by Slice 3C,
+extended by Slice 3D's read-model/provenance shapes.
 
 Mirrors app.schemas.evaluation_definitions's shape applied to a run's
 results instead of a rubric's criteria. No aggregate score/percentage/rank
@@ -6,6 +7,7 @@ field exists anywhere here on purpose (MA6 non-negotiable invariant).
 """
 
 from datetime import datetime
+from decimal import Decimal
 from typing import Any, List, Optional
 
 from pydantic import BaseModel, model_validator
@@ -48,6 +50,15 @@ class EvaluationCriterionResultRead(ORMModel):
     # is a list of structured {"quote", "criterion_key"} objects -- both
     # are valid, unconstrained JSON already at the model/DB layer.
     evidence_refs: Optional[List[Any]] = None
+    # Slice 3D: the immutable registry EvaluationCriterion's own
+    # label/description, resolved via evaluation_criterion_id -- never
+    # populated by a plain ``from_attributes`` read of this row alone
+    # (that FK isn't on EvaluationCriterionResult's own set of plain
+    # columns), only by the Slice 3D read-model builders that explicitly
+    # join it (app.services.evaluation_execution_service.
+    # _criterion_result_details_by_run_id).
+    criterion_label: Optional[str] = None
+    criterion_description: Optional[str] = None
 
 
 class EvaluationRunRead(TimestampedRead):
@@ -66,3 +77,82 @@ class EvaluationRunRead(TimestampedRead):
     ended_at: Optional[datetime] = None
     failure_reason: Optional[str] = None
     criterion_results: List[EvaluationCriterionResultRead] = []
+
+
+# -- Slice 3D: bounded provenance detail for MA6.4 UI ---------------------------
+
+
+class ModelIdentityRead(BaseModel):
+    """Always resolved via an Agent Run's own model_id/provider_id/
+    provider_model_snapshot_id FKs (app.services.evaluation_execution_
+    service.ModelIdentity) -- never inferred from a model_policy string.
+    Every field is ``None`` together when no model was ever resolved for
+    that Agent Run (e.g. it hasn't executed yet) -- never fabricated."""
+
+    model_id: Optional[str] = None
+    canonical_model_id: Optional[str] = None
+    provider_id: Optional[str] = None
+    provider_name: Optional[str] = None
+    provider_model_snapshot_id: Optional[str] = None
+
+
+class AgentIdentityRead(BaseModel):
+    agent_id: Optional[str] = None
+    agent_name: Optional[str] = None
+    agent_version_id: str
+    agent_version: Optional[int] = None
+    agent_version_role: Optional[str] = None
+
+
+class ExecutionEvidenceRead(BaseModel):
+    """Aggregated from existing ModelCall rows at read time (never copied
+    onto EvaluationRun) -- see app.services.evaluation_execution_service.
+    _execution_evidence. This whole block is omitted (``None``) on the
+    parent when zero ModelCall rows exist yet, never presented as zeros."""
+
+    tokens_in: int
+    tokens_out: int
+    total_tokens: int
+    cost_amount: Decimal
+    cost_currency: str
+    cost_is_estimated: bool
+    latency_ms: int
+
+
+class EvaluationSubjectRead(BaseModel):
+    agent_run_id: str
+    agent: AgentIdentityRead
+    model: Optional[ModelIdentityRead] = None
+    artifact_id: str
+    artifact_content_hash: str
+
+
+class EvaluatorRead(BaseModel):
+    """``None`` on the parent for method=DETERMINISTIC -- never a
+    fabricated/empty-but-present evaluator block for a method that has no
+    evaluator at all."""
+
+    agent: AgentIdentityRead
+    agent_run_id: str
+    model: Optional[ModelIdentityRead] = None
+    execution_evidence: Optional[ExecutionEvidenceRead] = None
+
+
+class EvaluationDefinitionIdentityRead(BaseModel):
+    evaluation_definition_id: str
+    evaluation_definition_name: str
+    evaluation_definition_version_id: str
+    evaluation_definition_version: int
+
+
+class EvaluationRunDetailRead(EvaluationRunRead):
+    """GET /evaluation-runs/{id}'s full response shape (Section: MA6 Slice
+    3D) -- a strict superset of EvaluationRunRead's own flat fields (every
+    existing consumer of the plain shape keeps working unchanged), plus
+    the subject/evaluator/definition provenance blocks MA6.4 needs. No
+    aggregate score/percentage/rank/winner field exists here, same
+    invariant as the rest of this module."""
+
+    subject: EvaluationSubjectRead
+    evaluation_definition: EvaluationDefinitionIdentityRead
+    evaluator: Optional[EvaluatorRead] = None

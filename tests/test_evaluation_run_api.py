@@ -284,3 +284,59 @@ def test_create_agent_evaluator_run_cross_project_evaluator_version_rejected(
         },
     )
     assert resp.status_code == 409
+
+
+# -- GET detail: Slice 3D read-model provenance -----------------------------------
+
+
+def test_get_evaluation_run_detail_exposes_subject_and_definition_provenance(
+    client, db, auth_headers, bootstrap, tmp_path
+):
+    agent_run, artifact = _subject(db, tmp_path, bootstrap.project)
+    version = _published_version(db, bootstrap.project, _criteria("non_empty_output"))
+
+    create = client.post(
+        f"/agent-runs/{agent_run.id}/evaluations",
+        headers=auth_headers,
+        json={"subject_artifact_id": artifact.id, "evaluation_definition_version_id": version.id},
+    )
+    assert create.status_code == 201
+
+    resp = client.get(f"/evaluation-runs/{create.json()['id']}", headers=auth_headers)
+    assert resp.status_code == 200
+    body = resp.json()
+
+    # flat Slice 2/3C shape still present -- backward compatible
+    assert body["method"] == "deterministic"
+    assert body["subject_agent_run_id"] == agent_run.id
+
+    # new Slice 3D provenance blocks
+    assert body["subject"]["agent_run_id"] == agent_run.id
+    assert body["subject"]["agent"]["agent_version_id"] == agent_run.agent_version_id
+    assert body["subject"]["artifact_id"] == artifact.id
+    assert body["subject"]["artifact_content_hash"] == artifact.content_hash
+    # this agent_run was never actually executed (artifact injected
+    # directly) -- no model was ever resolved, so null, not fabricated.
+    assert body["subject"]["model"] is None
+    assert body["evaluation_definition"]["evaluation_definition_version_id"] == version.id
+    assert body["evaluation_definition"]["evaluation_definition_version"] == version.version
+    assert body["evaluator"] is None  # DETERMINISTIC
+
+    # no score/percentage/rank/winner field anywhere in the response
+    blob = resp.text.lower()
+    for term in ["score", "percentage", "rank", "winner", "grade"]:
+        assert term not in blob
+
+
+def test_get_evaluation_run_detail_cross_project_denied(client, db, auth_headers, bootstrap, tmp_path):
+    other_project = make_project(db, name="Isolated Detail")
+    agent_run, artifact = _subject(db, tmp_path, other_project)
+    version = _published_version(db, other_project, _criteria("non_empty_output"))
+    run = EvaluationExecutionService(db).create_run(
+        agent_run_id=agent_run.id,
+        subject_artifact_id=artifact.id,
+        evaluation_definition_version_id=version.id,
+    )
+
+    resp = client.get(f"/evaluation-runs/{run.id}", headers=auth_headers)
+    assert resp.status_code == 403

@@ -15,6 +15,7 @@ from typing import List, Optional
 from pydantic import BaseModel, model_validator
 
 from app.db.enums import ComparisonRunStatus, EvaluationMethod
+from app.schemas.evaluation_runs import EvaluationRunRead, ModelIdentityRead
 
 
 class ComparisonReviewConfig(BaseModel):
@@ -142,3 +143,41 @@ class ComparisonCandidateEvaluationResult(BaseModel):
 class ComparisonEvaluationResponse(BaseModel):
     comparison_id: str
     results: List[ComparisonCandidateEvaluationResult] = []
+
+
+# -- GET /comparisons/{id}/evaluations: read-only history, Slice 3D --------------
+
+
+class ComparisonEvaluationRunRead(EvaluationRunRead):
+    """One historical EvaluationRun as it appears grouped under a
+    comparison candidate -- the same flat shape GET /evaluation-runs/{id}
+    already returns (Slice 2/3C), plus the evaluator's resolved model
+    identity so "different evaluator models remain distinguishable"
+    (Section: MA6 Slice 3D) without a second request per run. ``None`` for
+    method=DETERMINISTIC or before an AGENT_EVALUATOR run has resolved a
+    model."""
+
+    evaluator_model: Optional[ModelIdentityRead] = None
+
+
+class ComparisonCandidateEvaluationsRead(BaseModel):
+    """Every historical EvaluationRun for one candidate, oldest first --
+    never collapsed to "the latest one": multiple past evaluations against
+    different Evaluation Definition Versions/evaluator configurations all
+    remain visible (Section: MA6 Slice 3D)."""
+
+    comparison_candidate_id: str
+    subject_agent_run_id: Optional[str] = None
+    evaluation_runs: List[ComparisonEvaluationRunRead] = []
+
+
+class ComparisonEvaluationsRead(BaseModel):
+    """GET /comparisons/{id}/evaluations's response (Section: MA6 Slice
+    3D) -- read-only aggregation of the independent EvaluationRuns already
+    created for this comparison's candidates (via POST .../evaluations,
+    MA6 Slice 3C, or the single-AgentRun endpoint), grouped by candidate.
+    Never starts/reruns an evaluation, never ranks/scores/picks a winner,
+    never calls a model -- purely a read over existing rows."""
+
+    comparison_id: str
+    candidates: List[ComparisonCandidateEvaluationsRead] = []

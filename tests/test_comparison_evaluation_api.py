@@ -258,3 +258,62 @@ def test_analyze_comparison_retry_via_http_is_idempotent(client, auth_headers, b
     second_results = {r["comparison_candidate_id"]: r["evaluation_run_id"] for r in second.json()["results"]}
     assert second_results == first_results
     assert {r["status"] for r in second.json()["results"]} == {"reused"}
+
+
+# -- GET .../evaluations: read-only history, Slice 3D ----------------------------
+
+
+def test_list_comparison_evaluations_requires_auth(client, bootstrap):
+    resp = client.get("/comparisons/does-not-exist/evaluations")
+    assert resp.status_code == 401
+
+
+def test_list_comparison_evaluations_missing_comparison_returns_404(client, auth_headers, bootstrap):
+    resp = client.get("/comparisons/does-not-exist/evaluations", headers=auth_headers)
+    assert resp.status_code == 404
+
+
+def test_list_comparison_evaluations_cross_project_denied(client, db, auth_headers, bootstrap):
+    other_project = make_project(db, org=make_org(db, name="Other Org 3D"))
+    other_task = make_task(db, project=other_project)
+    from app.models.artifacts_eval import ComparisonRun
+    from app.models.tasks import TaskRun
+
+    other_task_run = TaskRun(task_id=other_task.id)
+    db.add(other_task_run)
+    db.flush()
+    other_comparison = ComparisonRun(task_run_id=other_task_run.id)
+    db.add(other_comparison)
+    db.commit()
+
+    resp = client.get(f"/comparisons/{other_comparison.id}/evaluations", headers=auth_headers)
+    assert resp.status_code == 403
+
+
+def test_list_comparison_evaluations_maps_runs_to_correct_candidates(client, auth_headers, bootstrap, db):
+    launched = _completed_comparison(client, auth_headers, bootstrap, db)
+    version = _published_definition_version(db, bootstrap.project, _criteria("non_empty_output"))
+
+    fanout = client.post(
+        f"/comparisons/{launched['id']}/evaluations",
+        headers=auth_headers,
+        json={"evaluation_definition_version_id": version.id},
+    )
+    assert fanout.status_code == 200
+    expected_run_id_by_candidate = {
+        r["comparison_candidate_id"]: r["evaluation_run_id"] for r in fanout.json()["results"]
+    }
+
+    resp = client.get(f"/comparisons/{launched['id']}/evaluations", headers=auth_headers)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["comparison_id"] == launched["id"]
+    assert len(body["candidates"]) == 2
+
+    for entry in body["candidates"]:
+        candidate_id = entry["comparison_candidate_id"]
+        run_ids = [r["id"] for r in entry["evaluation_runs"]]
+        assert run_ids == [expected_run_id_by_candidate[candidate_id]]
+        # never a comparative/ranking field anywhere in this response
+        for run in entry["evaluation_runs"]:
+            assert "score" not in run and "rank" not in run and "winner" not in run

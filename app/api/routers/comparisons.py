@@ -11,6 +11,7 @@ Task Run -> Task for Agent Runs.
 """
 
 import uuid
+from dataclasses import asdict
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, Header
@@ -27,16 +28,23 @@ from app.models.identity import User
 from app.models.tasks import Task, TaskRun
 from app.schemas.comparisons import (
     ComparisonCandidateEvaluationResult,
+    ComparisonCandidateEvaluationsRead,
     ComparisonCandidateRead,
     ComparisonEvaluationRequest,
     ComparisonEvaluationResponse,
+    ComparisonEvaluationRunRead,
+    ComparisonEvaluationsRead,
     ComparisonReviewConfig,
     ComparisonRunCreate,
     ComparisonRunRead,
     SelectWinnerRequest,
 )
+from app.schemas.evaluation_runs import EvaluationCriterionResultRead, ModelIdentityRead
 from app.services.comparison_service import ComparisonService, get_comparison_detail
 from app.services.evaluation_execution_service import EvaluationExecutionService
+from app.services.evaluation_execution_service import (
+    list_comparison_evaluations as _list_comparison_evaluations,
+)
 from app.services.idempotency_service import BeginOutcome, IdempotencyService
 
 router = APIRouter(tags=["comparisons"])
@@ -274,6 +282,77 @@ def analyze_comparison(
                 reason=o.reason,
             )
             for o in outcomes
+        ],
+    )
+
+
+def _evaluation_run_read(run, criterion_results, evaluator_model) -> ComparisonEvaluationRunRead:
+    return ComparisonEvaluationRunRead(
+        id=run.id,
+        created_at=run.created_at,
+        subject_agent_run_id=run.subject_agent_run_id,
+        subject_artifact_id=run.subject_artifact_id,
+        subject_artifact_content_hash=run.subject_artifact_content_hash,
+        evaluation_definition_version_id=run.evaluation_definition_version_id,
+        method=run.method,
+        status=run.status,
+        requested_by_user_id=run.requested_by_user_id,
+        evaluator_agent_version_id=run.evaluator_agent_version_id,
+        evaluator_task_run_id=run.evaluator_task_run_id,
+        evaluator_agent_run_id=run.evaluator_agent_run_id,
+        started_at=run.started_at,
+        ended_at=run.ended_at,
+        failure_reason=run.failure_reason,
+        criterion_results=[
+            EvaluationCriterionResultRead(
+                id=c.id,
+                criterion_key=c.criterion_key,
+                criterion_label=c.criterion_label,
+                criterion_description=c.criterion_description,
+                order_index=c.order_index,
+                finding=c.finding,
+                rationale=c.rationale,
+                evidence_refs=c.evidence_refs,
+            )
+            for c in criterion_results
+        ],
+        evaluator_model=ModelIdentityRead(**asdict(evaluator_model)) if evaluator_model else None,
+    )
+
+
+@router.get("/comparisons/{comparison_id}/evaluations", response_model=ComparisonEvaluationsRead)
+def list_comparison_evaluations(
+    comparison_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)
+):
+    """Read-only aggregation of every independent EvaluationRun already
+    created for this comparison's candidates, grouped by candidate --
+    Section: MA6 Slice 3D. Never starts/reruns an evaluation, never
+    chooses a winner/rank/aggregate score, never calls a model; the
+    existing EvaluationRuns (created one at a time via POST
+    /agent-runs/{agent_run_id}/evaluations, or in bulk via POST
+    /comparisons/{comparison_id}/evaluations, Slice 3C) remain the only
+    source of truth -- this is a bounded read over them
+    (app.services.evaluation_execution_service.list_comparison_evaluations),
+    a fixed number of batched queries regardless of candidate/history
+    count."""
+    comparison = _get_comparison_or_404(db, comparison_id)
+    _require_comparison_access(db, user, comparison, ProjectAction.READ)
+
+    detail = _list_comparison_evaluations(db, comparison_id)
+    assert detail is not None  # _get_comparison_or_404 already confirmed the row exists
+
+    return ComparisonEvaluationsRead(
+        comparison_id=detail.comparison_id,
+        candidates=[
+            ComparisonCandidateEvaluationsRead(
+                comparison_candidate_id=c.comparison_candidate_id,
+                subject_agent_run_id=c.subject_agent_run_id,
+                evaluation_runs=[
+                    _evaluation_run_read(s.run, s.criterion_results, s.evaluator_model)
+                    for s in c.evaluation_runs
+                ],
+            )
+            for c in detail.candidates
         ],
     )
 
