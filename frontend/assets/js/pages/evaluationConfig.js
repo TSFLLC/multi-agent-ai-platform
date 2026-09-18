@@ -102,6 +102,10 @@ export function createEvaluationSectionState() {
     // native <details> element re-created from scratch every ~1.5s would
     // silently snap back closed moments after the operator opened it.
     advancedSettingsOpen: false,
+    // MA6.4B: Evaluation runs and polling state
+    evaluationRuns: null, // Loaded from GET /comparisons/{id}/evaluations
+    evaluationRunsLoadError: null,
+    evaluationRunsPolling: null, // Will be set by comparisonDetail.js
   };
 }
 
@@ -143,6 +147,36 @@ function buildBody(pageState, comparisonId, redraw) {
     return el("div", { class: "empty-state" }, [
       el("div", { class: "icon" }, "📋"),
       el("p", {}, "No active Evaluation Definition is available yet."),
+    ]);
+  }
+
+  // MA6.4B: If evaluation runs exist, show them (progress or matrix) instead
+  // of the configuration UI. This handles both page-entry recovery and
+  // post-Analyze flow.
+  const runsDisplay = buildEvaluationRunsDisplay(pageState, comparisonId);
+  if (runsDisplay) {
+    // Runs exist; show them. However, also keep configuration visible for
+    // running evaluations so the operator can see what was submitted.
+    const config = evalState.config;
+    const definitionContext = syncDefinitionContext(config, eligibleDefinitions);
+    const agentCatalog = (pageState.agentCatalog || []).filter((entry) => activeVersionsOf(entry).length > 0);
+    const evaluatorContext = isAgentEvaluatorMethod(config.method) ? syncEvaluatorContext(config, agentCatalog) : null;
+
+    return el("div", { class: "stack" }, [
+      runsDisplay,
+      el("hr", {}),
+      el("details", { class: "eval-config-collapse", open: false }, [
+        el("summary", {}, "Evaluation Configuration"),
+        el("div", { class: "stack", style: "gap:12px;margin-top:12px" }, [
+          el(
+            "div",
+            { class: "candidate-row-controls" },
+            buildPrimaryFields(pageState, eligibleDefinitions, definitionContext, agentCatalog, evaluatorContext, redraw)
+          ),
+          buildAdvancedSettings(pageState, definitionContext, agentCatalog, evaluatorContext, redraw),
+          buildRunBar(pageState, comparisonId, redraw),
+        ]),
+      ]),
     ]);
   }
 
@@ -556,6 +590,12 @@ async function runAnalyze(pageState, comparisonId, redraw) {
     const body = buildAnalyzeRequest(evalState.config);
     const response = await api.post(`/comparisons/${comparisonId}/evaluations`, body);
     evalState.lastResult = summarizeAnalyzeResults(response.results);
+
+    // MA6.4B: After POST, immediately load and display evaluation runs
+    await loadEvaluationRuns(pageState, comparisonId);
+    redraw();
+
+    // Start polling if runs are non-terminal (will be managed by comparisonDetail.js)
   } catch (err) {
     evalState.lastError = (err && err.message) || "Failed to start evaluation.";
   } finally {
@@ -589,5 +629,231 @@ function buildResultBlock(pageState, evalState) {
     el("p", {}, headline),
     noteParts.length ? el("p", { class: "hint" }, noteParts.join(" · ")) : null,
     ...reasonLines,
+  ]);
+}
+
+// -- MA6.4B: Evaluation Runs Loading & Display -----------
+
+export async function loadEvaluationRuns(pageState, comparisonId) {
+  const evalState = pageState.evaluation;
+  try {
+    const data = await api.get(`/comparisons/${comparisonId}/evaluations`);
+    evalState.evaluationRuns = data;
+    evalState.evaluationRunsLoadError = null;
+  } catch (err) {
+    evalState.evaluationRunsLoadError = (err && err.message) || "Failed to load evaluation runs.";
+  }
+}
+
+function buildEvaluationRunsDisplay(pageState, comparisonId) {
+  const evalState = pageState.evaluation;
+
+  if (evalState.evaluationRunsLoadError) {
+    return el("div", { class: "error-banner" }, evalState.evaluationRunsLoadError);
+  }
+
+  if (!evalState.evaluationRuns) {
+    return null; // No runs yet
+  }
+
+  const { candidates: candidates_from_api } = evalState.evaluationRuns;
+  if (!candidates_from_api || candidates_from_api.length === 0) {
+    return null;
+  }
+
+  // Build candidate-id-to-runs mapping
+  const candidatesById = new Map((pageState.comparison.candidates || []).map((c) => [c.id, c]));
+  const candidateRunsMap = new Map();
+  for (const cand of candidates_from_api) {
+    candidateRunsMap.set(cand.comparison_candidate_id, cand.evaluation_runs || []);
+  }
+
+  // Get the most recent evaluation configuration (all runs should be for
+  // the same definition version if they're part of one evaluation batch;
+  // for 4B, we only show one coherent matrix at a time)
+  const allRuns = [];
+  for (const runs of candidateRunsMap.values()) {
+    allRuns.push(...runs);
+  }
+
+  if (allRuns.length === 0) {
+    return null;
+  }
+
+  // Use the first run to extract definition/evaluator info
+  const mostRecentRun = allRuns[0];
+  const definitionVersionId = mostRecentRun.evaluation_definition_version_id;
+  const evaluatorAgentVersionId = mostRecentRun.evaluator_agent_version_id;
+
+  // Find the definition entry in catalog to get criteria ordering
+  let criteriaOrder = [];
+  for (const defEntry of evalState.definitionCatalog || []) {
+    for (const version of defEntry.versions || []) {
+      if (version.id === definitionVersionId) {
+        criteriaOrder = (version.criteria || []).slice().sort((a, b) => a.order_index - b.order_index);
+        break;
+      }
+    }
+  }
+
+  // Show progress if any run is non-terminal
+  const runProgresses = pageState.comparison.candidates
+    .map((candidate) => {
+      const runs = candidateRunsMap.get(candidate.id) || [];
+      const latestRun = runs.length > 0 ? runs[runs.length - 1] : null;
+      const status = latestRun ? deriveCandidateStatus(latestRun) : null;
+      return { candidate, status, run: latestRun };
+    })
+    .filter((p) => p.run !== null);
+
+  const hasRunning = runProgresses.some((p) => p.status === "Evaluating");
+  const numCompleted = runProgresses.filter((p) => p.status === "Completed").length;
+
+  const progressSection = buildEvaluationProgressSection(runProgresses, numCompleted, hasRunning);
+  const matrixSection = buildEvaluationMatrixSection(
+    runProgresses,
+    criteriaOrder,
+    mostRecentRun,
+    evalState.definitionCatalog,
+    pageState.agentCatalog
+  );
+
+  return el("div", { class: "stack", style: "gap:16px" }, [
+    progressSection,
+    matrixSection,
+  ]);
+}
+
+function deriveCandidateStatus(run) {
+  if (!run) return null;
+  switch (run.status) {
+    case "running":
+      return "Evaluating";
+    case "completed":
+      return "Completed";
+    case "failed":
+      return "Failed";
+    case "cancelled":
+      return "Cancelled";
+    default:
+      return null;
+  }
+}
+
+function buildEvaluationProgressSection(runProgresses, numCompleted, hasRunning) {
+  const totalCandidates = runProgresses.length;
+  const progressItems = runProgresses.map((p) => {
+    const indicator = p.status === "Evaluating" ? "●" : p.status === "Completed" ? "✓" : "✗";
+    return el("div", { class: "eval-candidate-progress" }, [
+      el("span", {}, indicator),
+      el("span", {}, p.candidate.label),
+      el("span", { class: "hint" }, p.status || "unknown"),
+    ]);
+  });
+
+  const headline = hasRunning
+    ? el("p", { class: "bold" }, `Analyzing ${totalCandidates} candidate${totalCandidates === 1 ? "" : "s"}...`)
+    : el("p", { class: "bold" }, "Evaluation Complete");
+
+  return el("div", { class: "stack", style: "gap:8px" }, [
+    headline,
+    ...progressItems,
+    el("p", { class: "hint" }, `${numCompleted} / ${totalCandidates} completed`),
+  ]);
+}
+
+function buildEvaluationMatrixSection(runProgresses, criteriaOrder, mostRecentRun, definitionCatalog, agentCatalog) {
+  // Only show matrix if all runs are complete
+  const allComplete = runProgresses.every((p) => p.status === "Completed");
+  if (!allComplete) {
+    return null;
+  }
+
+  // Find definition and evaluator names for provenance
+  let definitionName = "Unknown";
+  let definitionVersion = 1;
+  for (const defEntry of definitionCatalog || []) {
+    for (const version of defEntry.versions || []) {
+      if (version.id === mostRecentRun.evaluation_definition_version_id) {
+        definitionName = defEntry.definition.name;
+        definitionVersion = version.version;
+        break;
+      }
+    }
+  }
+
+  // Resolve evaluator agent name and role from catalog
+  let evaluatorAgentName = "Unknown";
+  let evaluatorRole = "";
+  if (mostRecentRun.evaluator_agent_version_id && agentCatalog) {
+    // Find the agent version in the catalog
+    for (const agentEntry of agentCatalog) {
+      for (const version of agentEntry.versions || []) {
+        if (version.id === mostRecentRun.evaluator_agent_version_id) {
+          evaluatorAgentName = agentEntry.agent.name;
+          evaluatorRole = version.key || ""; // Version key is the role identifier
+          break;
+        }
+      }
+    }
+  }
+
+  const evaluatorModelStr = mostRecentRun.evaluator_model
+    ? mostRecentRun.evaluator_model.canonical_model_id
+    : "Unknown";
+
+  const evaluatorStr = evaluatorRole ? `${evaluatorAgentName} · ${evaluatorRole}` : evaluatorAgentName;
+  const provenanceHeader = el("p", { class: "hint", style: "margin-bottom:12px" }, [
+    `Evaluation: ${definitionName} · v${definitionVersion} | `,
+    `Evaluator: ${evaluatorStr} | `,
+    `Model: ${evaluatorModelStr}`,
+  ]);
+
+  const findingLabel = (finding) => {
+    if (!finding) return "—";
+    switch (finding.toLowerCase()) {
+      case "met":
+        return "MET";
+      case "partial":
+        return "PARTIAL";
+      case "not_met":
+        return "NOT MET";
+      case "not_applicable":
+        return "N/A";
+      default:
+        return finding;
+    }
+  };
+
+  const matrixRows = criteriaOrder.map((criterion) => {
+    const cells = [el("td", {}, criterion.label)];
+    for (const p of runProgresses) {
+      const run = p.run;
+      if (!run || !run.criterion_results) {
+        cells.push(el("td", { class: "eval-cell-empty" }, "—"));
+        continue;
+      }
+      const result = run.criterion_results.find((r) => r.criterion_key === criterion.key);
+      const finding = result ? result.finding : null;
+      const cellClass = `eval-cell eval-cell-${finding ? finding.toLowerCase() : "empty"}`;
+      const label = findingLabel(finding);
+      cells.push(el("td", { class: cellClass }, el("span", { class: "eval-badge" }, label)));
+    }
+    return el("tr", {}, cells);
+  });
+
+  const headerCells = [el("th", {}, "Criterion")];
+  for (const p of runProgresses) {
+    headerCells.push(el("th", {}, p.candidate.label));
+  }
+
+  const table = el("table", { class: "eval-matrix" }, [
+    el("thead", {}, el("tr", {}, headerCells)),
+    el("tbody", {}, matrixRows),
+  ]);
+
+  return el("div", { class: "stack", style: "gap:8px" }, [
+    provenanceHeader,
+    el("div", { style: "overflow-x:auto" }, table),
   ]);
 }

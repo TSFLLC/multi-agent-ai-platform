@@ -732,3 +732,77 @@ tr.clickable:hover { background: var(--bg-card-hover); }
 .eval-advanced[open] > summary::before { transform: rotate(90deg); }
 .eval-advanced > summary:hover { color: var(--accent); }
 .eval-advanced > .candidate-row-controls { margin-top: 10px; }
+
+/* MA6.4B: Evaluation progress and results matrix */
+
+.eval-candidate-progress {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  padding: 8px;
+  background: var(--bg-secondary);
+  border-radius: 4px;
+  font-size: 0.9rem;
+}
+
+.eval-candidate-progress > span:first-child {
+  font-size: 1.1rem;
+  min-width: 20px;
+}
+
+.eval-matrix {
+  width: 100%;
+  border-collapse: collapse;
+  border: 1px solid var(--border-color);
+  font-size: 0.85rem;
+}
+
+.eval-matrix th,
+.eval-matrix td {
+  padding: 8px;
+  text-align: left;
+  border: 1px solid var(--border-color);
+}
+
+.eval-matrix th {
+  background: var(--bg-secondary);
+  font-weight: 600;
+  color: var(--text-muted);
+  word-break: break-word;
+}
+
+.eval-matrix td {
+  vertical-align: middle;
+}
+
+.eval-cell {
+  font-weight: 500;
+  text-align: center;
+  font-size: 0.8rem;
+}
+
+.eval-badge {
+  display: inline-block;
+  padding: 4px 8px;
+  border-radius: 3px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.eval-cell-met { background: #e8f5e9; color: #2e7d32; }
+.eval-cell-partial { background: #fff3e0; color: #f57c00; }
+.eval-cell-not_met { background: #ffebee; color: #c62828; }
+.eval-cell-not_applicable { background: #f5f5f5; color: #757575; }
+.eval-cell-empty { color: #bdbdbd; }
+
+.eval-config-collapse > summary {
+  cursor: pointer;
+  font-size: 0.9rem;
+  color: var(--text-muted);
+  margin-top: 12px;
+}
+
+.eval-config-collapse > summary:hover {
+  color: var(--accent);
+}

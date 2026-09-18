@@ -25,7 +25,17 @@ import { openModal, closeModal } from "../modal.js";
 import { buildVersionIndex, loadAgentCatalog, roleLabelFor } from "../agentDirectory.js";
 import { getProjectId } from "../state.js";
 import { clampIndex, hasNext, hasPrevious, nextIndex, previousIndex } from "../focusNav.js";
-import { buildEvaluationSection, createEvaluationSectionState, loadEvaluationDefinitionCatalog } from "./evaluationConfig.js";
+import {
+  buildEvaluationSection,
+  createEvaluationSectionState,
+  loadEvaluationDefinitionCatalog,
+  loadEvaluationRuns,
+} from "./evaluationConfig.js";
+import {
+  createEvaluationPollState,
+  startEvaluationPolling,
+  stopEvaluationPolling,
+} from "../evaluationPolling.js";
 
 const POLL_INTERVAL_MS = 1500;
 const POLL_BOUND_MS = 20 * 60 * 1000; // stop auto-polling after 20 minutes; manual refresh still works
@@ -53,6 +63,7 @@ export async function renderComparisonDetail(root, params) {
   };
 
   let pollHandle = null;
+  let evaluationPollState = createEvaluationPollState();
 
   async function load(showSpinner) {
     if (showSpinner) mount(root, el("div", { class: "card" }, [el("span", { class: "spinner" }), " Loading comparison…"]));
@@ -68,9 +79,13 @@ export async function renderComparisonDetail(root, params) {
       if (!state.evaluation.loaded) {
         await loadEvaluationSectionData(state);
       }
+      // MA6.4B: Load existing evaluation runs on page entry
+      await loadEvaluationRuns(state, comparisonId);
+
       await hydrateCandidateExtras(state);
       draw();
       managePolling();
+      manageEvaluationPolling();
     } catch (err) {
       mount(root, el("div", { class: "error-banner" }, err.message || "Failed to load this comparison."));
     }
@@ -88,6 +103,29 @@ export async function renderComparisonDetail(root, params) {
     }
   }
 
+  // MA6.4B: Manage evaluation runs polling independently
+  function manageEvaluationPolling() {
+    // Check if any evaluation runs are non-terminal
+    const evalState = state.evaluation;
+    const hasNonTerminalRuns =
+      evalState.evaluationRuns &&
+      evalState.evaluationRuns.candidates &&
+      evalState.evaluationRuns.candidates.some((c) =>
+        (c.evaluation_runs || []).some(
+          (r) => r.status !== "completed" && r.status !== "failed" && r.status !== "cancelled"
+        )
+      );
+
+    if (hasNonTerminalRuns && !evaluationPollState.isPolling) {
+      startEvaluationPolling(evaluationPollState, comparisonId, () => {
+        // When polling updates, redraw the evaluation section
+        draw();
+      });
+    } else if (!hasNonTerminalRuns && evaluationPollState.isPolling) {
+      stopEvaluationPolling(evaluationPollState);
+    }
+  }
+
   function draw() {
     clear(root);
     root.appendChild(buildPage(state, comparisonId, () => load(false)));
@@ -97,6 +135,7 @@ export async function renderComparisonDetail(root, params) {
 
   return () => {
     if (pollHandle !== null) clearInterval(pollHandle);
+    stopEvaluationPolling(evaluationPollState);
   };
 }
 

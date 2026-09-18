@@ -13,11 +13,16 @@ export const EVALUATION_METHOD_DETERMINISTIC = "deterministic";
 export const EVALUATION_METHOD_AGENT_EVALUATOR = "agent_evaluator";
 
 // Frontend presentation states for MA6.4A (Section: "do not invent
-// backend states"). RUNNING/COMPLETED/PARTIAL are 4B's polling-derived
-// states and deliberately not produced here yet.
+// backend states").
 export const EVAL_PHASE_NOT_CONFIGURED = "NOT_CONFIGURED";
 export const EVAL_PHASE_READY = "READY";
 export const EVAL_PHASE_STARTING = "STARTING";
+
+// MA6.4B polling-derived states (derived from actual EvaluationRun statuses).
+export const EVAL_PHASE_RUNNING = "RUNNING";
+export const EVAL_PHASE_COMPLETED = "COMPLETED";
+export const EVAL_PHASE_PARTIAL = "PARTIAL";
+export const EVAL_PHASE_FAILED = "FAILED";
 
 export function createEvaluationConfig() {
   return {
@@ -178,4 +183,44 @@ export function summarizeAnalyzeResults(results) {
       ? `Evaluation started for ${startedCount} candidate${startedCount === 1 ? "" : "s"}.`
       : "No candidate was eligible for evaluation.";
   return { counts, startedCount, headline, details: list };
+}
+
+// MA6.4B: Derive frontend presentation state from EvaluationRun statuses.
+// Never invents backend statuses -- only derives from actual run.status.
+// Inputs: array of EvaluationRun objects (or candidates with evaluation_runs).
+// Returns: RUNNING | COMPLETED | PARTIAL | FAILED
+export function deriveEvaluationPhaseFromRuns(evaluationRuns) {
+  if (!evaluationRuns || evaluationRuns.length === 0) {
+    return null; // No runs yet
+  }
+
+  const statuses = evaluationRuns.map((r) => r.status);
+  const hasRunning = statuses.includes("running");
+  const hasCompleted = statuses.some((s) => s === "completed");
+  const hasFailed = statuses.some((s) => s === "failed" || s === "cancelled");
+
+  if (hasRunning) return EVAL_PHASE_RUNNING;
+  if (hasFailed && hasCompleted) return EVAL_PHASE_PARTIAL;
+  if (hasFailed) return EVAL_PHASE_FAILED;
+  if (hasCompleted) return EVAL_PHASE_COMPLETED;
+
+  return null;
+}
+
+// Derive per-candidate status from a single EvaluationRun's status.
+// Returns: "Evaluating" | "Completed" | "Failed" | "Cancelled" | null
+export function deriveCandidateStatus(run) {
+  if (!run) return null;
+  switch (run.status) {
+    case "running":
+      return "Evaluating";
+    case "completed":
+      return "Completed";
+    case "failed":
+      return "Failed";
+    case "cancelled":
+      return "Cancelled";
+    default:
+      return null;
+  }
 }
