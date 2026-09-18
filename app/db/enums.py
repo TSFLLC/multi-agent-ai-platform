@@ -379,6 +379,46 @@ class ComparisonRunStatus(str, enum.Enum):
     CANCELLED = "cancelled"
 
 
+# --- Evaluation Run execution (MA6 Slice 2) ---------------------------------
+
+
+class EvaluationMethod(str, enum.Enum):
+    """How an Evaluation Run's criterion results were produced. Only
+    ``DETERMINISTIC`` exists in Slice 2 -- no evaluator Agent/model
+    inference exists yet (that is Slice 3's ``agent_judge`` addition)."""
+
+    DETERMINISTIC = "deterministic"
+
+
+class EvaluationRunStatus(str, enum.Enum):
+    """No CANCELLED value (unlike ``ComparisonRunStatus``): a deterministic
+    check reads one artifact and returns almost immediately -- there is no
+    long-running, interruptible operation for a human to cooperatively
+    cancel (Section 26.7 doesn't apply here). Revisit only if a future
+    slice's evaluation method can itself run long enough to need it."""
+
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class EvaluationFinding(str, enum.Enum):
+    """Frozen V1 qualitative finding set (MA6 non-negotiable invariant):
+    never a percentage, aggregate score, or ranking -- a criterion is
+    either MET, PARTIAL, NOT_MET, or explicitly NOT_APPLICABLE (no
+    deterministic checker exists for it yet, or its method requires an
+    evaluator not available until Slice 3). NOT_APPLICABLE must never be
+    conflated with NOT_MET -- one is "this failed," the other is "this was
+    never actually checked."
+    """
+
+    MET = "met"
+    PARTIAL = "partial"
+    NOT_MET = "not_met"
+    NOT_APPLICABLE = "not_applicable"
+
+
 # --- Provider catalog refresh (Section 13.3, MA2 addition) ------------------
 
 

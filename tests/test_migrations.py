@@ -36,6 +36,9 @@ def test_upgrade_from_empty_db_creates_all_tables(tmp_path, monkeypatch):
     assert "task_runs" in tables
     assert "execution_events" in tables
     assert "job_queue" in tables
+    assert "evaluation_definitions" in tables
+    assert "evaluation_runs" in tables
+    assert "evaluation_criterion_results" in tables
     assert "alembic_version" in tables
     engine.dispose()
 

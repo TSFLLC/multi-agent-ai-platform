@@ -215,9 +215,33 @@ def make_agent_run(db, task_run=None, agent_version=None, status=AgentRunStatus.
     return run
 
 
-def make_artifact(db, agent_run=None, type_=ArtifactType.DIFF):
+def make_artifact(db, agent_run=None, type_=ArtifactType.DIFF, content_hash=None):
     agent_run = agent_run or make_agent_run(db)
-    artifact = Artifact(agent_run_id=agent_run.id, type=type_, storage_ref="data/artifacts/x.diff")
+    artifact = Artifact(
+        agent_run_id=agent_run.id, type=type_, storage_ref="data/artifacts/x.diff", content_hash=content_hash
+    )
+    db.add(artifact)
+    db.flush()
+    return artifact
+
+
+def make_artifact_with_content(db, tmp_path, agent_run=None, content="hello world", type_=ArtifactType.FILE):
+    """Like ``make_artifact``, but backed by a real file on disk with a
+    real sha256 content_hash -- MA6 Slice 2's deterministic checkers
+    (app.services.evaluation_execution_service) read actual artifact
+    content, so a bare bookkeeping row (make_artifact's default) isn't
+    enough for those tests."""
+    import hashlib
+
+    agent_run = agent_run or make_agent_run(db)
+    path = tmp_path / f"artifact-{len(list(tmp_path.iterdir()))}.txt"
+    path.write_text(content, encoding="utf-8")
+    artifact = Artifact(
+        agent_run_id=agent_run.id,
+        type=type_,
+        storage_ref=str(path),
+        content_hash=hashlib.sha256(content.encode("utf-8")).hexdigest(),
+    )
     db.add(artifact)
     db.flush()
     return artifact

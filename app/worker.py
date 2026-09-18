@@ -145,6 +145,10 @@ class Worker:
             self._run_agent_run_job(job)
             return
 
+        if job.job_type == JobType.EVALUATION:
+            self._run_evaluation_job(job)
+            return
+
         # Real dispatch of remaining job types (Workflow nodes) is post-MA3.
         # A job of a type this worker doesn't know how to run yet is
         # released back to pending rather than silently dropped or marked
@@ -263,6 +267,77 @@ class Worker:
                 self.worker_id,
                 job.id,
                 agent_run_id,
+            )
+
+    def _run_evaluation_job(self, job: JobQueue) -> None:
+        """MA6 Slice 2: deterministic Evaluation Run execution, dispatched to
+        EvaluationExecutionService. ``job.payload_ref`` is the Evaluation
+        Run id.
+
+        Unlike ``_run_agent_run_job``, the lease is never extended up
+        front: a deterministic check reads one artifact and returns almost
+        immediately -- no provider call, no sandbox, nothing that could
+        plausibly run anywhere near the default lease window -- so there is
+        no long blocking operation to size the lease around.
+        """
+        # Imported here, not at module scope, so a worker that never
+        # touches an EVALUATION job never needs the evaluation execution
+        # service importable (same reasoning as _run_agent_run_job's
+        # AgentExecutionService import).
+        from app.services.evaluation_execution_service import EvaluationExecutionService
+
+        evaluation_run_id = job.payload_ref
+        fencing_token = job.fencing_token
+
+        db = self._session_factory()
+        try:
+            service = EvaluationExecutionService(db)
+            try:
+                service.execute(evaluation_run_id, worker_id=self.worker_id)
+                job_status = JobQueueStatus.DONE
+            except Exception:
+                # EvaluationExecutionService already finalizes the
+                # Evaluation Run to a terminal FAILED state on any error it
+                # can categorize -- this except is only a last-resort
+                # safety net so a truly catastrophic failure still frees
+                # the job row instead of leaving it LEASED until the lease
+                # expires.
+                logger.exception(
+                    "evaluation_run_job_execution_error worker_id=%s job_id=%s evaluation_run_id=%s",
+                    self.worker_id,
+                    job.id,
+                    evaluation_run_id,
+                )
+                job_status = JobQueueStatus.FAILED
+        finally:
+            db.close()
+
+        db = self._session_factory()
+        try:
+            completed = self._repo.complete(
+                db,
+                job_id=job.id,
+                worker_id=self.worker_id,
+                fencing_token=fencing_token,
+                status=job_status,
+            )
+        finally:
+            db.close()
+
+        if completed:
+            logger.info(
+                "evaluation_run_job_finished worker_id=%s job_id=%s evaluation_run_id=%s status=%s",
+                self.worker_id,
+                job.id,
+                evaluation_run_id,
+                job_status.value,
+            )
+        else:
+            logger.warning(
+                "evaluation_run_job_complete_rejected_stale_fencing worker_id=%s job_id=%s evaluation_run_id=%s",
+                self.worker_id,
+                job.id,
+                evaluation_run_id,
             )
 
     def _run_internal_test_job(self, job: JobQueue) -> None:
