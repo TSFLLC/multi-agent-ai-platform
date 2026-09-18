@@ -1,10 +1,17 @@
-"""Evaluation Run execution — MA6 Slice 2.
+"""Evaluation Run execution — MA6 Slice 2, extended by Slice 3A.
 
 Proves that an exact Agent output can be evaluated against an immutable
 ``EvaluationDefinitionVersion`` (app.models.evaluation_definitions) and
 produce durable, structured, provenance-bound evidence — no scoring,
 ranking, or winner concept anywhere in this module (same non-negotiable
 invariant Slice 1 already documents).
+
+Slice 3A adds the nullable ``evaluator_*`` columns below so a future
+Slice 3B can bind an ``EvaluationRun`` to a model-based evaluator
+execution (``EvaluationMethod.AGENT_EVALUATOR``) without another schema
+change — this module still does not create, enqueue, or execute any
+evaluator Agent Run; that remains Slice 3B's scope. The evaluator
+provides evaluation *evidence*, never a Judge, and never chooses a winner.
 
 ``EvaluationRun`` binds to its subject Agent Run *and* the exact subject
 Artifact, plus a defensive copy of that artifact's content hash frozen at
@@ -66,6 +73,41 @@ class EvaluationRun(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     )
 
     requested_by_user_id: Mapped[Optional[str]] = mapped_column(ForeignKey("users.id"), nullable=True)
+
+    # -- MA6 Slice 3A: nullable evaluator provenance (method=AGENT_EVALUATOR
+    # only; always NULL for method=DETERMINISTIC). No ondelete on the
+    # version/agent-version-shaped FKs below -- registry references to
+    # immutable rows, same convention as evaluation_definition_version_id
+    # above and agent_runs.agent_version_id. Everything else an evaluator
+    # execution produces (ProviderModelSnapshot, ModelCall, tokens/cost/
+    # latency, the evaluator's own output Artifact) is deliberately NOT
+    # duplicated here -- all reachable via existing joins through
+    # evaluator_agent_run_id (Section: avoid unnecessary denormalization
+    # where an existing immutable record already provides it), mirroring
+    # how app.services.review_orchestration_service.get_review_summary
+    # aggregates ModelCall rows per agent_run_id at read time rather than
+    # storing a copy.
+    evaluator_agent_version_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("agent_versions.id"), nullable=True
+    )
+    # Same shape/semantics as ComparisonCandidate.model_policy_override_json
+    # -- lets the operator pick a model independently of the evaluator
+    # AgentVersion's own (immutable, shared) model_policy. NULL means "use
+    # the evaluator AgentVersion's own policy, unmodified."
+    evaluator_model_policy_override_json: Mapped[Optional[dict]] = mapped_column(nullable=True)
+    # The evaluator's own dedicated bookkeeping Task Run/Agent Run (never
+    # the subject candidate's own -- Section: MA6 Slice 3 frozen
+    # architecture). UNIQUE: exactly one evaluator execution per
+    # Evaluation Run, and the reverse-lookup index a terminal-notification
+    # hook (mirroring app.services.comparison_progress_service's seam)
+    # uses to find "is this task run an evaluator run, and for which
+    # Evaluation Run."
+    evaluator_task_run_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("task_runs.id"), nullable=True, unique=True
+    )
+    evaluator_agent_run_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("agent_runs.id"), nullable=True, unique=True
+    )
 
     started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     ended_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)

@@ -321,13 +321,21 @@ class UsageSourceType(str, enum.Enum):
 
 class AgentRunRole(str, enum.Enum):
     """Tags an ``agent_runs`` row's place in a BUILD_REVIEW execution
-    cycle. NULL/unset for a plain SINGLE_AGENT run (Agent Run predates
-    MA4 or is not part of any review cycle) — this column is purely
-    additive and never required by MA0-MA3 code paths."""
+    cycle, or (MA6 Slice 3A) an Evaluation Run's model-based evaluator
+    execution. NULL/unset for a plain SINGLE_AGENT run (Agent Run predates
+    MA4 or is not part of any review/evaluation cycle) — this column is
+    purely additive and never required by MA0-MA3 code paths.
+
+    ``EVALUATOR`` is never routed through ``ReviewOrchestrationService`` —
+    an evaluator's Agent Run always lives under its own dedicated
+    SINGLE_AGENT bookkeeping Task/Task Run (never the subject candidate's
+    own), so ``AgentExecutionService._is_build_review`` never returns True
+    for it and ``on_agent_run_succeeded`` never sees this role."""
 
     PRIMARY = "primary"
     REVIEWER = "reviewer"
     REPAIR = "repair"
+    EVALUATOR = "evaluator"
 
 
 class ReviewDecision(str, enum.Enum):
@@ -383,24 +391,30 @@ class ComparisonRunStatus(str, enum.Enum):
 
 
 class EvaluationMethod(str, enum.Enum):
-    """How an Evaluation Run's criterion results were produced. Only
-    ``DETERMINISTIC`` exists in Slice 2 -- no evaluator Agent/model
-    inference exists yet (that is Slice 3's ``agent_judge`` addition)."""
+    """How an Evaluation Run's criterion results were produced.
+    ``DETERMINISTIC`` (Slice 2) runs a narrow, honest checker against the
+    subject artifact directly. ``AGENT_EVALUATOR`` (MA6 Slice 3) runs one
+    evaluator Agent/model inference covering the complete rubric -- the
+    evaluator provides evaluation *evidence*, never a Judge, and never
+    chooses a winner (Section: MA6 non-negotiable invariant)."""
 
     DETERMINISTIC = "deterministic"
+    AGENT_EVALUATOR = "agent_evaluator"
 
 
 class EvaluationRunStatus(str, enum.Enum):
-    """No CANCELLED value (unlike ``ComparisonRunStatus``): a deterministic
-    check reads one artifact and returns almost immediately -- there is no
-    long-running, interruptible operation for a human to cooperatively
-    cancel (Section 26.7 doesn't apply here). Revisit only if a future
-    slice's evaluation method can itself run long enough to need it."""
+    """``CANCELLED`` (MA6 Slice 3) applies only to ``AGENT_EVALUATOR``
+    method runs -- a real, potentially long-running model inference call a
+    human can cooperatively cancel, same rationale as
+    ``ComparisonRunStatus.CANCELLED``. A ``DETERMINISTIC`` run never
+    reaches CANCELLED: it reads one artifact and returns almost
+    immediately, with no long-running operation to interrupt."""
 
     PENDING = "pending"
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 class EvaluationFinding(str, enum.Enum):

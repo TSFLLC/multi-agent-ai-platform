@@ -130,17 +130,26 @@ def downgrade() -> None:
         batch_op.drop_constraint("fk_task_runs_final_artifact_id_artifacts", type_="foreignkey")
         batch_op.drop_column("final_artifact_id")
 
+    # SQLite batch-mode add_column on an Enum(create_constraint=True)
+    # column (added by this same migration's upgrade()) leaves *two*
+    # physical CHECK constraints behind -- one auto-named by the Enum
+    # type itself ("agentrunrole"), one by the naming convention
+    # ("ck_agent_runs_agentrunrole") -- both must be dropped before the
+    # column, or SQLite's table-recreate fails with "no such column:
+    # role" trying to keep a CHECK on a column being removed. Checked
+    # conditionally (MA6 Slice 3A, bd27cdb01c15) rather than assumed:
+    # once a later migration also alters this column, it converges the
+    # duplicate down to a single, correctly-named constraint, and this
+    # downgrade must still work starting from either historical state.
+    bind = op.get_bind()
+    existing_role_check_names = {c["name"] for c in sa.inspect(bind).get_check_constraints("agent_runs")}
+
     with op.batch_alter_table("agent_runs", schema=None) as batch_op:
         batch_op.drop_constraint("fk_agent_runs_repair_of_review_id_agent_reviews", type_="foreignkey")
-        # SQLite batch-mode add_column on an Enum(create_constraint=True)
-        # column (added by this same migration's upgrade()) leaves *two*
-        # physical CHECK constraints behind -- one auto-named by the Enum
-        # type itself ("agentrunrole"), one by the naming convention
-        # ("ck_agent_runs_agentrunrole") -- both must be dropped before
-        # the column, or SQLite's table-recreate fails with "no such
-        # column: role" trying to keep a CHECK on a column being removed.
-        batch_op.drop_constraint(batch_op.f("agentrunrole"), type_="check")
-        batch_op.drop_constraint(batch_op.f("ck_agent_runs_agentrunrole"), type_="check")
+        if "agentrunrole" in existing_role_check_names:
+            batch_op.drop_constraint(batch_op.f("agentrunrole"), type_="check")
+        if "ck_agent_runs_agentrunrole" in existing_role_check_names:
+            batch_op.drop_constraint(batch_op.f("ck_agent_runs_agentrunrole"), type_="check")
         batch_op.drop_column("input_context_json")
         batch_op.drop_column("repair_of_review_id")
         batch_op.drop_column("role")
