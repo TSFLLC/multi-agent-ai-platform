@@ -7,6 +7,7 @@ autogeneration always sees the complete schema.
 from app.models import (
     agents,
     artifacts_eval,
+    evaluation_definitions,
     execution,
     governance,
     identity,
@@ -20,6 +21,7 @@ from app.models import (
 __all__ = [
     "agents",
     "artifacts_eval",
+    "evaluation_definitions",
     "execution",
     "governance",
     "identity",

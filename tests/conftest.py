@@ -180,6 +180,32 @@ def make_agent_version(db, agent=None, version=1, status=VersionStatus.DRAFT):
     return av
 
 
+def make_evaluation_definition(db, project=None, name="Software Engineer Correctness Rubric"):
+    from app.models.evaluation_definitions import EvaluationDefinition
+
+    project = project or make_project(db)
+    definition = EvaluationDefinition(project_id=project.id, name=name)
+    db.add(definition)
+    db.flush()
+    return definition
+
+
+def make_evaluation_definition_version(db, definition=None, version=1, status=VersionStatus.DRAFT):
+    from app.models.evaluation_definitions import EvaluationCriterion, EvaluationDefinitionVersion
+
+    definition = definition or make_evaluation_definition(db)
+    ver = EvaluationDefinitionVersion(evaluation_definition_id=definition.id, version=version, status=status)
+    db.add(ver)
+    db.flush()
+    db.add(
+        EvaluationCriterion(
+            evaluation_definition_version_id=ver.id, key="correctness", label="Correctness", order_index=0
+        )
+    )
+    db.flush()
+    return ver
+
+
 def make_agent_run(db, task_run=None, agent_version=None, status=AgentRunStatus.CREATED):
     task_run = task_run or make_task_run(db)
     agent_version = agent_version or make_agent_version(db)
