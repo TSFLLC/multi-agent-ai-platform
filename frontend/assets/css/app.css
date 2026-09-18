@@ -679,3 +679,56 @@ tr.clickable:hover { background: var(--bg-card-hover); }
 @media (max-width: 700px) {
   .modal-panel-large { width: 100vw; height: 100vh; border-radius: 0; }
 }
+
+/* Evaluation & Analysis (MA6 Slice 4A) -- a collapsible section below the
+   candidate grid on Comparison Detail (frontend/assets/js/pages/
+   comparisonDetail.js), built as a native <details>/<summary> so open/
+   close needs no new JS state or framework. Every other rule it uses
+   (.card, .candidate-row-controls, .filter-bar, .filter-pills,
+   .model-picker, .model-option, .badge-*, .empty-state, .error-banner) is
+   already defined above and reused unchanged. --------------------------- */
+
+.eval-section > summary {
+  cursor: pointer;
+  font-weight: 700;
+  font-size: 1rem;
+  list-style: none;
+}
+.eval-section > summary::-webkit-details-marker { display: none; }
+.eval-section > summary::before {
+  content: "▸";
+  display: inline-block;
+  margin-right: 8px;
+  color: var(--text-muted);
+  transition: transform 0.12s ease;
+}
+.eval-section[open] > summary::before { transform: rotate(90deg); }
+.eval-section > summary:hover { color: var(--accent); }
+
+.eval-body { margin-top: 14px; }
+
+/* Advanced Settings (MA6.4A UX refinement) -- a second, nested <details>
+   holding Evaluation Method/Definition Version/Evaluator Role, collapsed
+   by default so normal operation only ever sees the three primary
+   controls (Evaluation/Evaluator/Model) above it. Same disclosure
+   mechanics as .eval-section, intentionally smaller/quieter since it's a
+   secondary, opt-in control group. */
+
+.eval-advanced { margin-top: 16px; }
+.eval-advanced > summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+  list-style: none;
+}
+.eval-advanced > summary::-webkit-details-marker { display: none; }
+.eval-advanced > summary::before {
+  content: "▸";
+  display: inline-block;
+  margin-right: 6px;
+  transition: transform 0.12s ease;
+}
+.eval-advanced[open] > summary::before { transform: rotate(90deg); }
+.eval-advanced > summary:hover { color: var(--accent); }
+.eval-advanced > .candidate-row-controls { margin-top: 10px; }

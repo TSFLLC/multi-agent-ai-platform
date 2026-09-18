@@ -25,6 +25,7 @@ import { openModal, closeModal } from "../modal.js";
 import { buildVersionIndex, loadAgentCatalog, roleLabelFor } from "../agentDirectory.js";
 import { getProjectId } from "../state.js";
 import { clampIndex, hasNext, hasPrevious, nextIndex, previousIndex } from "../focusNav.js";
+import { buildEvaluationSection, createEvaluationSectionState, loadEvaluationDefinitionCatalog } from "./evaluationConfig.js";
 
 const POLL_INTERVAL_MS = 1500;
 const POLL_BOUND_MS = 20 * 60 * 1000; // stop auto-polling after 20 minutes; manual refresh still works
@@ -34,6 +35,7 @@ export async function renderComparisonDetail(root, params) {
   const state = {
     comparison: null,
     task: null,
+    agentCatalog: null, // [{ agent, versions }] -- shared by candidate identity resolution AND the Evaluator Agent/Role pickers (MA6 Slice 4A), loaded once
     versionIndex: null, // agent_version_id -> { agent, version } -- Section 9 (Enhancement 1C)
     pricingByModel: new Map(), // model_id -> ProviderModelRead[] (all providers)
     artifactContent: new Map(), // artifact_id -> text
@@ -41,6 +43,13 @@ export async function renderComparisonDetail(root, params) {
     error: null,
     selecting: null, // candidate id currently being selected
     startedAt: Date.now(),
+    // MA6 Slice 4A: the Evaluation & Analysis section's own state, kept
+    // on the same page-level `state` object (not re-created per render)
+    // so picker selections/in-flight status survive every redraw/poll
+    // tick, exactly like `selecting`/`pricingByModel` already do above.
+    // 4B will extend this with evaluationRuns/an independent poll handle
+    // for RUNNING/COMPLETED/PARTIAL — not implemented yet.
+    evaluation: createEvaluationSectionState(),
   };
 
   let pollHandle = null;
@@ -52,11 +61,12 @@ export async function renderComparisonDetail(root, params) {
       if (!state.task) {
         state.task = await api.get(`/tasks/${state.comparison.task_id}`).catch(() => null);
       }
-      if (!state.versionIndex) {
-        state.versionIndex = await getProjectId()
-          .then(loadAgentCatalog)
-          .then(buildVersionIndex)
-          .catch(() => new Map());
+      if (!state.agentCatalog) {
+        state.agentCatalog = await getProjectId().then(loadAgentCatalog).catch(() => []);
+        state.versionIndex = buildVersionIndex(state.agentCatalog);
+      }
+      if (!state.evaluation.loaded) {
+        await loadEvaluationSectionData(state);
       }
       await hydrateCandidateExtras(state);
       draw();
@@ -88,6 +98,32 @@ export async function renderComparisonDetail(root, params) {
   return () => {
     if (pollHandle !== null) clearInterval(pollHandle);
   };
+}
+
+// MA6 Slice 4A: loads the Evaluation & Analysis section's own data once
+// (Evaluation Definitions + their versions, the model catalog, providers
+// for the evaluator model picker's provider filter) -- guarded by
+// state.evaluation.loaded the same way state.agentCatalog above is loaded
+// exactly once, never re-fetched on every poll tick. A failure here must
+// never break the rest of the page (candidate cards, polling, Focus View
+// all stay fully functional) -- it only degrades the Evaluation & Analysis
+// section to its own error banner.
+async function loadEvaluationSectionData(state) {
+  try {
+    const projectId = await getProjectId();
+    const [definitionCatalog, models, providers] = await Promise.all([
+      loadEvaluationDefinitionCatalog(projectId),
+      api.get("/models"),
+      api.get("/providers").catch(() => []),
+    ]);
+    state.evaluation.definitionCatalog = definitionCatalog;
+    state.evaluation.models = models;
+    state.evaluation.providers = providers;
+  } catch (err) {
+    state.evaluation.loadError = (err && err.message) || "Failed to load Evaluation & Analysis data.";
+  } finally {
+    state.evaluation.loaded = true;
+  }
 }
 
 async function hydrateCandidateExtras(state) {
@@ -144,6 +180,10 @@ function buildPage(state, comparisonId, refresh) {
       comparison.candidates.map((c, index) => buildCandidateCard(state, c, comparisonId, refresh, index))
     )
   );
+  // MA6 Slice 4A: Evaluation & Analysis, immediately below the candidate
+  // grid -- purely additive, never touches the candidate cards/summary
+  // above. See frontend/assets/js/pages/evaluationConfig.js.
+  container.appendChild(buildEvaluationSection(state, comparisonId));
 
   return container;
 }
