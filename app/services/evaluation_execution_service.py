@@ -1,26 +1,42 @@
-"""Evaluation Execution Service — MA6 Slice 2.
+"""Evaluation Execution Service — MA6 Slice 2, extended by Slice 3B.
 
 Builds on MA6 Slice 1's immutable Evaluation Definition Registry and MA1's
 job_queue/Worker plane (app.worker) exactly the way ComparisonService
 builds on MA3's execution engine: this module never invokes a provider or
-model, and never runs a second inference pipeline -- ``create_run`` only
-ever decides whether an Evaluation Run may be created, and ``execute``
-(dispatched by the Worker via ``JobType.EVALUATION``) only ever runs the
-*deterministic* checkers registered in this module.
+model itself and never runs a second inference pipeline.
 
-No evaluator Agent, evaluator Role, or model inference exists here --
-that is MA6 Slice 3's addition. A criterion whose key has no registered
-deterministic checker is recorded as ``EvaluationFinding.NOT_APPLICABLE``,
-never fabricated as MET/NOT_MET (Section: MA6 non-negotiable invariant --
-a deterministic check must never pretend to semantically evaluate
-something like architecture quality or factual correctness).
+Two independent methods, two independent execution paths, sharing the
+same domain rows (``EvaluationRun``/``EvaluationCriterionResult``):
+
+- ``EvaluationMethod.DETERMINISTIC`` (Slice 2): ``create_run``/``execute``,
+  dispatched by the Worker via ``JobType.EVALUATION``, running only the
+  narrow deterministic checkers registered in this module. A criterion
+  whose key has no registered checker is recorded as
+  ``EvaluationFinding.NOT_APPLICABLE``, never fabricated as MET/NOT_MET.
+- ``EvaluationMethod.AGENT_EVALUATOR`` (Slice 3B): ``create_agent_evaluator_run``
+  creates a normal, first-class Agent Run (``AgentRunRole.EVALUATOR``)
+  under its own dedicated SINGLE_AGENT bookkeeping Task/Task Run --
+  *never* the subject candidate's own -- and dispatches it through the
+  **unmodified** MA3 ``AgentExecutionService``/``JobType.AGENT_RUN``
+  pipeline (model resolution/override, ``ProviderModelSnapshot``,
+  ``ModelCall``, ``BudgetGovernor``, retries, cancellation checkpoints,
+  Artifact creation -- all reused verbatim, no second inference system).
+  ``finalize_agent_evaluator_run`` (dispatched by
+  app.services.evaluation_progress_service's terminal-notification seam,
+  the same pattern MA5 already established for ComparisonRun) parses the
+  evaluator's structured output via ``app.evaluation_contract`` once the
+  evaluator's Agent Run reaches a terminal state.
+
+No evaluator Judge/scoring/ranking/winner concept exists anywhere in this
+module -- the evaluator provides evaluation *evidence*, never a verdict
+that picks a winner (MA6 non-negotiable invariant).
 
 Exact-artifact protection (Section 24.4 #18's hash-binding principle,
 already used by ``app.models.reviews.AgentReview`` and
-``ComparisonService.select_canonical``) is enforced twice: once at
-``create_run`` (the artifact must belong to the subject Agent Run and have
-a computed content hash to bind), and again at ``execute`` immediately
-before reading any content (the artifact must still belong to that Agent
+``ComparisonService.select_canonical``) is enforced twice for both
+methods: once at creation (the artifact must belong to the subject Agent
+Run and have a computed content hash to bind), and again immediately
+before trusting any result (the artifact must still belong to that Agent
 Run and its current content hash must still match the hash frozen at
 bind time) -- never silently evaluating a different artifact than the one
 an operator requested.
@@ -34,8 +50,21 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.db.enums import EvaluationFinding, EvaluationMethod, EvaluationRunStatus, JobType, VersionStatus
+from app.config import settings
+from app.db.enums import (
+    AgentRunRole,
+    EvaluationFinding,
+    EvaluationMethod,
+    EvaluationRunStatus,
+    ExecutionMode,
+    JobType,
+    TaskRunStatus,
+    TaskStatus,
+    VersionStatus,
+)
 from app.errors import ArtifactHashMismatchError, ConflictError, NotFoundError
+from app.evaluation_contract import parse_evaluation_response
+from app.models.agents import Agent, AgentVersion
 from app.models.artifacts_eval import Artifact
 from app.models.evaluation_definitions import (
     EvaluationCriterion,
@@ -43,7 +72,7 @@ from app.models.evaluation_definitions import (
     EvaluationDefinitionVersion,
 )
 from app.models.evaluation_runs import EvaluationCriterionResult, EvaluationRun
-from app.models.tasks import AgentRun, Task, TaskRun
+from app.models.tasks import AgentRun, AgentRunAttempt, Task, TaskRun
 from app.repositories.job_queue_repository import JobQueueRepository
 from app.services.base import BaseService
 from app.services.flight_recorder import FlightRecorderService
@@ -162,6 +191,164 @@ class EvaluationExecutionService(BaseService):
         )
         return run
 
+    # -- creation: AGENT_EVALUATOR (Slice 3B) --------------------------------
+
+    def create_agent_evaluator_run(
+        self,
+        *,
+        agent_run_id: str,
+        subject_artifact_id: str,
+        evaluation_definition_version_id: str,
+        evaluator_agent_version_id: str,
+        evaluator_model_policy_override: Optional[dict] = None,
+        budget_id: Optional[str] = None,
+        requested_by_user_id: Optional[str] = None,
+    ) -> EvaluationRun:
+        """Creates one real, first-class evaluator Agent Run under its own
+        dedicated SINGLE_AGENT bookkeeping Task/Task Run -- never the
+        subject candidate's own (Section: MA6 Slice 3 frozen architecture)
+        -- and dispatches it through the unmodified MA3 execution pipeline
+        via ``JobType.AGENT_RUN`` (never ``JobType.EVALUATION``, which
+        remains the deterministic path's own dispatch). One evaluator
+        Agent Run performs exactly one inference covering the complete
+        immutable rubric -- never one call per criterion."""
+        _agent_run, task_run, task = self._load_subject_chain(agent_run_id)
+
+        artifact = self.db.get(Artifact, subject_artifact_id)
+        if artifact is None:
+            raise NotFoundError(f"Artifact {subject_artifact_id} not found.")
+        if artifact.agent_run_id != agent_run_id:
+            raise ConflictError(
+                f"Artifact {subject_artifact_id} does not belong to Agent Run {agent_run_id}."
+            )
+        if not artifact.content_hash:
+            raise ConflictError(
+                f"Artifact {subject_artifact_id} has no computed content hash and cannot be evaluated."
+            )
+
+        version = self.db.get(EvaluationDefinitionVersion, evaluation_definition_version_id)
+        if version is None:
+            raise NotFoundError(
+                f"Evaluation Definition Version {evaluation_definition_version_id} not found."
+            )
+        if version.status != VersionStatus.ACTIVE:
+            raise ConflictError(
+                f"Evaluation Definition Version {evaluation_definition_version_id} is not published "
+                f"(status={version.status.value!r}) and cannot be used for evaluation."
+            )
+        definition = self.db.get(EvaluationDefinition, version.evaluation_definition_id)
+        if definition is None or definition.project_id != task.project_id:
+            raise ConflictError(
+                f"Evaluation Definition Version {evaluation_definition_version_id} belongs to a different "
+                f"project than Agent Run {agent_run_id}."
+            )
+
+        evaluator_agent_version = self._require_published_agent_version(evaluator_agent_version_id)
+        evaluator_agent = self.db.get(Agent, evaluator_agent_version.agent_id)
+        if evaluator_agent is None or evaluator_agent.project_id != task.project_id:
+            raise ConflictError(
+                f"Evaluator Agent Version {evaluator_agent_version_id} belongs to a different project "
+                f"than Agent Run {agent_run_id}."
+            )
+
+        # Dedicated internal bookkeeping Task/Task Run -- the evaluator's
+        # own Agent Run is never attached to the subject's original Task
+        # Run. Its title is scaffolding only; the real subject question/
+        # context is delivered through extra_context
+        # (execution_service._build_extra_context's "evaluation_request"
+        # branch), never through this Task's own title/description.
+        evaluator_task = Task(
+            project_id=task.project_id,
+            title=f"Evaluation — {definition.name} v{version.version}",
+            execution_mode=ExecutionMode.SINGLE_AGENT,
+            status=TaskStatus.READY,
+        )
+        self.db.add(evaluator_task)
+        self.db.flush()
+
+        evaluator_task_run = TaskRun(
+            task_id=evaluator_task.id,
+            status=TaskRunStatus.CREATED,
+            budget_id=budget_id,
+            timeout_seconds=settings.default_task_run_timeout_seconds,
+        )
+        self.db.add(evaluator_task_run)
+        self.db.flush()
+
+        evaluator_agent_run = AgentRun(
+            task_run_id=evaluator_task_run.id,
+            agent_version_id=evaluator_agent_version.id,
+            role=AgentRunRole.EVALUATOR,
+            model_policy_override_json=evaluator_model_policy_override,
+            timeout_seconds=(
+                evaluator_agent_version.timeout_seconds or settings.default_agent_run_timeout_seconds
+            ),
+            # Durable pointers only (never full content) -- a worker that
+            # reclaims this job after a crash reconstructs the exact same
+            # prompt from DB state alone, the same guarantee MA4's own
+            # review_request/repair_request kinds already give.
+            input_context_json={
+                "kind": "evaluation_request",
+                "subject_agent_run_id": agent_run_id,
+                "subject_artifact_id": subject_artifact_id,
+                "subject_artifact_hash": artifact.content_hash,
+                "evaluation_definition_version_id": evaluation_definition_version_id,
+            },
+        )
+        self.db.add(evaluator_agent_run)
+        self.db.flush()
+
+        run = EvaluationRun(
+            subject_agent_run_id=agent_run_id,
+            subject_artifact_id=subject_artifact_id,
+            subject_artifact_content_hash=artifact.content_hash,
+            evaluation_definition_version_id=evaluation_definition_version_id,
+            method=EvaluationMethod.AGENT_EVALUATOR,
+            # Set directly to RUNNING (not PENDING) at dispatch time --
+            # same convention as ComparisonRun.status turning RUNNING at
+            # launch_comparison, before any candidate Agent Run has
+            # necessarily started. No separate "the worker actually picked
+            # this up" signal exists without adding a second notification
+            # seam this slice doesn't need.
+            status=EvaluationRunStatus.RUNNING,
+            requested_by_user_id=requested_by_user_id,
+            evaluator_agent_version_id=evaluator_agent_version.id,
+            evaluator_model_policy_override_json=evaluator_model_policy_override,
+            evaluator_task_run_id=evaluator_task_run.id,
+            evaluator_agent_run_id=evaluator_agent_run.id,
+            started_at=_utcnow(),
+        )
+        self.db.add(run)
+        self.db.commit()
+        self.db.refresh(run)
+
+        evaluator_task_run.status = TaskRunStatus.QUEUED
+        self.db.commit()
+
+        self._jobs.enqueue(self.db, job_type=JobType.AGENT_RUN, payload_ref=evaluator_agent_run.id)
+
+        self._event(
+            task,
+            task_run,
+            run,
+            "evaluation_run.requested",
+            decision_summary=(
+                f"agent-evaluator evaluation requested for artifact {subject_artifact_id} against "
+                f"definition version {evaluation_definition_version_id} using evaluator Agent Version "
+                f"{evaluator_agent_version_id}"
+            ),
+        )
+        self._evaluator_event(
+            evaluator_task,
+            evaluator_task_run,
+            evaluator_agent_run,
+            "evaluation_run.evaluator_queued",
+            agent_id=evaluator_agent_version.agent_id,
+            agent_version_id=evaluator_agent_version.id,
+            decision_summary=f"evaluator Agent Run {evaluator_agent_run.id} queued for evaluation run {run.id}",
+        )
+        return run
+
     def get_run(self, evaluation_run_id: str) -> Optional[EvaluationRun]:
         return self.db.get(EvaluationRun, evaluation_run_id)
 
@@ -254,6 +441,189 @@ class EvaluationExecutionService(BaseService):
             decision_summary=f"{len(run.criterion_results)} criteria evaluated",
         )
 
+    # -- finalization: AGENT_EVALUATOR (Slice 3B) ----------------------------
+    # Dispatched by app.services.evaluation_progress_service's terminal-
+    # notification seam once the evaluator's own dedicated bookkeeping
+    # Task Run reaches a terminal status -- mirrors the seam MA5 already
+    # established for ComparisonRun, as an independent, parallel consumer
+    # (never touches comparison_progress_service.py or ComparisonRun/
+    # ComparisonCandidate state).
+
+    def finalize_agent_evaluator_run(self, evaluation_run_id: str, *, task_run_status: TaskRunStatus) -> None:
+        run = self.db.get(EvaluationRun, evaluation_run_id)
+        if run is None:
+            logger.error("evaluation_run_missing evaluation_run_id=%s", evaluation_run_id)
+            return
+        if run.status not in (EvaluationRunStatus.PENDING, EvaluationRunStatus.RUNNING):
+            logger.warning(
+                "evaluation_run_not_awaiting_evaluator evaluation_run_id=%s status=%s",
+                evaluation_run_id,
+                run.status.value,
+            )
+            return
+
+        evaluator_agent_run = self.db.get(AgentRun, run.evaluator_agent_run_id)
+        task_run = self.db.get(TaskRun, run.evaluator_task_run_id)
+        task = self.db.get(Task, task_run.task_id) if task_run else None
+        if evaluator_agent_run is None or task_run is None or task is None:
+            run.status = EvaluationRunStatus.FAILED
+            run.ended_at = _utcnow()
+            run.failure_reason = "Evaluator Agent Run's own Task Run/Task no longer exists."
+            self.db.commit()
+            logger.error("evaluation_run_evaluator_chain_missing evaluation_run_id=%s", evaluation_run_id)
+            return
+
+        if task_run_status == TaskRunStatus.CANCELLED:
+            run.status = EvaluationRunStatus.CANCELLED
+            run.ended_at = _utcnow()
+            run.failure_reason = "Evaluator Agent Run was cancelled."
+            self.db.commit()
+            self._evaluator_event(
+                task,
+                task_run,
+                evaluator_agent_run,
+                "evaluation_run.cancelled",
+                decision_summary="evaluator Agent Run cancelled",
+            )
+            return
+
+        if task_run_status == TaskRunStatus.FAILED:
+            reason = self._describe_agent_run_failure(evaluator_agent_run)
+            run.status = EvaluationRunStatus.FAILED
+            run.ended_at = _utcnow()
+            run.failure_reason = reason
+            self.db.commit()
+            self._evaluator_event(
+                task,
+                task_run,
+                evaluator_agent_run,
+                "evaluation_run.failed",
+                decision_summary=reason,
+                error={"message": reason},
+            )
+            return
+
+        # COMPLETED: the evaluator Agent Run itself succeeded (inference
+        # happened) -- revalidate and parse before trusting anything it
+        # said.
+        try:
+            self._finalize_agent_evaluator_success(run, evaluator_agent_run, task, task_run)
+        except Exception as exc:
+            # Anything not already handled inside (a bug, a missing row, a
+            # hash mismatch it raised) must still leave the Evaluation Run
+            # in a terminal state rather than stuck RUNNING forever -- same
+            # worker-failure-handling guarantee AgentExecutionService.execute
+            # gives Agent Runs.
+            logger.exception("evaluation_run_finalize_error evaluation_run_id=%s", evaluation_run_id)
+            run.status = EvaluationRunStatus.FAILED
+            run.ended_at = _utcnow()
+            run.failure_reason = str(exc)
+            self.db.commit()
+            self._evaluator_event(
+                task,
+                task_run,
+                evaluator_agent_run,
+                "evaluation_run.failed",
+                decision_summary=str(exc),
+                error={"message": str(exc)},
+            )
+
+    def _finalize_agent_evaluator_success(
+        self, run: EvaluationRun, evaluator_agent_run: AgentRun, task: Task, task_run: TaskRun
+    ) -> None:
+        subject_artifact = self.db.get(Artifact, run.subject_artifact_id)
+        if subject_artifact is None or subject_artifact.agent_run_id != run.subject_agent_run_id:
+            raise ConflictError(
+                f"Artifact {run.subject_artifact_id} no longer belongs to Agent Run "
+                f"{run.subject_agent_run_id} -- refusing to trust an evaluation of a different artifact "
+                "than was bound."
+            )
+        if subject_artifact.content_hash != run.subject_artifact_content_hash:
+            raise ArtifactHashMismatchError(
+                "Subject artifact content changed since this Evaluation Run was created -- refusing to "
+                "trust an evaluation of a different artifact than was bound.",
+                detail={
+                    "expected_artifact_hash": run.subject_artifact_content_hash,
+                    "actual_artifact_hash": subject_artifact.content_hash,
+                },
+            )
+
+        version = self.db.get(EvaluationDefinitionVersion, run.evaluation_definition_version_id)
+        if version is None:
+            raise NotFoundError(
+                f"Evaluation Definition Version {run.evaluation_definition_version_id} not found."
+            )
+
+        output_artifact = (
+            self.db.execute(select(Artifact).where(Artifact.agent_run_id == evaluator_agent_run.id))
+            .scalars()
+            .first()
+        )
+        if output_artifact is None:
+            raise ConflictError(f"Evaluator Agent Run {evaluator_agent_run.id} produced no output artifact.")
+
+        raw_text = Path(output_artifact.storage_ref).read_text(encoding="utf-8")
+        criteria_by_key = {c.key: c for c in version.criteria}
+        parsed = parse_evaluation_response(raw_text, expected_criterion_keys=list(criteria_by_key.keys()))
+
+        if not parsed.is_valid:
+            run.status = EvaluationRunStatus.FAILED
+            run.ended_at = _utcnow()
+            run.failure_reason = parsed.parse_error
+            self.db.commit()
+            self._evaluator_event(
+                task,
+                task_run,
+                evaluator_agent_run,
+                "evaluation_run.failed",
+                artifact_refs=[output_artifact.id],
+                decision_summary=parsed.parse_error,
+                error={"category": "evaluator_response_invalid", "message": parsed.parse_error},
+            )
+            return
+
+        for finding in parsed.findings:
+            criterion = criteria_by_key[finding.key]
+            evidence_refs = [
+                {"quote": e.quote, "criterion_key": e.criterion_key} for e in finding.evidence
+            ] or None
+            self.db.add(
+                EvaluationCriterionResult(
+                    evaluation_run_id=run.id,
+                    evaluation_criterion_id=criterion.id,
+                    criterion_key=criterion.key,
+                    order_index=criterion.order_index,
+                    finding=finding.finding,
+                    rationale=finding.rationale,
+                    evidence_refs=evidence_refs,
+                )
+            )
+        run.status = EvaluationRunStatus.COMPLETED
+        run.ended_at = _utcnow()
+        self.db.commit()
+        self.db.refresh(run)
+        self._evaluator_event(
+            task,
+            task_run,
+            evaluator_agent_run,
+            "evaluation_run.completed",
+            artifact_refs=[output_artifact.id],
+            decision_summary=f"{len(parsed.findings)} criteria evaluated",
+        )
+
+    def _describe_agent_run_failure(self, evaluator_agent_run: AgentRun) -> str:
+        stmt = (
+            select(AgentRunAttempt)
+            .where(AgentRunAttempt.agent_run_id == evaluator_agent_run.id)
+            .order_by(AgentRunAttempt.attempt_number.desc())
+        )
+        latest_attempt = self.db.execute(stmt).scalars().first()
+        if latest_attempt is not None and latest_attempt.error:
+            category = latest_attempt.error.get("category", "unknown")
+            message = latest_attempt.error.get("message", "")
+            return f"evaluator Agent Run failed ({category}): {message}"
+        return f"evaluator Agent Run {evaluator_agent_run.id} failed."
+
     # -- internals ------------------------------------------------------------
 
     def _run_checks(self, run: EvaluationRun) -> None:
@@ -324,6 +694,21 @@ class EvaluationExecutionService(BaseService):
             raise NotFoundError(f"Task {task_run.task_id} not found.")
         return agent_run, task_run, task
 
+    def _require_published_agent_version(self, agent_version_id: str) -> AgentVersion:
+        """Same published/ACTIVE check as
+        ComparisonService._get_published_agent_version -- an evaluator
+        Agent Version is validated exactly like any other Agent Version
+        used to run something."""
+        agent_version = self.db.get(AgentVersion, agent_version_id)
+        if agent_version is None:
+            raise NotFoundError(f"Agent Version {agent_version_id} not found.")
+        if agent_version.status != VersionStatus.ACTIVE:
+            raise ConflictError(
+                f"Agent Version {agent_version_id} is not published (status="
+                f"{agent_version.status.value!r}) and cannot be used as an evaluator."
+            )
+        return agent_version
+
     def _event(
         self, task: Task, task_run: TaskRun, run: EvaluationRun, event_type: str, **fields: Any
     ) -> None:
@@ -332,6 +717,22 @@ class EvaluationExecutionService(BaseService):
             task_run_id=task_run.id,
             agent_run_id=run.subject_agent_run_id,
             artifact_refs=[run.subject_artifact_id],
+            event_type=event_type,
+            **fields,
+        )
+
+    def _evaluator_event(
+        self, task: Task, task_run: TaskRun, evaluator_agent_run: AgentRun, event_type: str, **fields: Any
+    ) -> None:
+        """Like ``_event``, but anchored to the evaluator's own dedicated
+        bookkeeping Task/Task Run/Agent Run -- never the subject's
+        (``_event`` hardcodes ``run.subject_agent_run_id``/
+        ``subject_artifact_id``, which would misattribute an event
+        recorded under the evaluator's own Task Run stream)."""
+        self.recorder.record(
+            task_id=task.id,
+            task_run_id=task_run.id,
+            agent_run_id=evaluator_agent_run.id,
             event_type=event_type,
             **fields,
         )

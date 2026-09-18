@@ -20,6 +20,7 @@ is taken.
 """
 
 import hashlib
+import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -42,6 +43,7 @@ from app.db.enums import (
     TaskRunStatus,
     UsageSourceType,
 )
+from app.evaluation_contract import build_evaluator_extra_context
 from app.model_resolution import (
     ModelUnavailableError,
     NoEligibleModelError,
@@ -52,6 +54,7 @@ from app.model_resolution import (
 )
 from app.models.agents import AgentVersion, PromptVersion
 from app.models.artifacts_eval import Artifact
+from app.models.evaluation_definitions import EvaluationDefinitionVersion
 from app.models.execution import ModelCall
 from app.models.identity import Project
 from app.models.tasks import AgentRun, AgentRunAttempt, Task, TaskRun
@@ -68,6 +71,9 @@ from app.providers.factory import build_provider_adapter
 from app.review_contract import build_repair_extra_context, build_reviewer_extra_context
 from app.services.budget_service import BudgetExceededError, BudgetGovernor, estimate_cost
 from app.services.comparison_progress_service import notify_task_run_terminal
+from app.services.evaluation_progress_service import (
+    notify_task_run_terminal as notify_evaluation_run_terminal,
+)
 from app.services.flight_recorder import FlightRecorderService
 from app.services.review_orchestration_service import ReviewOrchestrationService
 
@@ -270,6 +276,10 @@ class AgentExecutionService:
             self.governor.release(reservation)
             self._finalize_failed(ctx, category="review_context_error", message=str(exc), attempt=attempt)
             raise ExecutionAborted(str(exc)) from exc
+        except _MissingEvaluationContext as exc:
+            self.governor.release(reservation)
+            self._finalize_failed(ctx, category="evaluation_context_error", message=str(exc), attempt=attempt)
+            raise ExecutionAborted(str(exc)) from exc
 
         assembly = build_prompt(
             agent_version=ctx.agent_version,
@@ -418,6 +428,7 @@ class AgentExecutionService:
         self.db.commit()
         self._event(ctx, "task_run.completed", decision_summary="task run completed")
         notify_task_run_terminal(self.db, task_run)
+        notify_evaluation_run_terminal(self.db, task_run)
 
     # -- model resolution --------------------------------------------------
 
@@ -484,7 +495,78 @@ class AgentExecutionService:
                 repair_instructions=input_context.get("repair_instructions"),
             )
 
+        if kind == "evaluation_request":
+            return self._build_evaluator_extra_context(input_context)
+
         return None
+
+    def _build_evaluator_extra_context(self, input_context: dict) -> str:
+        """MA6 Slice 3B: renders the subject task's own title/description/
+        requirements + the exact subject candidate Artifact content +
+        the immutable rubric's full ordered criteria + structured-output
+        instructions for one evaluator Agent Run's single inference call.
+        The evaluator's own dedicated bookkeeping Task (never the
+        subject's) never supplies any of this -- everything the evaluator
+        needs to reason about comes from this rendered block, exactly
+        like a REVIEWER/REPAIR run's review-specific content arrives
+        entirely through review_request/repair_request's own extra
+        context above, never through Task fields.
+
+        Re-validates the subject artifact/hash binding *before* any
+        provider call or budget spend -- cost avoidance, and the first of
+        the two defense-in-depth checks
+        app.services.evaluation_execution_service already documents for
+        the deterministic path (the second runs again once the
+        evaluator's own inference completes, in
+        finalize_agent_evaluator_run)."""
+        subject_agent_run_id = input_context.get("subject_agent_run_id")
+        subject_artifact_id = input_context.get("subject_artifact_id")
+        subject_artifact_hash = input_context.get("subject_artifact_hash")
+        evaluation_definition_version_id = input_context.get("evaluation_definition_version_id")
+
+        subject_artifact = self.db.get(Artifact, subject_artifact_id) if subject_artifact_id else None
+        if subject_artifact is None or subject_artifact.agent_run_id != subject_agent_run_id:
+            raise _MissingEvaluationContext(
+                f"Subject artifact {subject_artifact_id} for evaluation no longer belongs to Agent Run "
+                f"{subject_agent_run_id}."
+            )
+        if subject_artifact.content_hash != subject_artifact_hash:
+            raise _MissingEvaluationContext(
+                "Subject artifact content changed since this Evaluation Run was created -- refusing to "
+                "evaluate a different artifact than was bound."
+            )
+
+        subject_agent_run = self.db.get(AgentRun, subject_agent_run_id)
+        subject_task_run = self.db.get(TaskRun, subject_agent_run.task_run_id) if subject_agent_run else None
+        subject_task = self.db.get(Task, subject_task_run.task_id) if subject_task_run else None
+        if subject_agent_run is None or subject_task_run is None or subject_task is None:
+            raise _MissingEvaluationContext(
+                f"Subject Agent Run {subject_agent_run_id}'s own Task Run/Task no longer exists."
+            )
+
+        version = self.db.get(EvaluationDefinitionVersion, evaluation_definition_version_id)
+        if version is None:
+            raise _MissingEvaluationContext(
+                f"Evaluation Definition Version {evaluation_definition_version_id} no longer exists."
+            )
+
+        candidate_text = Path(subject_artifact.storage_ref).read_text(encoding="utf-8")
+        requirements_text = (
+            json.dumps(subject_task.requirements, sort_keys=True, default=str)
+            if subject_task.requirements
+            else None
+        )
+        return build_evaluator_extra_context(
+            subject_task_title=subject_task.title,
+            subject_task_description=subject_task.description,
+            subject_task_requirements=requirements_text,
+            candidate_text=candidate_text,
+            candidate_artifact_id=subject_artifact.id,
+            candidate_artifact_hash=subject_artifact.content_hash or "",
+            criteria=[
+                {"key": c.key, "label": c.label, "description": c.description} for c in version.criteria
+            ],
+        )
 
     # -- provider invocation -------------------------------------------------
 
@@ -585,6 +667,7 @@ class AgentExecutionService:
             ctx, "task_run.failed", error={"category": category, "message": message}, decision_summary=message
         )
         notify_task_run_terminal(self.db, ctx.task_run)
+        notify_evaluation_run_terminal(self.db, ctx.task_run)
 
     def _finalize_cancelled(
         self, ctx: _Context, attempt: AgentRunAttempt, *, already_produced: bool = False
@@ -607,6 +690,7 @@ class AgentExecutionService:
         self.db.commit()
         self._event(ctx, "task_run.cancelled", decision_summary="task run cancelled")
         notify_task_run_terminal(self.db, ctx.task_run)
+        notify_evaluation_run_terminal(self.db, ctx.task_run)
 
     # -- comparison compatibility (MA5) --------------------------------------
 
@@ -666,3 +750,14 @@ class _MissingReviewContext(Exception):
     immutable and never deleted while their owning Agent Run exists), but
     handled as a proper categorized failure rather than an unhandled I/O
     error, consistent with every other failure category in this module."""
+
+
+class _MissingEvaluationContext(Exception):
+    """MA6 Slice 3B: an EVALUATOR run's input_context_json points at a
+    subject artifact/Evaluation Definition Version that no longer exists,
+    or the subject artifact's content hash no longer matches the hash
+    frozen at Evaluation Run creation time -- checked here (before any
+    provider call/budget spend) as well as again by
+    app.services.evaluation_execution_service.finalize_agent_evaluator_run
+    once the evaluator's own inference completes, same defense-in-depth
+    the deterministic Evaluation Run path already uses."""
