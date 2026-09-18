@@ -6,11 +6,12 @@ No execution (WorkflowRun/WorkflowNodeRun execution is MA7.2+).
 
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import and_
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db
 from app.db.enums import VersionStatus, WorkflowNodeType
-from app.models.workflow import Workflow, WorkflowVersion
+from app.models.workflow import Workflow, WorkflowVersion, WorkflowRun
 from app.schemas.workflow import (
     WorkflowCreate,
     WorkflowNodeCreate,
@@ -27,7 +28,7 @@ router = APIRouter(tags=["workflows"])
 
 @router.get("/workflows", response_model=List[WorkflowRead])
 def list_workflows(
-    project_id: str, status: Optional[str] = None, db: Session = Depends(get_db)
+    project_id: str, status: Optional[VersionStatus] = None, db: Session = Depends(get_db)
 ):
     """List workflows in a project, optionally filtered by status."""
     service = WorkflowDefinitionService(db)
@@ -87,7 +88,7 @@ def create_workflow_version(workflow_id: str, db: Session = Depends(get_db)):
     db.add(new_version)
     db.commit()
 
-    return WorkflowVersionRead(id=new_version.id, workflow_id=workflow_id, version=next_version, status=VersionStatus.DRAFT.value)
+    return WorkflowVersionRead(id=new_version.id, workflow_id=workflow_id, version=next_version, status=VersionStatus.DRAFT)
 
 
 @router.post("/workflows/{workflow_id}/versions/{version}/publish", response_model=WorkflowVersionRead)
@@ -257,38 +258,127 @@ def get_workflow_graph(workflow_id: str, version: int, db: Session = Depends(get
     return {"version": version, "status": wv.status, "nodes": nodes, "edges": edges}
 
 
-# Execution endpoints (MA7.2+) — reserved but not implemented in MA7.1
+@router.post("/workflows/{workflow_id}/versions/{version}/runs", response_model=WorkflowRunRead, status_code=201)
+def start_workflow_run(workflow_id: str, version: int, body: dict, db: Session = Depends(get_db)):
+    """Start execution of an ACTIVE workflow version.
+
+    Body: {"task_run_id": "<task_run_id>"}
+
+    Creates WorkflowRun with initial node runs, schedules entry nodes.
+
+    Returns 400 if version not ACTIVE.
+    Returns 201 on success.
+    """
+    from app.services.workflow_execution_service import WorkflowExecutionService, WorkflowExecutionError
+
+    service = WorkflowExecutionService(db)
+
+    try:
+        task_run_id = body.get("task_run_id")
+        if not task_run_id:
+            raise HTTPException(status_code=400, detail="task_run_id required")
+
+        wv = db.query(WorkflowVersion).filter(
+            and_(WorkflowVersion.workflow_id == workflow_id, WorkflowVersion.version == version)
+        ).first()
+        workflow_version_id = wv.id if wv else None
+
+        if not workflow_version_id:
+            raise HTTPException(status_code=404, detail="Workflow version not found")
+
+        workflow_run = service.start_workflow_run(workflow_version_id, task_run_id)
+        return WorkflowRunRead(
+            id=workflow_run.id,
+            workflow_version_id=workflow_run.workflow_version_id,
+            task_run_id=workflow_run.task_run_id,
+            status=workflow_run.status,
+        )
+    except WorkflowExecutionError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @router.get("/workflows/{workflow_id}/versions/{version}/runs", response_model=List[WorkflowRunRead])
 def list_workflow_runs(workflow_id: str, version: int, db: Session = Depends(get_db)):
     """List all WorkflowRuns for a specific version.
 
-    MA7.2+: execution endpoint, not implemented in MA7.1.
+    MA7.2: execution endpoint.
     """
-    raise HTTPException(status_code=501, detail="Workflow execution (MA7.2+)")
+    wv = db.query(WorkflowVersion).filter(
+        and_(WorkflowVersion.workflow_id == workflow_id, WorkflowVersion.version == version)
+    ).first()
+
+    if not wv:
+        raise HTTPException(status_code=404, detail="Workflow version not found")
+
+    runs = db.query(WorkflowRun).filter(WorkflowRun.workflow_version_id == wv.id).all()
+    return [
+        WorkflowRunRead(
+            id=r.id,
+            workflow_version_id=r.workflow_version_id,
+            task_run_id=r.task_run_id,
+            status=r.status,
+        )
+        for r in runs
+    ]
 
 
 @router.get("/workflow-runs/{workflow_run_id}", response_model=WorkflowRunRead)
 def get_workflow_run(workflow_run_id: str, db: Session = Depends(get_db)):
     """Get a workflow run by ID.
 
-    MA7.2+: execution endpoint, not implemented in MA7.1.
+    MA7.2: execution endpoint.
     """
-    raise HTTPException(status_code=501, detail="Workflow execution (MA7.2+)")
+    from app.models.workflow import WorkflowRun
+
+    run = db.query(WorkflowRun).filter(WorkflowRun.id == workflow_run_id).first()
+    if not run:
+        raise HTTPException(status_code=404, detail="Workflow run not found")
+
+    return WorkflowRunRead(
+        id=run.id,
+        workflow_version_id=run.workflow_version_id,
+        task_run_id=run.task_run_id,
+        status=run.status,
+    )
 
 
 @router.get("/workflow-runs/{workflow_run_id}/nodes", response_model=List[WorkflowNodeRunRead])
 def list_workflow_node_runs(workflow_run_id: str, db: Session = Depends(get_db)):
     """List all node runs in a workflow run.
 
-    MA7.2+: execution endpoint, not implemented in MA7.1.
+    MA7.2: execution endpoint.
     """
-    raise HTTPException(status_code=501, detail="Workflow execution (MA7.2+)")
+    from app.models.workflow import WorkflowNodeRun
+
+    node_runs = db.query(WorkflowNodeRun).filter(
+        WorkflowNodeRun.workflow_run_id == workflow_run_id
+    ).all()
+
+    return [
+        WorkflowNodeRunRead(
+            id=nr.id,
+            workflow_run_id=nr.workflow_run_id,
+            workflow_node_id=nr.workflow_node_id,
+            iteration=nr.iteration,
+            status=nr.status,
+            agent_run_id=nr.agent_run_id,
+        )
+        for nr in node_runs
+    ]
 
 
-@router.get("/workflow-runs/{workflow_run_id}/nodes/{node_id}/attempts", response_model=List[WorkflowNodeRunRead])
-def get_workflow_node_run_attempts(workflow_run_id: str, node_id: str, db: Session = Depends(get_db)):
-    """Get per-iteration node runs for a repair-loop node.
+@router.post("/workflow-runs/{workflow_run_id}/cancel")
+def cancel_workflow_run(workflow_run_id: str, db: Session = Depends(get_db)):
+    """Cancel a running workflow.
 
-    MA7.2+: execution endpoint, not implemented in MA7.1.
+    Cancellation is cooperative: pending nodes marked CANCELLED,
+    running agents receive cancellation_requested signal.
+
+    MA7.2: execution endpoint.
     """
-    raise HTTPException(status_code=501, detail="Workflow execution (MA7.2+)")
+    from app.services.workflow_execution_service import WorkflowExecutionService
+
+    service = WorkflowExecutionService(db)
+    service.cancel_workflow_run(workflow_run_id, cancelled_by_user_id=None)
+
+    return {"status": "cancellation_requested"}
