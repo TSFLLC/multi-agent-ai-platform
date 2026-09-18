@@ -26,13 +26,17 @@ from app.models.artifacts_eval import ComparisonRun
 from app.models.identity import User
 from app.models.tasks import Task, TaskRun
 from app.schemas.comparisons import (
+    ComparisonCandidateEvaluationResult,
     ComparisonCandidateRead,
+    ComparisonEvaluationRequest,
+    ComparisonEvaluationResponse,
     ComparisonReviewConfig,
     ComparisonRunCreate,
     ComparisonRunRead,
     SelectWinnerRequest,
 )
 from app.services.comparison_service import ComparisonService, get_comparison_detail
+from app.services.evaluation_execution_service import EvaluationExecutionService
 from app.services.idempotency_service import BeginOutcome, IdempotencyService
 
 router = APIRouter(tags=["comparisons"])
@@ -222,6 +226,56 @@ def get_comparison(comparison_id: str, db: Session = Depends(get_db), user: User
     comparison = _get_comparison_or_404(db, comparison_id)
     _require_comparison_access(db, user, comparison, ProjectAction.READ)
     return _read(db, comparison_id)
+
+
+@router.post("/comparisons/{comparison_id}/evaluations", response_model=ComparisonEvaluationResponse)
+def analyze_comparison(
+    comparison_id: str,
+    body: ComparisonEvaluationRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Fans out one independent EvaluationRun per eligible candidate
+    (Section: MA6 Slice 3C) -- the domain action behind the future
+    "Analyze Results" UI label, never the label/endpoint name itself.
+    Reuses exactly the same single-AgentRun create_run/
+    create_agent_evaluator_run validation and dispatch as POST
+    /agent-runs/{agent_run_id}/evaluations (app.api.routers.
+    evaluation_runs) once per eligible candidate -- no second inference
+    pipeline, no comparative/ranking evaluator call, no winner. A
+    candidate not yet eligible (not launched, not COMPLETED, or no
+    resolvable output Artifact) or whose EvaluationRun creation itself
+    fails is reported per-candidate rather than aborting its siblings.
+    Idempotent: retrying the identical request (same comparison,
+    candidate, Evaluation Definition Version, method, and evaluator
+    configuration) reuses the prior EvaluationRun instead of creating a
+    duplicate -- see app.services.evaluation_execution_service.
+    _comparison_evaluation_idempotency_key."""
+    comparison = _get_comparison_or_404(db, comparison_id)
+    _require_comparison_access(db, user, comparison, ProjectAction.MODIFY)
+
+    outcomes = EvaluationExecutionService(db).analyze_comparison(
+        comparison_id=comparison_id,
+        evaluation_definition_version_id=body.evaluation_definition_version_id,
+        method=body.method,
+        evaluator_agent_version_id=body.evaluator_agent_version_id,
+        evaluator_model_policy_override=body.evaluator_model_policy_override,
+        budget_id=body.budget_id,
+        requested_by_user_id=user.id,
+    )
+    return ComparisonEvaluationResponse(
+        comparison_id=comparison_id,
+        results=[
+            ComparisonCandidateEvaluationResult(
+                comparison_candidate_id=o.comparison_candidate_id,
+                subject_agent_run_id=o.subject_agent_run_id,
+                status=o.status,
+                evaluation_run_id=o.evaluation_run_id,
+                reason=o.reason,
+            )
+            for o in outcomes
+        ],
+    )
 
 
 @router.post("/comparisons/{comparison_id}/select-winner", response_model=ComparisonRunRead)

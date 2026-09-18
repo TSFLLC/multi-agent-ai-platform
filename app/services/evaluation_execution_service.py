@@ -42,7 +42,10 @@ bind time) -- never silently evaluating a different artifact than the one
 an operator requested.
 """
 
+import hashlib
+import json
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -57,6 +60,7 @@ from app.db.enums import (
     EvaluationMethod,
     EvaluationRunStatus,
     ExecutionMode,
+    IdempotencyScope,
     JobType,
     TaskRunStatus,
     TaskStatus,
@@ -65,7 +69,7 @@ from app.db.enums import (
 from app.errors import ArtifactHashMismatchError, ConflictError, NotFoundError
 from app.evaluation_contract import parse_evaluation_response
 from app.models.agents import Agent, AgentVersion
-from app.models.artifacts_eval import Artifact
+from app.models.artifacts_eval import Artifact, ComparisonCandidate, ComparisonRun
 from app.models.evaluation_definitions import (
     EvaluationCriterion,
     EvaluationDefinition,
@@ -75,7 +79,9 @@ from app.models.evaluation_runs import EvaluationCriterionResult, EvaluationRun
 from app.models.tasks import AgentRun, AgentRunAttempt, Task, TaskRun
 from app.repositories.job_queue_repository import JobQueueRepository
 from app.services.base import BaseService
+from app.services.comparison_service import _candidate_artifact
 from app.services.flight_recorder import FlightRecorderService
+from app.services.idempotency_service import BeginOutcome, IdempotencyService
 
 logger = logging.getLogger("app.services.evaluation_execution_service")
 
@@ -92,6 +98,69 @@ NON_EMPTY_OUTPUT_CRITERION_KEY = "non_empty_output"
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+@dataclass
+class ComparisonCandidateEvaluationOutcome:
+    """One bounded per-candidate result of a comparison evaluation fan-out
+    (Section: MA6 Slice 3C) -- never a comparative verdict across
+    candidates, just "what happened when this candidate was evaluated."
+    ``status`` is one of "created" (a new EvaluationRun was made),
+    "reused" (an identical prior request already made one -- idempotent
+    retry), "skipped" (the candidate is not yet eligible; not an error),
+    or "failed" (eligible but EvaluationRun creation itself was rejected,
+    e.g. a since-unpublished Evaluation Definition Version)."""
+
+    comparison_candidate_id: str
+    subject_agent_run_id: Optional[str]
+    status: str
+    evaluation_run_id: Optional[str] = None
+    reason: Optional[str] = None
+
+
+def _comparison_evaluation_idempotency_key(
+    *,
+    comparison_id: str,
+    candidate_id: str,
+    evaluation_definition_version_id: str,
+    method: EvaluationMethod,
+    evaluator_agent_version_id: Optional[str],
+    evaluator_model_policy_override: Optional[dict],
+) -> str:
+    """Deterministic, content-derived key for one candidate's slot in one
+    comparison evaluation fan-out request -- a retry of the exact same
+    logical request (same comparison, candidate, Evaluation Definition
+    Version, method, and evaluator configuration) always recomputes this
+    same key, so IdempotencyService.begin naturally returns
+    ALREADY_COMPLETED instead of creating a duplicate EvaluationRun/
+    evaluator Task/Task Run/Agent Run/queued job -- no client-supplied
+    Idempotency-Key header required, unlike the whole-request header
+    pattern app.api.routers.comparisons already uses for create/launch
+    (that pattern can't express "distinguish per candidate" within one
+    request). ``comparison_id`` already pins a single, immutable project
+    (Section: ComparisonRun.task_run_id -> Task.project_id never
+    reassigned), so project isolation falls out of this key without
+    needing to hash project_id separately. A *different* evaluator
+    AgentVersion/model-policy-override/Evaluation Definition Version
+    intentionally produces a different key, so those coexist as distinct
+    historical EvaluationRuns rather than colliding."""
+    override_fingerprint = "none"
+    if evaluator_model_policy_override:
+        override_fingerprint = hashlib.sha256(
+            json.dumps(evaluator_model_policy_override, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()[:16]
+    payload = "|".join(
+        [
+            comparison_id,
+            candidate_id,
+            evaluation_definition_version_id,
+            method.value,
+            evaluator_agent_version_id or "none",
+            override_fingerprint,
+        ]
+    )
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return f"comparison_evaluation:{digest}"
 
 
 def _check_non_empty_output(
@@ -348,6 +417,180 @@ class EvaluationExecutionService(BaseService):
             decision_summary=f"evaluator Agent Run {evaluator_agent_run.id} queued for evaluation run {run.id}",
         )
         return run
+
+    # -- creation: Comparison fan-out (Slice 3C) -----------------------------
+
+    def analyze_comparison(
+        self,
+        *,
+        comparison_id: str,
+        evaluation_definition_version_id: str,
+        method: EvaluationMethod = EvaluationMethod.DETERMINISTIC,
+        evaluator_agent_version_id: Optional[str] = None,
+        evaluator_model_policy_override: Optional[dict] = None,
+        budget_id: Optional[str] = None,
+        requested_by_user_id: Optional[str] = None,
+    ) -> List[ComparisonCandidateEvaluationOutcome]:
+        """Fans out one independent EvaluationRun per eligible
+        ComparisonCandidate under one ComparisonRun (Section: MA6 Slice
+        3C) -- every candidate is evaluated exactly as if create_run/
+        create_agent_evaluator_run had been called for it one at a time;
+        no second inference pipeline, no comparative/ranking evaluator
+        call across candidates, no ComparisonRun/ComparisonCandidate
+        winner-selection state ever read or written here (that remains
+        ComparisonService's exclusive surface -- app.services.
+        comparison_service.select_canonical). A candidate not yet
+        eligible (not launched, its Task Run not COMPLETED, or no
+        resolvable output Artifact) is recorded as "skipped" rather than
+        aborting its siblings; a candidate whose EvaluationRun creation
+        itself fails (e.g. a since-unpublished definition version) is
+        recorded as "failed" the same way -- one candidate's outcome never
+        prevents any other candidate's independent EvaluationRun."""
+        if method == EvaluationMethod.AGENT_EVALUATOR and not evaluator_agent_version_id:
+            raise ConflictError("evaluator_agent_version_id is required when method is agent_evaluator.")
+
+        comparison = self.db.get(ComparisonRun, comparison_id)
+        if comparison is None:
+            raise NotFoundError(f"Comparison {comparison_id} not found.")
+
+        candidates = list(
+            self.db.execute(
+                select(ComparisonCandidate)
+                .where(ComparisonCandidate.comparison_run_id == comparison_id)
+                .order_by(ComparisonCandidate.created_at)
+            )
+            .scalars()
+            .all()
+        )
+
+        idempotency = IdempotencyService(self.db)
+        return [
+            self._analyze_one_candidate(
+                comparison_id=comparison_id,
+                candidate=candidate,
+                evaluation_definition_version_id=evaluation_definition_version_id,
+                method=method,
+                evaluator_agent_version_id=evaluator_agent_version_id,
+                evaluator_model_policy_override=evaluator_model_policy_override,
+                budget_id=budget_id,
+                requested_by_user_id=requested_by_user_id,
+                idempotency=idempotency,
+            )
+            for candidate in candidates
+        ]
+
+    def _analyze_one_candidate(
+        self,
+        *,
+        comparison_id: str,
+        candidate: ComparisonCandidate,
+        evaluation_definition_version_id: str,
+        method: EvaluationMethod,
+        evaluator_agent_version_id: Optional[str],
+        evaluator_model_policy_override: Optional[dict],
+        budget_id: Optional[str],
+        requested_by_user_id: Optional[str],
+        idempotency: IdempotencyService,
+    ) -> ComparisonCandidateEvaluationOutcome:
+        if candidate.agent_run_id is None or candidate.task_run_id is None:
+            return ComparisonCandidateEvaluationOutcome(
+                comparison_candidate_id=candidate.id,
+                subject_agent_run_id=candidate.agent_run_id,
+                status="skipped",
+                reason="candidate has not been launched yet (no Agent Run).",
+            )
+
+        candidate_run = self.db.get(TaskRun, candidate.task_run_id)
+        if candidate_run is None or candidate_run.status != TaskRunStatus.COMPLETED:
+            observed = candidate_run.status.value if candidate_run is not None else "unknown"
+            return ComparisonCandidateEvaluationOutcome(
+                comparison_candidate_id=candidate.id,
+                subject_agent_run_id=candidate.agent_run_id,
+                status="skipped",
+                reason=f"candidate Task Run status is {observed!r}, not completed.",
+            )
+
+        artifact = _candidate_artifact(self.db, candidate, candidate_run)
+        if artifact is None or not artifact.content_hash:
+            return ComparisonCandidateEvaluationOutcome(
+                comparison_candidate_id=candidate.id,
+                subject_agent_run_id=candidate.agent_run_id,
+                status="skipped",
+                reason="no valid output artifact could be resolved for this candidate.",
+            )
+
+        key = _comparison_evaluation_idempotency_key(
+            comparison_id=comparison_id,
+            candidate_id=candidate.id,
+            evaluation_definition_version_id=evaluation_definition_version_id,
+            method=method,
+            evaluator_agent_version_id=evaluator_agent_version_id,
+            evaluator_model_policy_override=evaluator_model_policy_override,
+        )
+        begin = idempotency.begin(
+            key, scope=IdempotencyScope.API_REQUEST, resource_type="comparison_evaluation"
+        )
+        if begin.outcome == BeginOutcome.ALREADY_COMPLETED:
+            run_id = (begin.key_row.result_ref or {}).get("evaluation_run_id")
+            return ComparisonCandidateEvaluationOutcome(
+                comparison_candidate_id=candidate.id,
+                subject_agent_run_id=candidate.agent_run_id,
+                status="reused",
+                evaluation_run_id=run_id,
+            )
+
+        try:
+            if method == EvaluationMethod.AGENT_EVALUATOR:
+                # analyze_comparison already validated this is set for
+                # method=agent_evaluator -- narrows Optional[str] -> str.
+                assert evaluator_agent_version_id is not None
+                run = self.create_agent_evaluator_run(
+                    agent_run_id=candidate.agent_run_id,
+                    subject_artifact_id=artifact.id,
+                    evaluation_definition_version_id=evaluation_definition_version_id,
+                    evaluator_agent_version_id=evaluator_agent_version_id,
+                    evaluator_model_policy_override=evaluator_model_policy_override,
+                    budget_id=budget_id,
+                    requested_by_user_id=requested_by_user_id,
+                )
+            else:
+                run = self.create_run(
+                    agent_run_id=candidate.agent_run_id,
+                    subject_artifact_id=artifact.id,
+                    evaluation_definition_version_id=evaluation_definition_version_id,
+                    requested_by_user_id=requested_by_user_id,
+                )
+        except (NotFoundError, ConflictError) as exc:
+            self.db.rollback()
+            idempotency.fail(key)
+            return ComparisonCandidateEvaluationOutcome(
+                comparison_candidate_id=candidate.id,
+                subject_agent_run_id=candidate.agent_run_id,
+                status="failed",
+                reason=str(exc),
+            )
+        except Exception:
+            self.db.rollback()
+            idempotency.fail(key)
+            logger.exception(
+                "comparison evaluation fan-out: unexpected error creating EvaluationRun "
+                "for candidate %s",
+                candidate.id,
+            )
+            return ComparisonCandidateEvaluationOutcome(
+                comparison_candidate_id=candidate.id,
+                subject_agent_run_id=candidate.agent_run_id,
+                status="failed",
+                reason="internal error creating evaluation run for this candidate.",
+            )
+
+        idempotency.complete(key, result_ref={"evaluation_run_id": run.id})
+        return ComparisonCandidateEvaluationOutcome(
+            comparison_candidate_id=candidate.id,
+            subject_agent_run_id=candidate.agent_run_id,
+            status="created",
+            evaluation_run_id=run.id,
+        )
 
     def get_run(self, evaluation_run_id: str) -> Optional[EvaluationRun]:
         return self.db.get(EvaluationRun, evaluation_run_id)

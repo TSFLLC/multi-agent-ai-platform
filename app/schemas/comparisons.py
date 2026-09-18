@@ -12,9 +12,9 @@ from datetime import datetime
 from decimal import Decimal
 from typing import List, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
-from app.db.enums import ComparisonRunStatus
+from app.db.enums import ComparisonRunStatus, EvaluationMethod
 
 
 class ComparisonReviewConfig(BaseModel):
@@ -100,3 +100,45 @@ class SelectWinnerRequest(BaseModel):
 
     comparison_candidate_id: str
     artifact_hash: str
+
+
+class ComparisonEvaluationRequest(BaseModel):
+    """POST /comparisons/{id}/evaluations (Section: MA6 Slice 3C) -- one
+    request configures the *shared* Evaluation Definition Version/method/
+    evaluator for every eligible candidate; the operator always picks the
+    Evaluation Definition Version and, for AGENT_EVALUATOR, the evaluator
+    Agent Version/model themselves, exactly like
+    app.schemas.evaluation_runs.EvaluationRunCreate's single-AgentRun
+    shape -- never auto-selected. ``method`` defaults to DETERMINISTIC so
+    existing callers only need to supply an Evaluation Definition Version."""
+
+    evaluation_definition_version_id: str
+    method: EvaluationMethod = EvaluationMethod.DETERMINISTIC
+    evaluator_agent_version_id: Optional[str] = None
+    evaluator_model_policy_override: Optional[dict] = None
+    budget_id: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _require_evaluator_agent_version_for_agent_evaluator(self) -> "ComparisonEvaluationRequest":
+        if self.method == EvaluationMethod.AGENT_EVALUATOR and not self.evaluator_agent_version_id:
+            raise ValueError("evaluator_agent_version_id is required when method is agent_evaluator.")
+        return self
+
+
+class ComparisonCandidateEvaluationResult(BaseModel):
+    """One bounded per-candidate outcome -- never a comparative verdict.
+    ``status`` is "created" | "reused" (idempotent retry) | "skipped" (not
+    yet eligible) | "failed" (eligible but EvaluationRun creation itself
+    was rejected); see
+    app.services.evaluation_execution_service.ComparisonCandidateEvaluationOutcome."""
+
+    comparison_candidate_id: str
+    subject_agent_run_id: Optional[str] = None
+    status: str
+    evaluation_run_id: Optional[str] = None
+    reason: Optional[str] = None
+
+
+class ComparisonEvaluationResponse(BaseModel):
+    comparison_id: str
+    results: List[ComparisonCandidateEvaluationResult] = []

@@ -1,15 +1,18 @@
 """Evaluation Run API — authorization + manual-trigger lifecycle, MA6
-Slice 2. Mirrors tests/test_evaluation_definition_api.py's shape: every
-real endpoint requires authentication and project authorization --
-project isolation and cross-project denial must hold at the HTTP layer,
-not just the service layer. No auto-enqueue-on-completion path exists to
-test here on purpose (manual trigger only, MA6 V1 invariant).
+Slice 2, extended by Slice 3C's AGENT_EVALUATOR method on the same
+single-AgentRun endpoint. Mirrors tests/test_evaluation_definition_api.py's
+shape: every real endpoint requires authentication and project
+authorization -- project isolation and cross-project denial must hold at
+the HTTP layer, not just the service layer. No auto-enqueue-on-completion
+path exists to test here on purpose (manual trigger only, MA6 V1
+invariant).
 """
 
 from app.db.enums import VersionStatus
 from app.services.evaluation_definition_service import EvaluationDefinitionService
 from app.services.evaluation_execution_service import EvaluationExecutionService
 from tests.conftest import (
+    make_agent,
     make_agent_run,
     make_agent_version,
     make_artifact_with_content,
@@ -41,6 +44,13 @@ def _published_version(db, project, criteria):
 
 def _criteria(*keys):
     return [{"key": k, "label": k.title()} for k in keys]
+
+
+def _evaluator_version(db, project):
+    agent = make_agent(db, project=project, name="Evaluator")
+    version = make_agent_version(db, agent=agent, status=VersionStatus.ACTIVE)
+    db.commit()
+    return version
 
 
 # -- create: auth / authorization -----------------------------------------------
@@ -200,3 +210,77 @@ def test_list_evaluation_runs_cross_project_denied(client, db, auth_headers, boo
 
     resp = client.get(f"/agent-runs/{agent_run.id}/evaluations", headers=auth_headers)
     assert resp.status_code == 403
+
+
+# -- create: method=agent_evaluator (Slice 3C wiring of Slice 3B) ---------------
+
+
+def test_create_agent_evaluator_run_requires_evaluator_agent_version_id(
+    client, db, auth_headers, bootstrap, tmp_path
+):
+    agent_run, artifact = _subject(db, tmp_path, bootstrap.project)
+    version = _published_version(db, bootstrap.project, _criteria("a"))
+
+    resp = client.post(
+        f"/agent-runs/{agent_run.id}/evaluations",
+        headers=auth_headers,
+        json={
+            "subject_artifact_id": artifact.id,
+            "evaluation_definition_version_id": version.id,
+            "method": "agent_evaluator",
+        },
+    )
+    assert resp.status_code == 422
+
+
+def test_create_agent_evaluator_run_authorized(client, db, auth_headers, bootstrap, tmp_path):
+    agent_run, artifact = _subject(db, tmp_path, bootstrap.project)
+    version = _published_version(db, bootstrap.project, _criteria("a"))
+    evaluator_version = _evaluator_version(db, bootstrap.project)
+
+    resp = client.post(
+        f"/agent-runs/{agent_run.id}/evaluations",
+        headers=auth_headers,
+        json={
+            "subject_artifact_id": artifact.id,
+            "evaluation_definition_version_id": version.id,
+            "method": "agent_evaluator",
+            "evaluator_agent_version_id": evaluator_version.id,
+        },
+    )
+    assert resp.status_code == 201
+    body = resp.json()
+    assert body["method"] == "agent_evaluator"
+    assert body["status"] == "running"
+    assert body["evaluator_agent_version_id"] == evaluator_version.id
+    assert body["evaluator_task_run_id"] is not None
+    assert body["evaluator_agent_run_id"] is not None
+
+    # provenance survives a GET round trip -- needed by 3D/UI
+    get_resp = client.get(f"/evaluation-runs/{body['id']}", headers=auth_headers)
+    assert get_resp.status_code == 200
+    get_body = get_resp.json()
+    assert get_body["evaluator_agent_version_id"] == evaluator_version.id
+    assert get_body["evaluator_task_run_id"] == body["evaluator_task_run_id"]
+    assert get_body["evaluator_agent_run_id"] == body["evaluator_agent_run_id"]
+
+
+def test_create_agent_evaluator_run_cross_project_evaluator_version_rejected(
+    client, db, auth_headers, bootstrap, tmp_path
+):
+    other_project = make_project(db, name="Isolated Evaluator")
+    agent_run, artifact = _subject(db, tmp_path, bootstrap.project)
+    version = _published_version(db, bootstrap.project, _criteria("a"))
+    evaluator_version = _evaluator_version(db, other_project)
+
+    resp = client.post(
+        f"/agent-runs/{agent_run.id}/evaluations",
+        headers=auth_headers,
+        json={
+            "subject_artifact_id": artifact.id,
+            "evaluation_definition_version_id": version.id,
+            "method": "agent_evaluator",
+            "evaluator_agent_version_id": evaluator_version.id,
+        },
+    )
+    assert resp.status_code == 409

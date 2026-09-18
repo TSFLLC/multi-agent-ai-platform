@@ -1,12 +1,13 @@
-"""Evaluation Run resource boundary — MA6 Slice 2.
+"""Evaluation Run resource boundary — MA6 Slice 2, extended by Slice 3C.
 
 Manual-trigger only (MA6 V1 invariant): the operator explicitly requests
-an evaluation and supplies the Evaluation Definition Version -- nothing
-here ever auto-enqueues an evaluation on Agent Run or MA5 candidate
-completion. Every real endpoint requires authentication and project
-authorization (app.authz), resolved through the Evaluation Run's subject
-Agent Run's own Task Run -> Task chain, exactly like
-app.api.routers.tasks resolves it for a plain Agent Run.
+an evaluation and supplies the Evaluation Definition Version (and, for
+AGENT_EVALUATOR, the evaluator Agent Version/model themselves -- never
+auto-selected) -- nothing here ever auto-enqueues an evaluation on Agent
+Run or MA5 candidate completion. Every real endpoint requires
+authentication and project authorization (app.authz), resolved through
+the Evaluation Run's subject Agent Run's own Task Run -> Task chain,
+exactly like app.api.routers.tasks resolves it for a plain Agent Run.
 """
 
 from typing import List
@@ -17,6 +18,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_db
 from app.auth import get_current_user
 from app.authz import ProjectAction, check_project_access
+from app.db.enums import EvaluationMethod
 from app.errors import NotFoundError
 from app.models.evaluation_runs import EvaluationRun
 from app.models.identity import User
@@ -77,7 +79,22 @@ def create_evaluation_run(
     check_project_access(
         db, user=user, project_id=_project_id_for_agent_run(db, agent_run), action=ProjectAction.MODIFY
     )
-    return EvaluationExecutionService(db).create_run(
+    svc = EvaluationExecutionService(db)
+    if body.method == EvaluationMethod.AGENT_EVALUATOR:
+        # EvaluationRunCreate's own validator already guarantees this is
+        # set whenever method=agent_evaluator (422 otherwise) -- narrows
+        # Optional[str] -> str for create_agent_evaluator_run's signature.
+        assert body.evaluator_agent_version_id is not None
+        return svc.create_agent_evaluator_run(
+            agent_run_id=agent_run_id,
+            subject_artifact_id=body.subject_artifact_id,
+            evaluation_definition_version_id=body.evaluation_definition_version_id,
+            evaluator_agent_version_id=body.evaluator_agent_version_id,
+            evaluator_model_policy_override=body.evaluator_model_policy_override,
+            budget_id=body.budget_id,
+            requested_by_user_id=user.id,
+        )
+    return svc.create_run(
         agent_run_id=agent_run_id,
         subject_artifact_id=body.subject_artifact_id,
         evaluation_definition_version_id=body.evaluation_definition_version_id,

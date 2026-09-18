@@ -197,3 +197,79 @@ def test_running_and_completing_an_agent_evaluator_run_never_touches_comparison_
     # the candidate's own Agent Run/Task Run remain completely untouched
     db.refresh(candidate_agent_run)
     assert candidate_agent_run.status.value == "created"  # never executed, never touched by evaluation
+
+
+def _multi_candidate_comparison_subject(db, tmp_path, project, *, count=2):
+    """Same shape as ``_comparison_candidate_subject`` above, generalized
+    to N candidates whose own Task Run is already COMPLETED -- the only
+    eligibility shape app.services.evaluation_execution_service.
+    EvaluationExecutionService.analyze_comparison (MA6 Slice 3C fan-out)
+    ever creates an EvaluationRun for."""
+    from app.db.enums import TaskRunStatus
+
+    bookkeeping_task = make_task(db, project=project)
+    bookkeeping_task_run = make_task_run(db, task=bookkeeping_task)
+    comparison = ComparisonRun(task_run_id=bookkeeping_task_run.id, status=ComparisonRunStatus.RUNNING)
+    db.add(comparison)
+    db.flush()
+
+    candidates = []
+    for i in range(count):
+        candidate_task = make_task(db, project=project)
+        candidate_task_run = make_task_run(db, task=candidate_task, status=TaskRunStatus.COMPLETED)
+        agent_version = make_agent_version(db, status=VersionStatus.ACTIVE)
+        candidate_agent_run = make_agent_run(db, task_run=candidate_task_run, agent_version=agent_version)
+        candidate_artifact = make_artifact_with_content(
+            db, tmp_path, agent_run=candidate_agent_run, content=f"candidate output {i}"
+        )
+        candidate = ComparisonCandidate(
+            comparison_run_id=comparison.id,
+            agent_version_id=agent_version.id,
+            task_run_id=candidate_task_run.id,
+            agent_run_id=candidate_agent_run.id,
+            label=f"Candidate {i}",
+        )
+        db.add(candidate)
+        db.flush()
+        candidates.append((candidate, candidate_agent_run, candidate_artifact))
+    db.commit()
+    return comparison, candidates
+
+
+def test_comparison_evaluation_fanout_never_touches_comparison_winner_state(db, tmp_path):
+    """The MA6 Slice 3C fan-out (analyze_comparison) reuses create_run/
+    create_agent_evaluator_run per candidate -- this guard extends the two
+    tests above to prove the fan-out entry point itself gives that same
+    guarantee across every candidate it touches, not just a single
+    directly-called create_run/create_agent_evaluator_run."""
+    project = make_project(db)
+    comparison, candidates = _multi_candidate_comparison_subject(db, tmp_path, project, count=2)
+    before = {c.id: _snapshot(db, comparison.id, c.id) for c, _agent_run, _artifact in candidates}
+
+    definition = make_evaluation_definition(db, project=project)
+    db.commit()
+    version = EvaluationDefinitionService(db).create_version(
+        evaluation_definition_id=definition.id,
+        description=None,
+        criteria=[{"key": "non_empty_output", "label": "Non-empty output"}],
+    )
+    version = EvaluationDefinitionService(db).publish_version(version.id)
+
+    svc = EvaluationExecutionService(db)
+    outcomes = svc.analyze_comparison(comparison_id=comparison.id, evaluation_definition_version_id=version.id)
+    assert {o.status for o in outcomes} == {"created"}
+
+    after_create = {c.id: _snapshot(db, comparison.id, c.id) for c, _agent_run, _artifact in candidates}
+    assert after_create == before
+
+    for o in outcomes:
+        svc.execute(o.evaluation_run_id, worker_id="test-worker")
+
+    after_execute = {c.id: _snapshot(db, comparison.id, c.id) for c, _agent_run, _artifact in candidates}
+    assert after_execute == before
+    assert all(v["comparison_status"] == ComparisonRunStatus.RUNNING for v in after_execute.values())
+
+    # neither candidate's own Agent Run was ever executed by the fan-out
+    for _candidate, candidate_agent_run, _artifact in candidates:
+        db.refresh(candidate_agent_run)
+        assert candidate_agent_run.status.value == "created"
