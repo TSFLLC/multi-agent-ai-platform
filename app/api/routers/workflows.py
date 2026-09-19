@@ -367,6 +367,16 @@ def list_workflow_node_runs(workflow_run_id: str, db: Session = Depends(get_db))
     ]
 
 
+@router.get("/workflow-runs/{workflow_run_id}/nodes/{node_id}/attempts", response_model=List[WorkflowNodeRunRead])
+def get_workflow_node_run_attempts(workflow_run_id: str, node_id: str, db: Session = Depends(get_db)):
+    """Get per-iteration node runs for a repair-loop node.
+
+    MA7.2 preserves the MA7.1 contract placeholder; repair-loop execution
+    remains outside this phase.
+    """
+    raise HTTPException(status_code=501, detail="Workflow execution (MA7.2+)")
+
+
 @router.post("/workflow-runs/{workflow_run_id}/cancel")
 def cancel_workflow_run(workflow_run_id: str, db: Session = Depends(get_db)):
     """Cancel a running workflow.

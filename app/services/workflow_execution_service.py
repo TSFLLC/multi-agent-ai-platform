@@ -26,7 +26,7 @@ from app.db.enums import (
 )
 from app.models.artifacts_eval import Artifact
 from app.models.execution import JobQueue
-from app.models.tasks import TaskRun, AgentRun
+from app.models.tasks import Task, TaskRun, AgentRun
 from app.models.workflow import Workflow, WorkflowVersion, WorkflowRun, WorkflowNodeRun, WorkflowNode, WorkflowEdge
 from app.services.base import BaseService
 from app.services.flight_recorder import FlightRecorderService
@@ -118,6 +118,24 @@ class WorkflowExecutionService(BaseService):
             raise WorkflowExecutionError(
                 f"Can only execute ACTIVE versions; status is {wv.status}"
             )
+
+        # Prove ownership from persisted records before creating any
+        # execution state. A caller must not be able to pair a workflow with
+        # a TaskRun belonging to another project (or with a missing task).
+        workflow: Optional[Workflow] = self.db.query(Workflow).filter(
+            Workflow.id == wv.workflow_id
+        ).first()
+        task_run: Optional[TaskRun] = self.db.query(TaskRun).filter(
+            TaskRun.id == task_run_id
+        ).first()
+        task: Optional[Task] = None
+        if task_run:
+            task = self.db.query(Task).filter(Task.id == task_run.task_id).first()
+
+        if not workflow or not task_run or not task:
+            raise WorkflowExecutionError("Workflow and TaskRun ownership could not be established")
+        if workflow.project_id != task.project_id:
+            raise WorkflowExecutionError("Workflow and TaskRun must belong to the same project")
 
         # Verify nodes exist
         nodes: List[WorkflowNode] = self.db.query(WorkflowNode).filter(

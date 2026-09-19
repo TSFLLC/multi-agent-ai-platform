@@ -31,6 +31,7 @@ EXPECTED_PATHS = [
     "/agent-runs/{agent_run_id}/attempts",
     "/workflows",
     "/workflow-runs/{workflow_run_id}",
+    "/workflow-runs/{workflow_run_id}/nodes/{node_id}/attempts",
     "/comparisons",
     "/comparisons/{comparison_id}/select-winner",
     "/evaluations",
@@ -68,6 +69,11 @@ def test_stub_endpoints_return_not_implemented_not_a_crash():
     body = resp.json()
     assert body["error"]["code"] == "not_implemented"
     assert "message" in body["error"]
+
+
+def test_workflow_node_attempts_placeholder_contract_is_preserved():
+    resp = client.get("/workflow-runs/test-run/nodes/test-node/attempts")
+    assert resp.status_code == 501
 
 
 def test_approval_resolve_declares_409_fingerprint_mismatch_response():

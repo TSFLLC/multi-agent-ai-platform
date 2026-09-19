@@ -548,6 +548,66 @@ class TestActiveVersionRequired:
 class TestProjectIsolation:
     """Test project isolation in execution."""
 
+    def test_same_project_workflow_and_task_run_are_allowed(self, setup_workflow_context):
+        ctx = setup_workflow_context
+        db = ctx["db"]
+
+        workflow_run = WorkflowExecutionService(db).start_workflow_run(
+            ctx["workflow_version"].id, ctx["task_run"].id
+        )
+
+        assert workflow_run.task_run_id == ctx["task_run"].id
+
+    def test_cross_project_task_run_is_rejected_without_side_effects(self, setup_workflow_context):
+        from tests.conftest import make_project, make_task
+        from app.models.observability import ExecutionEvent
+
+        ctx = setup_workflow_context
+        db = ctx["db"]
+        other_project = make_project(db, name="other-project")
+        other_task = make_task(db, other_project)
+        other_task_run = TaskRun(task_id=other_task.id, status=TaskRunStatus.CREATED)
+        db.add(other_task_run)
+        db.commit()
+
+        before = {
+            "workflow_runs": db.query(WorkflowRun).count(),
+            "node_runs": db.query(WorkflowNodeRun).count(),
+            "task_runs": db.query(TaskRun).count(),
+            "agent_runs": db.query(AgentRun).count(),
+            "jobs": db.query(JobQueue).count(),
+            "events": db.query(ExecutionEvent).count(),
+            "artifacts": db.query(Artifact).count(),
+        }
+
+        with pytest.raises(WorkflowExecutionError, match="same project"):
+            WorkflowExecutionService(db).start_workflow_run(
+                ctx["workflow_version"].id, other_task_run.id
+            )
+
+        after = {
+            "workflow_runs": db.query(WorkflowRun).count(),
+            "node_runs": db.query(WorkflowNodeRun).count(),
+            "task_runs": db.query(TaskRun).count(),
+            "agent_runs": db.query(AgentRun).count(),
+            "jobs": db.query(JobQueue).count(),
+            "events": db.query(ExecutionEvent).count(),
+            "artifacts": db.query(Artifact).count(),
+        }
+        assert after == before
+
+    def test_nonexistent_task_run_fails_closed_without_side_effects(self, setup_workflow_context):
+        ctx = setup_workflow_context
+        db = ctx["db"]
+        before = (db.query(WorkflowRun).count(), db.query(WorkflowNodeRun).count())
+
+        with pytest.raises(WorkflowExecutionError, match="ownership"):
+            WorkflowExecutionService(db).start_workflow_run(
+                ctx["workflow_version"].id, "missing-task-run"
+            )
+
+        assert (db.query(WorkflowRun).count(), db.query(WorkflowNodeRun).count()) == before
+
     def test_project_isolation_preserved(self, temp_db):
         """Users cannot execute other projects' workflows."""
         from tests.conftest import make_project
