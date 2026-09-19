@@ -47,6 +47,22 @@ def _workflow_project_id(db: Session, workflow_version: WorkflowVersion) -> str:
     return workflow.project_id
 
 
+def _get_workflow_or_404(db: Session, workflow_id: str) -> Workflow:
+    workflow = db.get(Workflow, workflow_id)
+    if workflow is None:
+        raise NotFoundError("Workflow not found")
+    return workflow
+
+
+def _require_workflow_access(db: Session, user: User, workflow_id: str, action: ProjectAction) -> Workflow:
+    """Resolve the Workflow, then authorize against its owning project --
+    same resource-then-check_project_access order used throughout this
+    router and app.api.routers.tasks."""
+    workflow = _get_workflow_or_404(db, workflow_id)
+    check_project_access(db, user=user, project_id=workflow.project_id, action=action)
+    return workflow
+
+
 def _get_workflow_run_or_404(db: Session, workflow_run_id: str) -> WorkflowRun:
     workflow_run = db.get(WorkflowRun, workflow_run_id)
     if workflow_run is None:
@@ -70,9 +86,13 @@ def _require_workflow_run_access(
 
 @router.get("/workflows", response_model=List[WorkflowRead])
 def list_workflows(
-    project_id: str, status: Optional[VersionStatus] = None, db: Session = Depends(get_db)
+    project_id: str,
+    status: Optional[VersionStatus] = None,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
 ):
     """List workflows in a project, optionally filtered by status."""
+    check_project_access(db, user=user, project_id=project_id, action=ProjectAction.READ)
     service = WorkflowDefinitionService(db)
     workflows = service.list_workflows(project_id, status=status)
     return [
@@ -87,8 +107,11 @@ def list_workflows(
 
 
 @router.post("/workflows", response_model=WorkflowRead, status_code=201)
-def create_workflow(body: WorkflowCreate, db: Session = Depends(get_db)):
+def create_workflow(
+    body: WorkflowCreate, db: Session = Depends(get_db), user: User = Depends(get_current_user)
+):
     """Create a new workflow with initial DRAFT version."""
+    check_project_access(db, user=user, project_id=body.project_id, action=ProjectAction.MODIFY)
     service = WorkflowDefinitionService(db)
     workflow = service.create_workflow(body.project_id, body.name)
     return WorkflowRead(
@@ -100,8 +123,11 @@ def create_workflow(body: WorkflowCreate, db: Session = Depends(get_db)):
 
 
 @router.get("/workflows/{workflow_id}", response_model=WorkflowRead)
-def get_workflow(workflow_id: str, db: Session = Depends(get_db)):
+def get_workflow(
+    workflow_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)
+):
     """Get a workflow by ID."""
+    _require_workflow_access(db, user, workflow_id, ProjectAction.READ)
     service = WorkflowDefinitionService(db)
     workflow = service.get_workflow(workflow_id)
     if not workflow:
@@ -115,8 +141,11 @@ def get_workflow(workflow_id: str, db: Session = Depends(get_db)):
 
 
 @router.post("/workflows/{workflow_id}/versions", response_model=WorkflowVersionRead, status_code=201)
-def create_workflow_version(workflow_id: str, db: Session = Depends(get_db)):
+def create_workflow_version(
+    workflow_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)
+):
     """Create a new DRAFT version for a workflow."""
+    _require_workflow_access(db, user, workflow_id, ProjectAction.MODIFY)
     service = WorkflowDefinitionService(db)
     workflow = service.get_workflow(workflow_id)
     if not workflow:
@@ -134,7 +163,9 @@ def create_workflow_version(workflow_id: str, db: Session = Depends(get_db)):
 
 
 @router.post("/workflows/{workflow_id}/versions/{version}/publish", response_model=WorkflowVersionRead)
-def publish_workflow_version(workflow_id: str, version: int, db: Session = Depends(get_db)):
+def publish_workflow_version(
+    workflow_id: str, version: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)
+):
     """Publish a DRAFT workflow version after DAG validation.
 
     Validates:
@@ -145,6 +176,7 @@ def publish_workflow_version(workflow_id: str, version: int, db: Session = Depen
 
     Raises 400 if validation fails with detailed issues.
     """
+    _require_workflow_access(db, user, workflow_id, ProjectAction.MODIFY)
     service = WorkflowDefinitionService(db)
 
     try:
@@ -170,8 +202,11 @@ def publish_workflow_version(workflow_id: str, version: int, db: Session = Depen
 
 
 @router.get("/workflows/{workflow_id}/versions/{version}", response_model=WorkflowVersionRead)
-def get_workflow_version(workflow_id: str, version: int, db: Session = Depends(get_db)):
+def get_workflow_version(
+    workflow_id: str, version: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)
+):
     """Get a specific workflow version."""
+    _require_workflow_access(db, user, workflow_id, ProjectAction.READ)
     service = WorkflowDefinitionService(db)
     wv = service.get_workflow_version(workflow_id, version)
     if not wv:
@@ -180,8 +215,11 @@ def get_workflow_version(workflow_id: str, version: int, db: Session = Depends(g
 
 
 @router.get("/workflows/{workflow_id}/versions", response_model=List[WorkflowVersionRead])
-def list_workflow_versions(workflow_id: str, db: Session = Depends(get_db)):
+def list_workflow_versions(
+    workflow_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)
+):
     """List all versions of a workflow."""
+    _require_workflow_access(db, user, workflow_id, ProjectAction.READ)
     service = WorkflowDefinitionService(db)
     versions = service.list_workflow_versions(workflow_id)
     return [
@@ -195,8 +233,10 @@ def add_workflow_node(
     version: int,
     body: WorkflowNodeCreate,
     db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
 ):
     """Add a node to a DRAFT workflow version."""
+    _require_workflow_access(db, user, workflow_id, ProjectAction.MODIFY)
     service = WorkflowDefinitionService(db)
 
     try:
@@ -217,9 +257,14 @@ def add_workflow_node(
 
 @router.delete("/workflows/{workflow_id}/versions/{version}/nodes/{node_id}")
 def delete_workflow_node(
-    workflow_id: str, version: int, node_id: str, db: Session = Depends(get_db)
+    workflow_id: str,
+    version: int,
+    node_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
 ):
     """Delete a node from a DRAFT workflow version."""
+    _require_workflow_access(db, user, workflow_id, ProjectAction.MODIFY)
     service = WorkflowDefinitionService(db)
 
     try:
@@ -239,8 +284,10 @@ def add_workflow_edge(
     to_node_id: str,
     condition: Optional[dict] = None,
     db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
 ):
     """Add an edge between two nodes in a DRAFT workflow version."""
+    _require_workflow_access(db, user, workflow_id, ProjectAction.MODIFY)
     service = WorkflowDefinitionService(db)
 
     try:
@@ -254,9 +301,14 @@ def add_workflow_edge(
 
 @router.delete("/workflows/{workflow_id}/versions/{version}/edges/{edge_id}")
 def delete_workflow_edge(
-    workflow_id: str, version: int, edge_id: str, db: Session = Depends(get_db)
+    workflow_id: str,
+    version: int,
+    edge_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
 ):
     """Delete an edge from a DRAFT workflow version."""
+    _require_workflow_access(db, user, workflow_id, ProjectAction.MODIFY)
     service = WorkflowDefinitionService(db)
 
     try:
@@ -269,8 +321,11 @@ def delete_workflow_edge(
 
 
 @router.get("/workflows/{workflow_id}/versions/{version}/graph")
-def get_workflow_graph(workflow_id: str, version: int, db: Session = Depends(get_db)):
+def get_workflow_graph(
+    workflow_id: str, version: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)
+):
     """Get the complete graph structure (nodes + edges) for a workflow version."""
+    _require_workflow_access(db, user, workflow_id, ProjectAction.READ)
     service = WorkflowDefinitionService(db)
     wv = service.get_workflow_version(workflow_id, version)
     if not wv:
