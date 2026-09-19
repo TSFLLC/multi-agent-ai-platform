@@ -29,7 +29,7 @@ import uuid
 from types import FrameType
 from typing import Optional
 
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import settings
 from app.db.enums import JobQueueStatus, JobType
@@ -238,6 +238,20 @@ class Worker:
                     agent_run_id,
                 )
                 job_status = JobQueueStatus.FAILED
+
+            try:
+                self._reconcile_workflow_node(db, agent_run_id)
+            except Exception:
+                # Reconciliation is a downstream concern of this Agent
+                # Run's own completion, already recorded above -- a bug
+                # here must not leave the AGENT_RUN job LEASED, nor affect
+                # the (already-decided) job_status for non-workflow runs.
+                logger.exception(
+                    "workflow_reconciliation_error worker_id=%s job_id=%s agent_run_id=%s",
+                    self.worker_id,
+                    job.id,
+                    agent_run_id,
+                )
         finally:
             db.close()
 
@@ -268,6 +282,29 @@ class Worker:
                 job.id,
                 agent_run_id,
             )
+
+    def _reconcile_workflow_node(self, db: Session, agent_run_id: str) -> None:
+        """MA7.2: if ``agent_run_id`` was dispatched by the Workflow Engine
+        (i.e. some ``WorkflowNodeRun.agent_run_id`` durably references it —
+        set at dispatch time in
+        ``WorkflowExecutionService._dispatch_node_for_execution``), advance
+        the owning WorkflowRun now that the Agent Run has reached a
+        terminal status: mark the WorkflowNodeRun terminal, freeze its
+        output artifact reference, and schedule the next ready node (or
+        finalize the WorkflowRun if none remain).
+
+        A no-op for every non-workflow Agent Run (MA3 single-agent, MA4
+        review, MA5 comparison, MA6 evaluator) --
+        ``WorkflowExecutionService.on_agent_run_complete`` itself resolves
+        ownership via that same ``agent_run_id`` lookup and returns
+        immediately when no WorkflowNodeRun references it, so this needs no
+        workflow-specific branching here. Also idempotent against
+        worker retry/replay -- a WorkflowNodeRun already in a terminal
+        status short-circuits the same way.
+        """
+        from app.services.workflow_execution_service import WorkflowExecutionService
+
+        WorkflowExecutionService(db).on_agent_run_complete(agent_run_id)
 
     def _run_evaluation_job(self, job: JobQueue) -> None:
         """MA6 Slice 2: deterministic Evaluation Run execution, dispatched to

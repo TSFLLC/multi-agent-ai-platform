@@ -454,6 +454,14 @@ class WorkflowExecutionService(BaseService):
         for node_run in ready:
             self._dispatch_node_for_execution(node_run)
 
+        # A TERMINAL node completes synchronously inside
+        # _dispatch_node_for_execution above (no AgentRun/job involved), so
+        # this is the one place on the normal completion path where "the
+        # last node just finished" can be noticed and the WorkflowRun
+        # itself promoted out of RUNNING. Idempotent and a no-op unless
+        # every node run is now terminal (see _check_workflow_complete).
+        self._check_workflow_complete(workflow_run_id)
+
     def _find_ready_nodes(self, workflow_run_id: str) -> List[WorkflowNodeRun]:
         """Find PENDING nodes with all dependencies COMPLETED.
 

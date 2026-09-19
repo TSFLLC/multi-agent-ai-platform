@@ -22,6 +22,9 @@ from app import models  # noqa
 from app.db.base import Base
 from app.db.session import build_engine
 from app.db.enums import (
+    ArtifactType,
+    JobQueueStatus,
+    JobType,
     VersionStatus,
     WorkflowNodeType,
     WorkflowRunStatus,
@@ -35,6 +38,9 @@ from app.models.artifacts_eval import Artifact
 from app.models.execution import JobQueue
 from app.services.workflow_definition_service import WorkflowDefinitionService
 from app.services.workflow_execution_service import WorkflowExecutionService
+from app.worker import Worker
+
+import app.services.execution_service as execution_service_module
 
 
 @pytest.fixture
@@ -239,8 +245,203 @@ class TestSequentialOnly:
 
 
 class TestWorkerIntegration:
-    """Test real worker path."""
+    """Test real worker path.
 
-    def test_workflow_execution_via_worker(self, temp_db):
-        """End-to-end: workflow → job → worker → agent → completion."""
-        pass
+    Acceptance proof for the MA7.2 worker->workflow reconciliation wiring
+    (app.worker.Worker._reconcile_workflow_node): the workflow is started
+    through the real service entry point and driven purely by repeated
+    Worker.run_once() calls -- on_agent_run_complete is never called
+    directly by this test. Only the provider-facing edge
+    (AgentExecutionService.execute) is stubbed, since no real model
+    provider is available in this environment.
+    """
+
+    def test_workflow_execution_via_worker(self, temp_db, monkeypatch):
+        """End-to-end: workflow -> job -> worker -> agent -> completion,
+        planner -> engineer -> reviewer -> terminal."""
+        from tests.conftest import make_agent, make_agent_version, make_project, make_task
+
+        session, session_factory, _engine = temp_db
+        db = session
+
+        project = make_project(db, name="worker-integration-project")
+        agent_versions = {
+            "planner": make_agent_version(db, make_agent(db, project, "planner")),
+            "engineer": make_agent_version(db, make_agent(db, project, "engineer")),
+            "reviewer": make_agent_version(db, make_agent(db, project, "reviewer")),
+        }
+
+        def_service = WorkflowDefinitionService(db)
+        workflow = def_service.create_workflow(project.id, "worker-integration-workflow")
+        version = db.query(WorkflowVersion).filter(WorkflowVersion.workflow_id == workflow.id).first()
+
+        node_planner = def_service.add_node(
+            workflow.id, version.version, "planner", WorkflowNodeType.AGENT,
+            config={"agent_version_id": agent_versions["planner"].id},
+        )
+        node_engineer = def_service.add_node(
+            workflow.id, version.version, "engineer", WorkflowNodeType.AGENT,
+            config={"agent_version_id": agent_versions["engineer"].id},
+        )
+        node_reviewer = def_service.add_node(
+            workflow.id, version.version, "reviewer", WorkflowNodeType.AGENT,
+            config={"agent_version_id": agent_versions["reviewer"].id},
+        )
+        node_terminal = def_service.add_node(workflow.id, version.version, "result", WorkflowNodeType.TERMINAL)
+
+        def_service.add_edge(workflow.id, version.version, node_planner.id, node_engineer.id)
+        def_service.add_edge(workflow.id, version.version, node_engineer.id, node_reviewer.id)
+        def_service.add_edge(workflow.id, version.version, node_reviewer.id, node_terminal.id)
+
+        published = def_service.publish_version(workflow.id, version.version)
+
+        task = make_task(db, project)
+        task_run = TaskRun(task_id=task.id, status=TaskRunStatus.CREATED, created_at=datetime.now(timezone.utc))
+        db.add(task_run)
+        db.commit()
+
+        # Start the workflow through the same service entry point the API
+        # router calls (app.api.routers.workflows.start_workflow_run).
+        exec_service = WorkflowExecutionService(db)
+        workflow_run = exec_service.start_workflow_run(published.id, task_run.id)
+        assert workflow_run.status == WorkflowRunStatus.RUNNING
+
+        # Only the external inference boundary is stubbed -- everything
+        # downstream (status transition, artifact recording, reconciliation,
+        # next-node dispatch) runs for real through the Worker.
+        execute_calls = []
+
+        def fake_execute(self, agent_run_id, *, worker_id):
+            node_run = self.db.query(WorkflowNodeRun).filter(
+                WorkflowNodeRun.agent_run_id == agent_run_id
+            ).first()
+            node = self.db.query(WorkflowNode).filter(WorkflowNode.id == node_run.workflow_node_id).first()
+            execute_calls.append(node.node_key)
+
+            agent_run = self.db.get(AgentRun, agent_run_id)
+            agent_run.status = AgentRunStatus.COMPLETED
+            self.db.add(
+                Artifact(
+                    agent_run_id=agent_run_id,
+                    type=ArtifactType.REPORT,
+                    storage_ref=f"output-of-{node.node_key}",
+                )
+            )
+            self.db.commit()
+
+        monkeypatch.setattr(execution_service_module.AgentExecutionService, "execute", fake_execute)
+
+        worker = Worker(
+            session_factory=session_factory,
+            poll_interval_seconds=0.01,
+            lease_seconds=5,
+            heartbeat_interval_seconds=0.05,
+        )
+
+        # Exactly 3 AGENT_RUN jobs exist across the whole run (terminal
+        # dispatches no job); a 4th run_once() call must find nothing left.
+        for _ in range(3):
+            assert worker.run_once() is True
+        assert worker.run_once() is False
+
+        # Planner -> Engineer -> Reviewer, in that order, driven entirely by
+        # the worker loop -- no manual on_agent_run_complete() call anywhere
+        # in this test.
+        assert execute_calls == ["planner", "engineer", "reviewer"]
+
+        db.expire_all()
+        node_runs = {
+            nr.workflow_node_id: nr
+            for nr in db.query(WorkflowNodeRun).filter(WorkflowNodeRun.workflow_run_id == workflow_run.id).all()
+        }
+
+        assert node_runs[node_planner.id].status == WorkflowNodeRunStatus.COMPLETED
+        assert node_runs[node_engineer.id].status == WorkflowNodeRunStatus.COMPLETED
+        assert node_runs[node_reviewer.id].status == WorkflowNodeRunStatus.COMPLETED
+        # TERMINAL performs no model inference: no AgentRun ever attached.
+        assert node_runs[node_terminal.id].status == WorkflowNodeRunStatus.COMPLETED
+        assert node_runs[node_terminal.id].agent_run_id is None
+
+        db.refresh(workflow_run)
+        assert workflow_run.status == WorkflowRunStatus.COMPLETED
+
+        # Exactly 3 workflow AgentRuns -- no duplicate downstream executions.
+        agent_run_ids = [nr.agent_run_id for nr in node_runs.values() if nr.agent_run_id]
+        assert len(agent_run_ids) == 3
+        assert len(set(agent_run_ids)) == 3
+        assert db.query(AgentRun).count() == 3
+        assert db.query(JobQueue).filter(JobQueue.job_type == JobType.AGENT_RUN).count() == 3
+        assert db.query(JobQueue).filter(JobQueue.status == JobQueueStatus.DONE).count() == 3
+
+        # Artifact lineage A -> B -> C: each node's dispatched AgentRun
+        # carries the immediately-upstream node's frozen output reference.
+        planner_artifact_id = node_runs[node_planner.id].output_snapshot_ref
+        engineer_artifact_id = node_runs[node_engineer.id].output_snapshot_ref
+        reviewer_artifact_id = node_runs[node_reviewer.id].output_snapshot_ref
+        assert planner_artifact_id and engineer_artifact_id and reviewer_artifact_id
+
+        engineer_agent_run = db.get(AgentRun, node_runs[node_engineer.id].agent_run_id)
+        assert engineer_agent_run.input_context_json["upstream_artifact_ids"] == [planner_artifact_id]
+
+        reviewer_agent_run = db.get(AgentRun, node_runs[node_reviewer.id].agent_run_id)
+        assert reviewer_agent_run.input_context_json["upstream_artifact_ids"] == [engineer_artifact_id]
+
+        # Final state survives a fresh session (reload from DB, not the
+        # in-memory objects this test has been mutating).
+        fresh = session_factory()
+        try:
+            reloaded_run = fresh.get(WorkflowRun, workflow_run.id)
+            assert reloaded_run.status == WorkflowRunStatus.COMPLETED
+            reloaded_terminal = fresh.query(WorkflowNodeRun).filter(
+                WorkflowNodeRun.workflow_run_id == workflow_run.id,
+                WorkflowNodeRun.workflow_node_id == node_terminal.id,
+            ).first()
+            assert reloaded_terminal.status == WorkflowNodeRunStatus.COMPLETED
+        finally:
+            fresh.close()
+
+    def test_non_workflow_agent_run_unaffected_by_reconciliation(self, temp_db, monkeypatch):
+        """MA3/4/5/6 AgentRuns (no owning WorkflowNodeRun) must behave
+        exactly as before: the new Worker._reconcile_workflow_node call is
+        a no-op for them, verified by asserting no WorkflowNodeRun/Run rows
+        exist at all and the job still completes normally."""
+        from tests.conftest import make_agent, make_agent_version, make_project, make_task
+
+        session, session_factory, _engine = temp_db
+        db = session
+
+        project = make_project(db, name="non-workflow-project")
+        agent_version = make_agent_version(db, make_agent(db, project, "solo"))
+        task = make_task(db, project)
+        task_run = TaskRun(task_id=task.id, status=TaskRunStatus.CREATED, created_at=datetime.now(timezone.utc))
+        db.add(task_run)
+        db.flush()
+
+        agent_run = AgentRun(
+            task_run_id=task_run.id,
+            agent_version_id=agent_version.id,
+            status=AgentRunStatus.CREATED,
+        )
+        db.add(agent_run)
+        db.commit()
+
+        from app.repositories.job_queue_repository import JobQueueRepository
+
+        JobQueueRepository().enqueue(db, job_type=JobType.AGENT_RUN, payload_ref=agent_run.id)
+        db.commit()
+
+        def fake_execute(self, agent_run_id, *, worker_id):
+            ar = self.db.get(AgentRun, agent_run_id)
+            ar.status = AgentRunStatus.COMPLETED
+            self.db.commit()
+
+        monkeypatch.setattr(execution_service_module.AgentExecutionService, "execute", fake_execute)
+
+        worker = Worker(session_factory=session_factory, poll_interval_seconds=0.01, lease_seconds=5)
+        assert worker.run_once() is True
+
+        db.expire_all()
+        assert db.get(AgentRun, agent_run.id).status == AgentRunStatus.COMPLETED
+        assert db.query(WorkflowNodeRun).count() == 0
+        assert db.query(WorkflowRun).count() == 0
+        assert db.query(JobQueue).filter(JobQueue.status == JobQueueStatus.DONE).count() == 1
