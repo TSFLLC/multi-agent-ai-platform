@@ -19,6 +19,7 @@ All tests use disposable temp SQLite DBs (never touch persistent data/multi_agen
 
 import pytest
 from datetime import datetime, timezone
+from sqlalchemy import and_
 from sqlalchemy.orm import Session, sessionmaker
 
 from app import models  # noqa
@@ -30,6 +31,7 @@ from app.db.enums import (
     WorkflowRunStatus,
     WorkflowNodeRunStatus,
     AgentRunStatus,
+    ArtifactType,
     TaskRunStatus,
     JobQueueStatus,
 )
@@ -163,7 +165,7 @@ class TestSequentialExecution:
         assert len(node_runs) == 4  # 3 agents + 1 terminal
 
         # Verify entry node scheduled (first agent in RUNNING state)
-        entry_run = [nr for nr in node_runs if nr.iteration == 0][0]
+        entry_run = next(nr for nr in node_runs if nr.workflow_node_id == ctx["nodes"][0].id)
         assert entry_run.status == WorkflowNodeRunStatus.RUNNING
         assert entry_run.agent_run_id is not None
 
@@ -185,15 +187,15 @@ class TestSequentialExecution:
         # Simulate agent1 completion
         node_runs = db.query(WorkflowNodeRun).filter(
             WorkflowNodeRun.workflow_run_id == workflow_run.id
-        ).order_by(WorkflowNodeRun.created_at).all()
+        ).all()
 
-        node1_run = node_runs[0]
+        node1_run = next(nr for nr in node_runs if nr.workflow_node_id == ctx["nodes"][0].id)
         agent1_run = db.query(AgentRun).filter(AgentRun.id == node1_run.agent_run_id).first()
 
         # Create artifact for agent1
         artifact1 = Artifact(
             agent_run_id=agent1_run.id,
-            type="text",
+            type=ArtifactType.DIFF,
             storage_ref="s3://bucket/artifact1",
             content_hash="hash1",
         )
@@ -216,7 +218,7 @@ class TestSequentialExecution:
         assert node1_run_after.output_snapshot_ref == artifact1.id
 
         # Verify node2 now ready (has job queued)
-        node2_run = node_runs[1]
+        node2_run = next(nr for nr in node_runs if nr.workflow_node_id == ctx["nodes"][1].id)
         jobs = db.query(JobQueue).filter(
             JobQueue.payload_ref == node2_run.agent_run_id
         ).all()
@@ -235,13 +237,14 @@ class TestSequentialExecution:
             WorkflowNodeRun.workflow_run_id == workflow_run.id
         ).all()
 
-        terminal_run = [nr for nr in node_runs if nr.workflow_node.node_type == WorkflowNodeType.TERMINAL][0]
+        terminal_run = next(nr for nr in node_runs if nr.workflow_node_id == ctx["nodes"][3].id)
 
         # Manually trigger scheduling of terminal (simulate all deps done)
         # For now, mark terminal as pending and manually dispatch
         terminal_run.status = WorkflowNodeRunStatus.PENDING
         db.commit()
 
+        jobs_before = db.query(JobQueue).count()
         exec_service._dispatch_node_for_execution(terminal_run)
 
         # Verify terminal completed without creating AgentRun
@@ -252,10 +255,7 @@ class TestSequentialExecution:
         assert terminal_run_after.agent_run_id is None  # No agent invocation
 
         # Verify no job queued for terminal
-        jobs = db.query(JobQueue).filter(
-            JobQueue.job_type == "TERMINAL"
-        ).all()
-        assert len(jobs) == 0
+        assert db.query(JobQueue).count() == jobs_before
 
 
 class TestArtifactLineage:
@@ -271,17 +271,17 @@ class TestArtifactLineage:
 
         node_runs = db.query(WorkflowNodeRun).filter(
             WorkflowNodeRun.workflow_run_id == workflow_run.id
-        ).order_by(WorkflowNodeRun.created_at).all()
+        ).all()
 
-        node1_run = node_runs[0]
-        node2_run = node_runs[1]
+        node1_run = next(nr for nr in node_runs if nr.workflow_node_id == ctx["nodes"][0].id)
+        node2_run = next(nr for nr in node_runs if nr.workflow_node_id == ctx["nodes"][1].id)
 
         agent1_run = db.query(AgentRun).filter(AgentRun.id == node1_run.agent_run_id).first()
 
         # Create artifact for agent1
         artifact1 = Artifact(
             agent_run_id=agent1_run.id,
-            type="text",
+            type=ArtifactType.DIFF,
             storage_ref="s3://bucket/artifact1",
             content_hash="hash1",
         )
@@ -327,12 +327,12 @@ class TestArtifactLineage:
             WorkflowNodeRun.workflow_run_id == workflow_run.id
         ).all()
 
-        node1_run = node_runs[0]
+        node1_run = next(nr for nr in node_runs if nr.workflow_node_id == ctx["nodes"][0].id)
         agent1_run = db.query(AgentRun).filter(AgentRun.id == node1_run.agent_run_id).first()
 
         artifact1 = Artifact(
             agent_run_id=agent1_run.id,
-            type="text",
+            type=ArtifactType.DIFF,
             storage_ref="s3://bucket/artifact1",
             content_hash="hash1",
         )
@@ -412,7 +412,7 @@ class TestFailurePropagation:
             WorkflowNodeRun.workflow_run_id == workflow_run.id
         ).all()
 
-        node1_run = node_runs[0]
+        node1_run = next(nr for nr in node_runs if nr.workflow_node_id == ctx["nodes"][0].id)
         agent1_run = db.query(AgentRun).filter(AgentRun.id == node1_run.agent_run_id).first()
 
         # Mark agent as failed
@@ -439,27 +439,36 @@ class TestFailurePropagation:
         ctx = setup_workflow_context
         db = ctx["db"]
 
-        # Add unsupported node
+        # Build an unpublished workflow containing the unsupported node. This
+        # respects published-version immutability while exercising the
+        # executor's fail-closed dispatch behavior directly.
         def_service = WorkflowDefinitionService(db)
+        unsupported_workflow = def_service.create_workflow(ctx["project"].id, "unsupported-workflow")
         node_unsupported = def_service.add_node(
-            ctx["workflow"].id, 1,  # DRAFT version
+            unsupported_workflow.id, 1,
             "judge-node",
             WorkflowNodeType.JUDGE,
             config={"judge_agent_version_id": ctx["agents"][0].id}
         )
 
-        # Create node run for unsupported node
-        workflow_run = db.query(WorkflowRun).first()
-        if not workflow_run:
-            # Create one for testing
-            workflow_run = WorkflowRun(
-                task_run_id=ctx["task_run"].id,
-                workflow_version_id=ctx["workflow_version"].id,
-                status=WorkflowRunStatus.RUNNING,
-                created_at=datetime.now(timezone.utc),
-            )
-            db.add(workflow_run)
-            db.flush()
+        unsupported_task_run = TaskRun(
+            task_id=ctx["task_run"].task_id,
+            status=TaskRunStatus.CREATED,
+            created_at=datetime.now(timezone.utc),
+        )
+        db.add(unsupported_task_run)
+        db.flush()
+        workflow_run = WorkflowRun(
+            task_run_id=unsupported_task_run.id,
+            workflow_version_id=db.query(WorkflowVersion).filter(
+                WorkflowVersion.workflow_id == unsupported_workflow.id,
+                WorkflowVersion.version == 1,
+            ).one().id,
+            status=WorkflowRunStatus.RUNNING,
+            created_at=datetime.now(timezone.utc),
+        )
+        db.add(workflow_run)
+        db.flush()
 
         node_run = WorkflowNodeRun(
             workflow_run_id=workflow_run.id,
@@ -532,7 +541,7 @@ class TestActiveVersionRequired:
 
         exec_service = WorkflowExecutionService(db)
 
-        with pytest.raises(WorkflowExecutionError, match="not ACTIVE"):
+        with pytest.raises(WorkflowExecutionError, match="Can only execute ACTIVE"):
             exec_service.start_workflow_run(draft_version.id, ctx["task_run"].id)
 
 

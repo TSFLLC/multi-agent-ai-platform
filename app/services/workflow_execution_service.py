@@ -330,7 +330,7 @@ class WorkflowExecutionService(BaseService):
             workflow_run.task_run_id,
             "workflow.cancelled",
             workflow_run_id=workflow_run_id,
-            cancelled_by_user_id=cancelled_by_user_id,
+            actor_user_id=cancelled_by_user_id,
         )
 
         # Check if all nodes are now terminal
