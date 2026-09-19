@@ -72,7 +72,23 @@ def test_stub_endpoints_return_not_implemented_not_a_crash():
 
 
 def test_workflow_node_attempts_placeholder_contract_is_preserved():
+    """MA7.2 added authentication/authorization to this route: an
+    unauthenticated or unauthorized caller now gets 401/403 before ever
+    reaching the placeholder, so the still-501 contract only applies once
+    the caller is authenticated and holds project access — see
+    tests/test_workflow_execution_api_authorization.py for the auth-layer
+    coverage this split preserves."""
     resp = client.get("/workflow-runs/test-run/nodes/test-node/attempts")
+    assert resp.status_code == 401
+
+
+def test_workflow_node_attempts_placeholder_contract_is_preserved_when_authorized(
+    client, db, auth_headers, bootstrap
+):
+    from tests.test_workflow_execution_api_authorization import _started_run
+
+    _, _, _, run = _started_run(db, bootstrap.project, "contract")
+    resp = client.get(f"/workflow-runs/{run.id}/nodes/test-node/attempts", headers=auth_headers)
     assert resp.status_code == 501
 
 
