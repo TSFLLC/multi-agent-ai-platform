@@ -176,8 +176,18 @@ class AgentExecutionService:
         )
 
     def _is_cancelled(self, ctx: _Context) -> bool:
+        """Cooperative cancellation request, from EITHER level: the Task Run
+        (MA3 -- ``TaskService.cancel_task_run``) or this Agent Run itself
+        (MA7 -- the Workflow Engine cancels one node's Agent Run without
+        cancelling anything else, e.g. a failed workflow's still-running
+        sibling branch). Both are re-read from the database at every
+        checkpoint -- the request is written by a different process."""
         self.db.refresh(ctx.task_run)
-        return ctx.task_run.cancellation_requested_at is not None
+        self.db.refresh(ctx.agent_run)
+        return (
+            ctx.task_run.cancellation_requested_at is not None
+            or ctx.agent_run.cancellation_requested_at is not None
+        )
 
     # -- one attempt -------------------------------------------------------
 

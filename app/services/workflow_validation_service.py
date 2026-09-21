@@ -8,6 +8,7 @@ project isolation, referenced agent/evaluation versions.
 from typing import Dict, List, Optional, Set, Any
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.db.enums import WorkflowNodeType
 from app.models.agents import Agent, AgentVersion
 from app.models.evaluation_definitions import EvaluationDefinition, EvaluationDefinitionVersion
@@ -46,6 +47,7 @@ class WorkflowValidator:
         self._validate_no_self_edges(edges)
         self._validate_no_duplicate_edges(edges)
         self._validate_no_conditional_edges(nodes, edges)
+        self._validate_max_fan_out(nodes, edges)
         self._validate_no_cycles(nodes, edges)
         self._validate_connectivity(nodes, edges)
         self._validate_entry_structure(nodes, edges)
@@ -118,6 +120,24 @@ class WorkflowValidator:
                 target = nodes[to_id].node_key if to_id in nodes else to_id
                 self.issues.append(
                     f"Edge {source} -> {target} has a condition; conditional routing is not supported yet"
+                )
+
+    def _validate_max_fan_out(self, nodes: Dict[str, WorkflowNode], edges: List[tuple]) -> None:
+        """MA7.4b: no node may fan out to more than
+        ``settings.workflow_max_fan_out`` direct successors. Read at call
+        time (not import time) so the operator-configured limit is what
+        publishes are held to. Fan-IN is unbounded by this rule: it is the
+        number of parallel branches a node *starts* that costs."""
+        limit = settings.workflow_max_fan_out
+        outgoing: Dict[str, int] = {}
+        for from_id, _to_id, _edge in edges:
+            outgoing[from_id] = outgoing.get(from_id, 0) + 1
+        for from_id in sorted(outgoing, key=lambda node_id: nodes[node_id].node_key if node_id in nodes else node_id):
+            if outgoing[from_id] > limit:
+                key = nodes[from_id].node_key if from_id in nodes else from_id
+                self.issues.append(
+                    f"Node {key} fans out to {outgoing[from_id]} nodes; the maximum is {limit} "
+                    "direct outgoing branches per node"
                 )
 
     def _validate_connectivity(self, nodes: Dict[str, WorkflowNode], edges: List[tuple]) -> None:

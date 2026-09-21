@@ -418,15 +418,17 @@ def test_lost_dispatch_race_leaves_no_orphan_agent_or_task_runs(db, session_fact
     assert after["jobs_total"] == 1
 
 
-@pytest.mark.parametrize(
-    "run_status", ["cancelling", "node_waiting_for_approval", "failed", "cancelled", "completed"]
-)
+@pytest.mark.parametrize("run_status", ["cancelling", "failed", "cancelled", "completed"])
 def test_scheduler_never_dispatches_a_ready_node_for_a_run_that_is_not_running(
     db, session_factory, bootstrap, worker, calls, monkeypatch, run_status
 ):
     """Defense in depth behind the callers' own checks: an approve that raced a
-    cancellation (or a run that is waiting/terminal) must never start the next
-    agent."""
+    cancellation (or a run that is terminal) must never start the next agent.
+
+    (MA7.4b: ``node_waiting_for_approval`` used to be in this list. It is a
+    SUMMARY status, not a lock -- an independent branch that is ready while a
+    gate waits must still be dispatched -- so it is asserted the other way
+    round in tests/test_ma7_4b_parallel_execution.py.)"""
     _built, run = waiting_run(db, session_factory, bootstrap, worker)
     decide_then_die(session_factory, bootstrap, the_approval(session_factory, run.id), monkeypatch)
     ready = snapshot(session_factory, run.id)

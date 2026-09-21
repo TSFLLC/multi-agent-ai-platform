@@ -66,6 +66,15 @@ class Settings(BaseSettings):
     # 0 disables the periodic sweep (the startup sweep always runs).
     worker_reconcile_interval_seconds: float = 60.0
 
+    # MA7.4b: the most direct outgoing branches (edges) any single workflow
+    # node may have. Every branch is one Agent Run -- a provider call and a
+    # budget reservation -- so an unbounded fan-out is an unbounded cost/
+    # contention multiplier. 8 comfortably covers a realistic decomposition
+    # (e.g. backend/frontend/database/docs/test/security/review) while
+    # keeping the worst case for one node small. Enforced at publish and
+    # again at start; provider-agnostic on purpose.
+    workflow_max_fan_out: int = 8
+
     # Agent Run / Task Run defaults (Owner decision, frozen) — overridable
     # per-row (agent_runs.timeout_seconds / task_runs.timeout_seconds),
     # these are only the defaults new rows are created with.
@@ -108,6 +117,15 @@ class Settings(BaseSettings):
         # never a busy loop.
         if v != 0 and v < 1.0:
             raise ValueError("worker_reconcile_interval_seconds must be 0 (disabled) or >= 1.0")
+        return v
+
+    @field_validator("workflow_max_fan_out")
+    @classmethod
+    def _validate_workflow_max_fan_out(cls, v: int) -> int:
+        # At least 1 (0 would forbid every edge) and bounded above so a typo
+        # cannot silently disable the cap.
+        if not 1 <= v <= 64:
+            raise ValueError("workflow_max_fan_out must be between 1 and 64")
         return v
 
     @model_validator(mode="after")

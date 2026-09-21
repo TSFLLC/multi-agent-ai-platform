@@ -6,11 +6,14 @@ C. Finalize-on-drain: a CANCELLING run converges to CANCELLED by itself.
 D. Periodic idle reconciliation in the Worker.
 E. Canonical upstream evidence: node_key order, source labels, de-duplication.
 F. Conditional edges are rejected at publish (and refused at start).
-G. Sequential MA7.2 / MA7.3 behavior is unchanged; fan-out is still NOT enabled.
+G. Sequential MA7.2 / MA7.3 behavior is unchanged. (Fan-out was still NOT
+   enabled when this file was written; MA7.4b enabled it -- see G below and
+   tests/test_ma7_4b_parallel_execution.py.)
 
-Parallel fan-out is deliberately not enabled here, so multi-parent graphs are
-real published definitions whose node runs are put into chosen states by hand
-(tests/ma7_4a_support.py). Every database is a disposable temp file.
+Parallel fan-out was deliberately not enabled in MA7.4a, so multi-parent graphs
+are real published definitions whose node runs are put into chosen states by
+hand (tests/ma7_4a_support.py) -- states the parallel engine now also produces
+by itself. Every database is a disposable temp file.
 """
 
 import itertools
@@ -70,6 +73,7 @@ from tests.ma7_4a_support import (
     finish_agent,
     manual_run,
     run_node,
+    single_unsupported_node,
 )
 from tests.test_execution_service import FakeAdapter, _factory_for, _manual
 
@@ -411,8 +415,9 @@ def test_every_workflow_event_describes_state_that_is_already_durable(
     client, db, session_factory, auth_headers, bootstrap, worker, calls, monkeypatch
 ):
     """Audit of all emit call sites: happy path with an approval gate, reject,
-    cancel-while-waiting, cancel with an in-flight agent, and the (still
-    fail-closed) multi-ready guard."""
+    cancel-while-waiting, cancel with an in-flight agent, (MA7.4b) a parallel
+    fan-out that completes, a parallel branch failure that drains its
+    siblings, and a node that cannot be dispatched at all."""
     observations = _install_state_spy(monkeypatch, session_factory)
 
     # happy path + approval gate
@@ -433,12 +438,29 @@ def test_every_workflow_event_describes_state_that_is_already_durable(
     agent = db.get(AgentRun, snapshot(session_factory, run.id)["node_runs"]["only"].agent_run_id)
     finish_agent(db, agent, AgentRunStatus.STOPPED)
     WorkflowExecutionService(db).on_agent_run_complete(agent.id)
-    # the sequential-only multi-ready guard
+    # MA7.4b: a parallel fan-out/fan-in that completes...
     diamond = build_diamond(db, bootstrap.project, label="spy-multi")
     drun = WorkflowExecutionService(db).start_workflow_run(diamond.published.id, diamond.task_run.id)
-    eng_agent = db.get(AgentRun, snapshot(session_factory, drun.id)["node_runs"]["eng"].agent_run_id)
+    drain(worker)
+    assert snapshot(session_factory, drun.id)["run"] == WorkflowRunStatus.COMPLETED
+    # ...one whose branch fails while its siblings are still in flight (fail fast, drain, finalize)
+    failing = build_diamond(db, bootstrap.project, label="spy-par-fail")
+    frun = WorkflowExecutionService(db).start_workflow_run(failing.published.id, failing.task_run.id)
+    eng_agent = db.get(AgentRun, snapshot(session_factory, frun.id)["node_runs"]["eng"].agent_run_id)
     finish_agent(db, eng_agent, AgentRunStatus.COMPLETED)
-    WorkflowExecutionService(db).on_agent_run_complete(eng_agent.id)
+    WorkflowExecutionService(db).on_agent_run_complete(eng_agent.id)  # fans out to test/security/code
+    branches = snapshot(session_factory, frun.id)["node_runs"]
+    security_agent = db.get(AgentRun, branches["security"].agent_run_id)
+    finish_agent(db, security_agent, AgentRunStatus.FAILED)
+    WorkflowExecutionService(db).on_agent_run_complete(security_agent.id)
+    for key in ("test", "code"):  # the siblings stop cooperatively
+        sibling = db.get(AgentRun, branches[key].agent_run_id)
+        finish_agent(db, sibling, AgentRunStatus.STOPPED)
+        WorkflowExecutionService(db).on_agent_run_complete(sibling.id)
+    assert snapshot(session_factory, frun.id)["run"] == WorkflowRunStatus.FAILED
+    # ...and a node that cannot be dispatched at all (fail closed, sequential)
+    version_id, task_run_id = single_unsupported_node(db, bootstrap.project, "spy-judge")
+    WorkflowExecutionService(db).start_workflow_run(version_id, task_run_id)
 
     seen_types = {o[0] for o in observations}
     for expected in (
@@ -1221,11 +1243,15 @@ def test_start_endpoint_returns_400_for_a_conditional_version(client, db, auth_h
 
 
 # =============================================================================
-# G. Sequential behavior intact; fan-out NOT enabled
+# G. Sequential behavior intact; fan-out is ENABLED by MA7.4b
 # =============================================================================
 
 
-def test_multi_ready_still_fails_closed_because_fan_out_is_not_enabled_yet(db, session_factory, bootstrap):
+def test_multi_ready_no_longer_fails_the_run_fan_out_dispatches_every_branch(db, session_factory, bootstrap):
+    """MA7.4a pinned "several ready nodes => the run fails closed" because
+    fan-out did not exist yet. MA7.4b replaces that with generic fan-out:
+    every ready branch is dispatched (see tests/test_ma7_4b_parallel_execution.py
+    for the full fan-out/fan-in/failure/cancellation/recovery coverage)."""
     built = build_diamond(db, bootstrap.project, label="g1")
     run = WorkflowExecutionService(db).start_workflow_run(built.published.id, built.task_run.id)
     eng = snapshot(session_factory, run.id)["node_runs"]["eng"]
@@ -1234,11 +1260,12 @@ def test_multi_ready_still_fails_closed_because_fan_out_is_not_enabled_yet(db, s
     WorkflowExecutionService(db).on_agent_run_complete(agent.id)
 
     state = snapshot(session_factory, run.id)
-    assert state["run"] == WorkflowRunStatus.FAILED
+    assert state["run"] == WorkflowRunStatus.RUNNING
     assert state["nodes"]["eng"] == WorkflowNodeRunStatus.COMPLETED
-    assert all(state["nodes"][k] == WorkflowNodeRunStatus.PENDING for k in BRANCHES)  # none dispatched
-    assert (state["agent_runs_total"], state["jobs_total"]) == (1, 1)
-    assert "workflow.error" in event_types(session_factory, built.task_run.id)
+    assert all(state["nodes"][k] == WorkflowNodeRunStatus.RUNNING for k in BRANCHES)  # all dispatched
+    assert state["nodes"]["join"] == WorkflowNodeRunStatus.PENDING  # the fan-in barrier holds
+    assert (state["agent_runs_total"], state["jobs_total"]) == (4, 4)  # eng + 3 branches, once each
+    assert "workflow.error" not in event_types(session_factory, built.task_run.id)
 
 
 def test_a_human_approval_with_two_upstream_dependencies_is_still_rejected(db, bootstrap):

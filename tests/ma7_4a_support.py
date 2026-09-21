@@ -79,6 +79,28 @@ def build_diamond(db, project, *, insert_order=BRANCHES, label="dia", join_agent
     return Built(workflow, version, published, nodes, agent_versions, task_run, project)
 
 
+def single_unsupported_node(db, project, label, node_type=WorkflowNodeType.JUDGE, max_iterations=None):
+    """An ACTIVE version whose only node is of an unsupported type (JUDGE by
+    default; publish would refuse it, so it is activated directly) plus a
+    fresh TaskRun: ``(workflow_version_id, task_run_id)`` for
+    ``start_workflow_run``. Used to exercise the engine's fail-closed dispatch
+    path."""
+    from app.db.enums import VersionStatus
+
+    definitions = WorkflowDefinitionService(db)
+    workflow = definitions.create_workflow(project.id, f"{label}-workflow")
+    version = definitions.get_latest_version(workflow.id)
+    definitions.add_node(
+        workflow.id, version.version, "j", node_type, config={}, max_iterations=max_iterations
+    )
+    version.status = VersionStatus.ACTIVE
+    task = make_task(db, project)
+    task_run = TaskRun(task_id=task.id, status=TaskRunStatus.CREATED, created_at=datetime.now(timezone.utc))
+    db.add(task_run)
+    db.commit()
+    return version.id, task_run.id
+
+
 def manual_run(db, built, *, status=WorkflowRunStatus.RUNNING):
     """A WorkflowRun with one PENDING node run per node -- no engine involved."""
     run = WorkflowRun(
