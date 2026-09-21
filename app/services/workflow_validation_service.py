@@ -52,6 +52,7 @@ class WorkflowValidator:
         self._validate_all_nodes_reachable(nodes, edges)
         self._validate_all_paths_reach_terminal(nodes, edges)
         self._validate_node_type_constraints(nodes)
+        self._validate_human_approval_nodes(nodes, edges)
         self._validate_referenced_agents(nodes, project_id)
         self._validate_referenced_evaluations(nodes, project_id)
 
@@ -330,6 +331,64 @@ class WorkflowValidator:
             elif node.node_type == WorkflowNodeType.CONSENSUS:
                 if not node.config or not node.config.get("decision_rule"):
                     self.issues.append(f"CONSENSUS node {node.node_key} requires config.decision_rule")
+
+    # Config keys that would make a human gate something other than an explicit
+    # human decision. A HUMAN_APPROVAL node has no automatic, timed, or
+    # agent-made outcome (MA7.3): only an authenticated human can resolve it.
+    _FORBIDDEN_HUMAN_APPROVAL_CONFIG_KEYS = frozenset(
+        {
+            "auto_approve",
+            "auto_approval",
+            "auto_approve_after_seconds",
+            "auto_reject",
+            "default_decision",
+            "timeout",
+            "timeout_seconds",
+            "expires_at",
+            "expire_after_seconds",
+            "agent_version_id",
+            "approver_agent_version_id",
+            "model_policy_override",
+        }
+    )
+
+    def _validate_human_approval_nodes(self, nodes: Dict[str, WorkflowNode], edges: List[tuple]) -> None:
+        """HUMAN_APPROVAL (MA7.3): a durable wait for an explicit human
+        decision.
+
+        - ``config.approval_group`` is a non-empty string label;
+        - no auto-approve / timeout / agent-approver configuration, and no
+          node-level ``timeout_seconds``: nothing but a human may resolve it;
+        - at most ONE upstream dependency -- fan-in (several inputs to one
+          gate) is MA7.4, and is rejected here rather than executed with
+          ambiguous artifact lineage.
+        """
+        incoming: Dict[str, int] = {}
+        for _from_id, to_id, _edge in edges:
+            incoming[to_id] = incoming.get(to_id, 0) + 1
+
+        for node_id, node in nodes.items():
+            if node.node_type != WorkflowNodeType.HUMAN_APPROVAL:
+                continue
+            config = node.config or {}
+            group = config.get("approval_group")
+            # A missing/empty group is already reported by
+            # _validate_node_type_constraints; only report a wrong type here.
+            if group and not (isinstance(group, str) and group.strip()):
+                self.issues.append(f"HUMAN_APPROVAL node {node.node_key} config.approval_group must be a non-empty string")
+            forbidden = sorted(self._FORBIDDEN_HUMAN_APPROVAL_CONFIG_KEYS.intersection(config))
+            if forbidden:
+                self.issues.append(
+                    f"HUMAN_APPROVAL node {node.node_key} must not configure automatic or timed approval: "
+                    f"{', '.join(forbidden)}"
+                )
+            if node.timeout_seconds is not None:
+                self.issues.append(f"HUMAN_APPROVAL node {node.node_key} must not set timeout_seconds")
+            if incoming.get(node_id, 0) > 1:
+                self.issues.append(
+                    f"HUMAN_APPROVAL node {node.node_key} has {incoming[node_id]} upstream dependencies; "
+                    "exactly one is supported (fan-in is MA7.4)"
+                )
 
     def _validate_referenced_agents(self, nodes: Dict[str, WorkflowNode], project_id: str) -> None:
         """Validate that all referenced agent versions exist and belong to the project."""

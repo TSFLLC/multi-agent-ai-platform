@@ -724,9 +724,33 @@ def _app_python_files():
     return [p for p in APP_DIR.rglob("*.py") if "__pycache__" not in p.parts]
 
 
-def test_only_approval_service_assigns_a_decision_status():
-    """APPROVED/REJECTED are referenced in application code only by the
-    service that owns the decision (plus the enum and its API schema) -- no
+def _decision_status_uses(path, member_names):
+    """(line, is_comparison) for every ``ApprovalStatus.<member>`` reference
+    in ``path``. A comparison (``x == ApprovalStatus.APPROVED``, ``x in (..)``)
+    only *reads* a status; anything else (assignment, keyword argument,
+    return value) can *write* one."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    in_comparison = {
+        id(inner)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Compare)
+        for part in [node.left, *node.comparators]
+        for inner in ast.walk(part)
+    }
+    return [
+        (node.lineno, id(node) in in_comparison)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "ApprovalStatus"
+        and node.attr in member_names
+    ]
+
+
+def test_only_approval_service_can_write_a_decision_status():
+    """APPROVED/REJECTED are *written* only by the service that owns the
+    decision (plus the enum itself). Other modules -- the workflow engine
+    included -- may compare against them but can never assign one, so no
     worker, execution service or workflow code can approve/reject."""
     allowed = {
         APP_DIR / "services" / "approval_service.py",
@@ -736,14 +760,9 @@ def test_only_approval_service_assigns_a_decision_status():
     for path in _app_python_files():
         if path in allowed:
             continue
-        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-            if (
-                isinstance(node, ast.Attribute)
-                and isinstance(node.value, ast.Name)
-                and node.value.id == "ApprovalStatus"
-                and node.attr in ("APPROVED", "REJECTED")
-            ):
-                offenders.append(f"{path.relative_to(APP_DIR)}:{node.lineno}")
+        for lineno, is_comparison in _decision_status_uses(path, ("APPROVED", "REJECTED")):
+            if not is_comparison:
+                offenders.append(f"{path.relative_to(APP_DIR)}:{lineno}")
     assert offenders == []
 
 
@@ -769,5 +788,33 @@ def test_no_timeout_or_expiry_is_set_or_evaluated_by_the_service(db, bootstrap, 
     )
     assert resolved.expires_at is None
     source = (APP_DIR / "services" / "approval_service.py").read_text(encoding="utf-8")
-    assert "ApprovalStatus.EXPIRED" not in source
     assert "expires_at" not in source
+
+
+def test_expired_is_only_ever_written_by_the_cancellation_path():
+    """MA7.3b (frozen V1 decision): a cancelled workflow closes its pending
+    approval as EXPIRED. That is the *only* place any code writes EXPIRED --
+    there is no timeout/expiry sweep, and no other module references it."""
+    service_path = APP_DIR / "services" / "approval_service.py"
+    tree = ast.parse(service_path.read_text(encoding="utf-8"))
+    writers = set()
+    for func in ast.walk(tree):
+        if not isinstance(func, ast.FunctionDef):
+            continue
+        for node in ast.walk(func):
+            if (
+                isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Name)
+                and node.value.id == "ApprovalStatus"
+                and node.attr == "EXPIRED"
+            ):
+                writers.add(func.name)
+    assert writers == {"expire_pending_for_cancellation"}
+
+    others = [
+        str(path.relative_to(APP_DIR))
+        for path in _app_python_files()
+        if path not in (service_path, APP_DIR / "db" / "enums.py")
+        and _decision_status_uses(path, ("EXPIRED",))
+    ]
+    assert others == []

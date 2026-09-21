@@ -9,7 +9,10 @@ the only path from PENDING to APPROVED/REJECTED is ``resolve``, which
 requires an authenticated ``User`` with MODIFY access to the owning
 project, and there is no timeout/expiry/auto-approval logic anywhere in this
 module. Scope-specific side effects (e.g. advancing a Workflow Node Run once
-its approval resolves) are deliberately NOT here -- that is MA7.3b.
+its approval resolves) live in the owning engine, not here: the one hook is
+``_apply_scope_effect``/``_finish``, which only fire for the workflow
+human-approval gate (``WORKFLOW_HUMAN_APPROVAL_OPERATION``) and delegate to
+``WorkflowExecutionService`` (MA7.3b).
 
 Only ``ApprovalScope.WORKFLOW_NODE_RUN`` has a project-ownership lookup so
 far. ``Approval`` carries no ``project_id`` of its own, so an approval whose
@@ -20,6 +23,7 @@ owning project cannot be established is unreachable through this service
 import hashlib
 import hmac
 import json
+import logging
 from datetime import datetime, timezone
 from typing import Any, List, Mapping, Optional, cast
 
@@ -43,6 +47,13 @@ from app.models.identity import Project, User
 from app.models.workflow import Workflow, WorkflowNodeRun, WorkflowRun, WorkflowVersion
 from app.services.audit_service import AuditService
 from app.services.base import BaseService
+
+logger = logging.getLogger("app.services.approval_service")
+
+# The operation the workflow engine's HUMAN_APPROVAL node requests (MA7.3b).
+# Only approvals with this operation_type advance/fail/cancel a Workflow Node
+# Run; any other approval on a node run is a plain approval record.
+WORKFLOW_HUMAN_APPROVAL_OPERATION = "workflow.human_approval"
 
 _SUPPORTED_REQUEST_SCOPES = (ApprovalScope.WORKFLOW_NODE_RUN,)
 _WORKFLOW_NODE_RUN_UNIQUE_WHERE = text("scope = 'workflow_node_run'")
@@ -150,6 +161,18 @@ class ApprovalService(BaseService):
             raise NotFoundError(f"Approval {approval_id} not found.")
         return approval
 
+    def find(self, scope: ApprovalScope, scope_ref_id: str, operation_type: str) -> Optional[Approval]:
+        """The approval for (scope, reference, operation), or ``None``."""
+        return self.db.execute(
+            select(Approval)
+            .where(
+                Approval.scope == scope,
+                Approval.scope_ref_id == scope_ref_id,
+                Approval.operation_type == operation_type,
+            )
+            .execution_options(populate_existing=True)
+        ).scalar_one_or_none()
+
     def owning_project_id(self, approval: Approval) -> str:
         """Scope -> owning project. Fail closed: an unsupported scope, or a
         reference that no longer resolves, raises ``ForbiddenError`` -- an
@@ -248,7 +271,7 @@ class ApprovalService(BaseService):
 
         decision = ApprovalStatus.APPROVED if approve else ApprovalStatus.REJECTED
         if approval.status != ApprovalStatus.PENDING:
-            return self._replay_or_conflict(approval, decision)
+            return self._finish(self._replay_or_conflict(approval, decision), user, decided_now=False)
 
         cleaned_note = (note or "").strip() or None
         try:
@@ -263,14 +286,14 @@ class ApprovalService(BaseService):
                 raise ConflictError(
                     f"Approval {approval_id} is being resolved concurrently; retry the request."
                 )
-            return self._replay_or_conflict(current, decision)
+            return self._finish(self._replay_or_conflict(current, decision), user, decided_now=False)
 
         current = self._read_fresh(approval_id)
         if current is None:
             raise NotFoundError(f"Approval {approval_id} not found.")
         if won:
-            return current
-        return self._replay_or_conflict(current, decision)
+            return self._finish(current, user, decided_now=True)
+        return self._finish(self._replay_or_conflict(current, decision), user, decided_now=False)
 
     # -- internals ---------------------------------------------------------
 
@@ -305,25 +328,133 @@ class ApprovalService(BaseService):
             self.db.rollback()
             return False
 
-        project = self.db.get(Project, project_id)
+        try:
+            project = self.db.get(Project, project_id)
+            if project is not None:
+                AuditService(self.db).record(
+                    org_id=project.org_id,
+                    event_type=f"approval.{decision.value}",
+                    actor_user_id=user.id,
+                    target_ref=approval.id,
+                    detail={
+                        "scope": approval.scope.value,
+                        "scope_ref_id": approval.scope_ref_id,
+                        "operation_type": approval.operation_type,
+                        "action_fingerprint": approval.action_fingerprint,
+                        "decision": decision.value,
+                        "has_resolution_note": note is not None,
+                    },
+                    commit=False,
+                )
+            self._apply_scope_effect(approval, decision)
+            self.db.commit()
+        except Exception:
+            # Decision, audit event and any scope effect commit together or
+            # not at all.
+            self.db.rollback()
+            raise
+        return True
+
+    def expire_pending_for_cancellation(
+        self,
+        *,
+        scope: ApprovalScope,
+        scope_ref_id: str,
+        operation_type: str,
+        cancelled_by: Optional[str],
+        reason: str,
+        commit: bool = True,
+    ) -> Optional[Approval]:
+        """Closes a still-PENDING approval whose subject was cancelled (V1
+        decision: EXPIRED, never REJECTED -- a cancellation is not a human
+        decision, and ``ApprovalStatus`` has no CANCELLED). Same
+        compare-and-swap discipline as ``resolve``: only a PENDING row is
+        touched, so a decision that already won is never overwritten.
+        Returns the expired approval, or ``None`` if there was no pending
+        approval to close. ``resolved_by`` preserves the cancelling user's
+        identity (``None`` for a system cancel) and ``resolution_note``
+        carries ``reason``; the audit event ``approval.cancelled`` records
+        the same. ``commit=False`` leaves the transaction to the caller.
+        """
+        swapped = cast(
+            CursorResult,
+            self.db.execute(
+                update(Approval)
+                .where(
+                    Approval.scope == scope,
+                    Approval.scope_ref_id == scope_ref_id,
+                    Approval.operation_type == operation_type,
+                    Approval.status == ApprovalStatus.PENDING,
+                )
+                .values(
+                    status=ApprovalStatus.EXPIRED,
+                    resolved_by=cancelled_by,
+                    resolved_at=_utcnow(),
+                    resolution_note=reason,
+                )
+                .execution_options(synchronize_session=False)
+            ),
+        )
+        if swapped.rowcount != 1:
+            return None
+
+        approval = self._read_existing(scope, scope_ref_id, operation_type)
+        project = self.db.get(Project, self.owning_project_id(approval))
         if project is not None:
             AuditService(self.db).record(
                 org_id=project.org_id,
-                event_type=f"approval.{decision.value}",
-                actor_user_id=user.id,
+                event_type="approval.cancelled",
+                actor_user_id=cancelled_by,
                 target_ref=approval.id,
                 detail={
                     "scope": approval.scope.value,
                     "scope_ref_id": approval.scope_ref_id,
                     "operation_type": approval.operation_type,
                     "action_fingerprint": approval.action_fingerprint,
-                    "decision": decision.value,
-                    "has_resolution_note": note is not None,
+                    "reason": reason,
                 },
                 commit=False,
             )
-        self.db.commit()
-        return True
+        if commit:
+            self.db.commit()
+            self.db.refresh(approval)
+        else:
+            self.db.flush()
+        return approval
+
+    def _apply_scope_effect(self, approval: Approval, decision: ApprovalStatus) -> None:
+        """Runs INSIDE the decision transaction (after the CAS and the audit
+        write, before the commit): a workflow human-approval gate's node/run
+        transition commits atomically with the decision, or -- if the
+        workflow is no longer waiting on it -- raises and rolls the whole
+        decision back."""
+        if (
+            approval.scope == ApprovalScope.WORKFLOW_NODE_RUN
+            and approval.operation_type == WORKFLOW_HUMAN_APPROVAL_OPERATION
+        ):
+            from app.services.workflow_execution_service import WorkflowExecutionService
+
+            WorkflowExecutionService(self.db).apply_approval_decision(approval, decision)
+
+    def _finish(self, approval: Approval, user: User, *, decided_now: bool) -> Approval:
+        """After the decision is durable: hand the (already-committed) result
+        to the owning engine so it can emit evidence and resume/heal the run.
+        Never raises -- the decision is committed; reconciliation repairs
+        anything this misses."""
+        if (
+            approval.scope == ApprovalScope.WORKFLOW_NODE_RUN
+            and approval.operation_type == WORKFLOW_HUMAN_APPROVAL_OPERATION
+        ):
+            try:
+                from app.services.workflow_execution_service import WorkflowExecutionService
+
+                WorkflowExecutionService(self.db).after_approval_resolved(
+                    approval.id, actor_user_id=user.id, decided_now=decided_now
+                )
+            except Exception:
+                logger.exception("approval_post_commit_resume_failed approval_id=%s", approval.id)
+                self.db.rollback()
+        return approval
 
     def _replay_or_conflict(self, approval: Approval, decision: ApprovalStatus) -> Approval:
         if approval.status == decision:

@@ -99,6 +99,22 @@ async def lifespan(app: FastAPI):
         finally:
             db.close()
 
+        # MA7.3: idempotent recovery sweep over non-terminal Workflow Runs
+        # (a durably waiting approval must survive a restart; a run stopped
+        # mid-transition is healed). Only against an up-to-date schema, and a
+        # failure here never blocks startup. The Worker runs the same sweep
+        # at its own startup; both are safe together (CAS/unique guarded).
+        db = SessionLocal()
+        try:
+            from app.services.workflow_execution_service import WorkflowExecutionService
+
+            reconciled = WorkflowExecutionService(db).reconcile_active_runs()
+            logger.info("workflow_reconciliation_at_startup runs=%s", reconciled)
+        except Exception:
+            logger.exception("workflow_reconciliation_failed_at_startup")
+        finally:
+            db.close()
+
     ensure_local_auth_token()
 
     yield

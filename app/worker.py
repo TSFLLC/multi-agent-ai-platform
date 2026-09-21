@@ -100,9 +100,33 @@ class Worker:
             # SIGTERM isn't meaningfully overridable on some platforms/threads.
             pass
 
+    def reconcile_workflows(self) -> int:
+        """MA7.3: idempotent recovery sweep over every non-terminal
+        WorkflowRun -- heals a run a previous process left mid-transition
+        (e.g. an approved gate whose next node was never dispatched) and
+        confirms a durably-waiting run is still correctly waiting. Safe
+        alongside another process doing the same (FastAPI runs it at its own
+        startup): every change it makes is a compare-and-swap or
+        unique-constraint-guarded insert. Never raises -- a failing sweep
+        must not stop the worker from claiming jobs. Returns the number of
+        runs reconciled (0 on failure)."""
+        from app.services.workflow_execution_service import WorkflowExecutionService
+
+        db = self._session_factory()
+        try:
+            reconciled = WorkflowExecutionService(db).reconcile_active_runs()
+            logger.info("worker_workflow_reconciliation worker_id=%s runs=%s", self.worker_id, reconciled)
+            return reconciled
+        except Exception:
+            logger.exception("worker_workflow_reconciliation_failed worker_id=%s", self.worker_id)
+            return 0
+        finally:
+            db.close()
+
     def run_forever(self) -> None:
         self._install_signal_handlers()
         logger.info("worker_started worker_id=%s", self.worker_id)
+        self.reconcile_workflows()
         try:
             while not self._shutdown.is_set():
                 processed = self.run_once()

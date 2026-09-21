@@ -45,3 +45,6 @@ class WorkflowNodeRunRead(BaseModel):
     iteration: int
     status: WorkflowNodeRunStatus
     agent_run_id: Optional[str] = None
+    # MA7.3b: the Approval a HUMAN_APPROVAL node run is waiting on / was
+    # resolved by (None for every other node run).
+    approval_id: Optional[str] = None

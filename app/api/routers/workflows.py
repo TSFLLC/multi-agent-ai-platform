@@ -4,17 +4,18 @@ MA7.1: Workflow authoring, versioning, DAG validation, publish.
 No execution (WorkflowRun/WorkflowNodeRun execution is MA7.2+).
 """
 
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import and_
+from sqlalchemy import and_, select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db
 from app.auth import get_current_user
 from app.authz import ProjectAction, check_project_access
-from app.db.enums import VersionStatus
+from app.db.enums import ApprovalScope, VersionStatus
 from app.errors import NotFoundError
+from app.models.governance import Approval
 from app.models.identity import User
 from app.models.workflow import Workflow, WorkflowNodeRun, WorkflowRun, WorkflowVersion
 from app.schemas.workflow import (
@@ -25,6 +26,7 @@ from app.schemas.workflow import (
     WorkflowRunRead,
     WorkflowVersionRead,
 )
+from app.services.approval_service import WORKFLOW_HUMAN_APPROVAL_OPERATION
 from app.services.workflow_definition_service import WorkflowDefinitionService
 from app.services.workflow_validation_service import DAGValidationError
 
@@ -468,6 +470,17 @@ def list_workflow_node_runs(
         WorkflowNodeRun.workflow_run_id == workflow_run_id
     ).all()
 
+    approval_ids: Dict[str, str] = {
+        scope_ref_id: approval_id
+        for scope_ref_id, approval_id in db.execute(
+            select(Approval.scope_ref_id, Approval.id).where(
+                Approval.scope == ApprovalScope.WORKFLOW_NODE_RUN,
+                Approval.operation_type == WORKFLOW_HUMAN_APPROVAL_OPERATION,
+                Approval.scope_ref_id.in_([nr.id for nr in node_runs]),
+            )
+        ).all()
+    }
+
     return [
         WorkflowNodeRunRead(
             id=nr.id,
@@ -476,6 +489,7 @@ def list_workflow_node_runs(
             iteration=nr.iteration,
             status=nr.status,
             agent_run_id=nr.agent_run_id,
+            approval_id=approval_ids.get(nr.id),
         )
         for nr in node_runs
     ]
@@ -517,6 +531,6 @@ def cancel_workflow_run(
     _require_workflow_run_access(db, user, workflow_run, ProjectAction.MODIFY)
 
     service = WorkflowExecutionService(db)
-    service.cancel_workflow_run(workflow_run_id, cancelled_by_user_id=None)
+    service.cancel_workflow_run(workflow_run_id, cancelled_by_user_id=user.id)
 
     return {"status": "cancellation_requested"}

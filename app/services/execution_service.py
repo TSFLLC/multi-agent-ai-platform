@@ -58,7 +58,7 @@ from app.models.evaluation_definitions import EvaluationDefinitionVersion
 from app.models.execution import ModelCall
 from app.models.identity import Project
 from app.models.tasks import AgentRun, AgentRunAttempt, Task, TaskRun
-from app.prompt_builder import build_prompt
+from app.prompt_builder import build_prompt, build_workflow_upstream_extra_context
 from app.providers.base import (
     InvokeRequest,
     ProviderAdapter,
@@ -280,6 +280,10 @@ class AgentExecutionService:
             self.governor.release(reservation)
             self._finalize_failed(ctx, category="evaluation_context_error", message=str(exc), attempt=attempt)
             raise ExecutionAborted(str(exc)) from exc
+        except _MissingWorkflowContext as exc:
+            self.governor.release(reservation)
+            self._finalize_failed(ctx, category="workflow_context_error", message=str(exc), attempt=attempt)
+            raise ExecutionAborted(str(exc)) from exc
 
         assembly = build_prompt(
             agent_version=ctx.agent_version,
@@ -498,7 +502,37 @@ class AgentExecutionService:
         if kind == "evaluation_request":
             return self._build_evaluator_extra_context(input_context)
 
+        if kind == "workflow_upstream":
+            return self._build_workflow_upstream_context(input_context)
+
         return None
+
+    def _build_workflow_upstream_context(self, input_context: dict) -> Optional[str]:
+        """MA7.3b: a Workflow-dispatched Agent Run's ``input_context_json``
+        lists the immutable upstream artifact ids (already passed through any
+        Human Approval node). Each artifact is read from disk and checked
+        against its recorded sha256, so the downstream agent receives exactly
+        the content that was produced -- and, behind an approval gate, exactly
+        what the human approved -- or the run fails with a categorized error;
+        it never proceeds on missing or altered upstream output."""
+        upstream = []
+        for artifact_id in input_context.get("upstream_artifact_ids") or []:
+            artifact = self.db.get(Artifact, artifact_id)
+            if artifact is None:
+                raise _MissingWorkflowContext(f"Upstream artifact {artifact_id} no longer exists.")
+            try:
+                content = Path(artifact.storage_ref).read_bytes()
+                text = content.decode("utf-8")
+            except (OSError, UnicodeDecodeError) as exc:
+                raise _MissingWorkflowContext(
+                    f"Upstream artifact {artifact_id} content could not be read: {type(exc).__name__}."
+                ) from exc
+            if artifact.content_hash and hashlib.sha256(content).hexdigest() != artifact.content_hash:
+                raise _MissingWorkflowContext(
+                    f"Upstream artifact {artifact_id} content no longer matches its recorded sha256."
+                )
+            upstream.append((artifact.id, artifact.content_hash or "", text))
+        return build_workflow_upstream_extra_context(upstream) if upstream else None
 
     def _build_evaluator_extra_context(self, input_context: dict) -> str:
         """MA6 Slice 3B: renders the subject task's own title/description/
@@ -750,6 +784,14 @@ class _MissingReviewContext(Exception):
     immutable and never deleted while their owning Agent Run exists), but
     handled as a proper categorized failure rather than an unhandled I/O
     error, consistent with every other failure category in this module."""
+
+
+class _MissingWorkflowContext(Exception):
+    """MA7.3b: a Workflow-dispatched Agent Run's upstream artifact is gone,
+    unreadable, or no longer matches its recorded content hash -- a
+    categorized failure (``workflow_context_error``) raised before any
+    provider call/budget spend, same as the review/evaluation context
+    failures."""
 
 
 class _MissingEvaluationContext(Exception):

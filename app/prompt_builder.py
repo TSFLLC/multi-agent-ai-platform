@@ -17,10 +17,33 @@ what proves a later re-derivation matches what was actually sent.
 import hashlib
 import json
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Sequence, Tuple
 
 from app.models.agents import AgentVersion, PromptVersion
 from app.models.tasks import Task
+
+
+def build_workflow_upstream_extra_context(upstream: Sequence[Tuple[str, str, str]]) -> str:
+    """MA7.3b: renders the upstream Workflow nodes' output artifacts -- the
+    (artifact_id, sha256, text) triples the engine recorded in an Agent
+    Run's ``input_context_json`` -- as the ``extra_context`` block of the
+    downstream Agent's prompt, so a downstream node actually receives the
+    (human-approved) upstream output rather than only a lineage id. The
+    sha256 is included so the exact reviewed content is identifiable."""
+    parts = []
+    for artifact_id, artifact_sha256, text in upstream:
+        parts.extend(
+            [
+                "--- UPSTREAM WORKFLOW OUTPUT ---",
+                f"artifact_id: {artifact_id}",
+                f"artifact_sha256: {artifact_sha256}",
+                "",
+                text,
+                "",
+                "--- END UPSTREAM WORKFLOW OUTPUT ---",
+            ]
+        )
+    return "\n".join(parts)
 
 
 @dataclass
