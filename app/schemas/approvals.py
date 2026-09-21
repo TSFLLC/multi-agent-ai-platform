@@ -1,12 +1,13 @@
 from datetime import datetime
 from typing import Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.db.enums import ApprovalScope, ApprovalStatus
+from app.schemas.common import ORMModel
 
 
-class ApprovalRead(BaseModel):
+class ApprovalRead(ORMModel):
     id: str
     scope: ApprovalScope
     scope_ref_id: str
@@ -15,6 +16,13 @@ class ApprovalRead(BaseModel):
     status: ApprovalStatus
     requested_at: datetime
     expires_at: Optional[datetime] = None
+    # MA7.3a additions (all optional/additive): what is being approved and,
+    # once decided, the immutable decision provenance.
+    bound_artifact_id: Optional[str] = None
+    requested_by: Optional[str] = None
+    resolved_by: Optional[str] = None
+    resolved_at: Optional[datetime] = None
+    resolution_note: Optional[str] = None
 
 
 class ApprovalResolveRequest(BaseModel):
@@ -22,5 +30,5 @@ class ApprovalResolveRequest(BaseModel):
     server rejects with 409 fingerprint_mismatch if the action changed."""
 
     approve: bool
-    action_fingerprint: str
-    notes: Optional[str] = None
+    action_fingerprint: str = Field(min_length=1, max_length=128)
+    notes: Optional[str] = Field(default=None, max_length=4000)

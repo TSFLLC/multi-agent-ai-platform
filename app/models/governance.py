@@ -8,7 +8,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import List, Optional
 
-from sqlalchemy import DateTime, ForeignKey, Numeric, String, UniqueConstraint
+from sqlalchemy import DateTime, ForeignKey, Index, Numeric, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -25,9 +25,29 @@ class Approval(UUIDPrimaryKeyMixin, Base):
     gated transition's execution code must recompute the current action's
     fingerprint and reject the transition if it no longer matches this
     row's ``action_fingerprint`` exactly (Acceptance Criterion 12).
+
+    Decision provenance (``status``, ``resolved_by``, ``resolved_at``,
+    ``resolution_note``) is written exactly once, by a compare-and-swap on
+    ``status = 'pending'`` in ``ApprovalService.resolve`` -- a resolved row is
+    never updated again.
     """
 
     __tablename__ = "approvals"
+    __table_args__ = (
+        # MA7.3a: at most one approval per (workflow node run, operation).
+        # Partial on purpose -- other scopes (task/agent run, artifact) may
+        # legitimately re-request an approval for the same reference. Bare
+        # index name used verbatim (the "ix" naming convention has no
+        # ``%(constraint_name)s`` placeholder, see app.db.base).
+        Index(
+            "uq_approvals_workflow_node_run_operation",
+            "scope",
+            "scope_ref_id",
+            "operation_type",
+            unique=True,
+            sqlite_where=text("scope = 'workflow_node_run'"),
+        ),
+    )
 
     scope: Mapped[ApprovalScope] = mapped_column(sa_enum(ApprovalScope), nullable=False)
     scope_ref_id: Mapped[str] = mapped_column(String(36), nullable=False)
@@ -44,6 +64,7 @@ class Approval(UUIDPrimaryKeyMixin, Base):
     requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
     resolved_by: Mapped[Optional[str]] = mapped_column(ForeignKey("users.id"), nullable=True)
     resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolution_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
 

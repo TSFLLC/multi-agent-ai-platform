@@ -29,6 +29,7 @@ class AuditService:
         actor_user_id: Optional[str] = None,
         target_ref: Optional[str] = None,
         detail: Optional[Dict[str, Any]] = None,
+        commit: bool = True,
     ) -> AuditEvent:
         return self._repo.record(
             self.db,
@@ -37,6 +38,7 @@ class AuditService:
             actor_user_id=actor_user_id,
             target_ref=target_ref,
             detail=detail,
+            commit=commit,
         )
 
     def list_for_org(self, *, org_id: str, limit: int = 100) -> List[AuditEvent]:

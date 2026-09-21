@@ -36,6 +36,7 @@ EXPECTED_PATHS = [
     "/comparisons/{comparison_id}/select-winner",
     "/evaluations",
     "/approvals",
+    "/approvals/{approval_id}",
     "/approvals/{approval_id}/resolve",
     "/audit-events",
     "/usage",

@@ -92,6 +92,16 @@ class ArtifactHashMismatchError(AppError):
     code = "artifact_hash_mismatch"
 
 
+class FingerprintMismatchError(AppError):
+    """MA7.3a: the caller's echoed ``action_fingerprint`` for
+    ``POST /approvals/{id}/resolve`` does not match the Approval's stored
+    ``action_fingerprint`` (Section 24.4 #15, 25.5). The decision is refused
+    rather than applied to an action the approver never saw."""
+
+    status_code = status.HTTP_409_CONFLICT
+    code = "fingerprint_mismatch"
+
+
 def _error_response(status_code: int, code: str, message: str, detail: Any = None) -> JSONResponse:
     body: Dict[str, Any] = {"error": {"code": code, "message": message}}
     if detail is not None:
