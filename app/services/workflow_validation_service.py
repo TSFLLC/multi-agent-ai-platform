@@ -45,6 +45,7 @@ class WorkflowValidator:
         self._validate_edges_reference_valid_nodes(edges, nodes)
         self._validate_no_self_edges(edges)
         self._validate_no_duplicate_edges(edges)
+        self._validate_no_conditional_edges(nodes, edges)
         self._validate_no_cycles(nodes, edges)
         self._validate_connectivity(nodes, edges)
         self._validate_entry_structure(nodes, edges)
@@ -98,6 +99,26 @@ class WorkflowValidator:
             if key in seen:
                 self.issues.append(f"Duplicate edge: {from_id} -> {to_id}")
             seen.add(key)
+
+    def _validate_no_conditional_edges(self, nodes: Dict[str, WorkflowNode], edges: List[tuple]) -> None:
+        """Conditional routing does not exist yet (MA7.4a). The engine has
+        never evaluated an edge ``condition`` -- it would run the edge
+        unconditionally -- so publishing a workflow whose edges carry one
+        would silently do something other than what its author wrote. Reject
+        any edge that has a condition (even an empty one) until routing is
+        implemented.
+
+        ``condition`` is a JSON column, so "no condition" is a Python ``None``
+        after loading (an explicit None is stored as JSON null, not SQL NULL);
+        the test is therefore ``is not None`` on the loaded value.
+        """
+        for from_id, to_id, edge in edges:
+            if edge.condition is not None:
+                source = nodes[from_id].node_key if from_id in nodes else from_id
+                target = nodes[to_id].node_key if to_id in nodes else to_id
+                self.issues.append(
+                    f"Edge {source} -> {target} has a condition; conditional routing is not supported yet"
+                )
 
     def _validate_connectivity(self, nodes: Dict[str, WorkflowNode], edges: List[tuple]) -> None:
         """All nodes must be in a single connected component.

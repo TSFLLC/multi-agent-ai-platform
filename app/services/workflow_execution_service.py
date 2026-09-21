@@ -8,9 +8,10 @@ Crash/replay discovers and reuses existing execution via WorkflowNodeRun.agent_r
 """
 
 import logging
+from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, cast
-from sqlalchemy import and_, select, text, update
+from typing import Any, Dict, Iterator, List, Optional, Tuple, cast
+from sqlalchemy import select, text, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
@@ -85,18 +86,54 @@ class WorkflowExecutionService(BaseService):
 
     def __init__(self, db: Session):
         super().__init__(db)
-        self.flight_recorder = FlightRecorderService(db)
         self.job_queue_repo = JobQueueRepository()
 
+    @contextmanager
+    def _evidence_session(self) -> Iterator[Session]:
+        """A short-lived session on the same database, used ONLY to write
+        Flight Recorder evidence. Separate from ``self.db`` on purpose -- see
+        ``_emit_event``."""
+        bind = self.db.get_bind()
+        session = Session(bind=getattr(bind, "engine", bind), autoflush=False, expire_on_commit=False)
+        try:
+            yield session
+        finally:
+            session.close()
+
     def _emit_event(self, task_run_id: str, event_type: str, **kwargs: object) -> None:
-        """Helper to emit Flight Recorder event with correct parameters."""
-        task_run: Optional[TaskRun] = self.db.query(TaskRun).filter(TaskRun.id == task_run_id).first()
-        if task_run:
-            self.flight_recorder.record(
-                task_id=task_run.task_id,
-                task_run_id=task_run_id,
-                event_type=event_type,
-                **kwargs
+        """Flight Recorder evidence: best-effort, and NEVER at the expense of
+        workflow state. Durable workflow state first; observability second.
+
+        1. Whatever the caller intended is committed BEFORE any evidence is
+           written. (A commit that fails is a real state error and propagates;
+           an evidence failure never does.)
+        2. The event is written on a SEPARATE session/transaction.
+           ``ExecutionEventRepository.record`` rolls its session back when it
+           loses a sequence-number race and retries; on the caller's session
+           that rollback would also discard the caller's pending changes
+           (demonstrated in the MA7.4 investigation: a node stayed RUNNING
+           although its completion event was recorded). Parallel branches all
+           write engine events to the same parent task run, so this is exactly
+           where such collisions occur.
+        3. Any evidence failure -- exhausted sequence retries, a locked
+           database, a missing task run -- is logged and swallowed. The
+           database state is authoritative; events are not.
+        """
+        self.db.commit()
+        try:
+            with self._evidence_session() as session:
+                task_run = session.get(TaskRun, task_run_id)
+                if task_run is None:
+                    return
+                FlightRecorderService(session).record(
+                    task_id=task_run.task_id,
+                    task_run_id=task_run_id,
+                    event_type=event_type,
+                    **kwargs,
+                )
+        except Exception:
+            logger.warning(
+                "workflow_event_not_recorded event_type=%s task_run_id=%s", event_type, task_run_id, exc_info=True
             )
 
     # -- fresh reads / compare-and-swap helpers (MA7.3) ---------------------
@@ -117,6 +154,17 @@ class WorkflowExecutionService(BaseService):
             .where(WorkflowNodeRun.id == node_run_id)
             .execution_options(populate_existing=True)
         ).scalar_one_or_none()
+
+    def _fresh_node_runs(self, workflow_run_id: str) -> List[WorkflowNodeRun]:
+        return list(
+            self.db.execute(
+                select(WorkflowNodeRun)
+                .where(WorkflowNodeRun.workflow_run_id == workflow_run_id)
+                .execution_options(populate_existing=True)
+            )
+            .scalars()
+            .all()
+        )
 
     def _waiting_node_runs(self, workflow_run_id: str) -> List[WorkflowNodeRun]:
         return list(
@@ -240,6 +288,18 @@ class WorkflowExecutionService(BaseService):
         if not nodes:
             raise WorkflowExecutionError("Workflow version has no nodes")
 
+        # Defense in depth behind publish-time validation: this engine has no
+        # conditional routing, so a version that carries an edge condition
+        # (e.g. published before that validation existed) is refused rather
+        # than executed as if the condition were absent.
+        version_edges: List[WorkflowEdge] = self.db.query(WorkflowEdge).filter(
+            WorkflowEdge.workflow_version_id == workflow_version_id
+        ).all()
+        if any(edge.condition is not None for edge in version_edges):
+            raise WorkflowExecutionError(
+                "Workflow version has conditional edges; conditional routing is not supported yet"
+            )
+
         # Create WorkflowRun
         workflow_run = WorkflowRun(
             task_run_id=task_run_id,
@@ -297,91 +357,112 @@ class WorkflowExecutionService(BaseService):
 
         Idempotent: replay after completion is no-op (checks status).
         """
-        agent_run: Optional[AgentRun] = self.db.query(AgentRun).filter(
-            AgentRun.id == agent_run_id
-        ).first()
+        agent_run: Optional[AgentRun] = self.db.execute(
+            select(AgentRun).where(AgentRun.id == agent_run_id).execution_options(populate_existing=True)
+        ).scalar_one_or_none()
         if not agent_run:
             return  # Agent run doesn't exist
 
         # Find WorkflowNodeRun that triggered this agent
-        node_run: Optional[WorkflowNodeRun] = self.db.query(WorkflowNodeRun).filter(
-            WorkflowNodeRun.agent_run_id == agent_run_id
-        ).first()
+        node_run: Optional[WorkflowNodeRun] = self.db.execute(
+            select(WorkflowNodeRun)
+            .where(WorkflowNodeRun.agent_run_id == agent_run_id)
+            .execution_options(populate_existing=True)
+        ).scalar_one_or_none()
 
         if not node_run:
             return  # No workflow context for this agent
 
-        # Idempotency: if already terminal, skip
+        workflow_run: Optional[WorkflowRun] = self._fresh_run(node_run.workflow_run_id)
+        if not workflow_run:
+            return
+
+        # Idempotency: an already-terminal node is not touched again -- but the
+        # run is still given the chance to converge (a crash between a node's
+        # commit and the run's finalization is healed by any replay).
         if node_run.status in (
             WorkflowNodeRunStatus.COMPLETED,
             WorkflowNodeRunStatus.FAILED,
             WorkflowNodeRunStatus.CANCELLED,
         ):
+            self._advance_run(workflow_run.id)
             return
 
-        workflow_run: Optional[WorkflowRun] = self.db.query(WorkflowRun).filter(
-            WorkflowRun.id == node_run.workflow_run_id
-        ).first()
-        if not workflow_run:
-            return
+        # Propagate status from agent to node. Every transition is a
+        # compare-and-swap on the node's RUNNING status: the outcome is
+        # recorded exactly once however many processes replay this call
+        # (worker completion, reconciliation sweep, ...), and only the call
+        # that made the change emits evidence. State is committed BEFORE any
+        # event is written (see _emit_event).
+        ended_at = datetime.now(timezone.utc)
+        ids = {"workflow_run_id": workflow_run.id, "workflow_node_run_id": node_run.id}
+        events: List[Tuple[str, Dict[str, Any]]] = []
 
-        # Propagate status from agent to node
         if agent_run.status == AgentRunStatus.COMPLETED:
-            node_run.status = WorkflowNodeRunStatus.COMPLETED
-            node_run.ended_at = datetime.now(timezone.utc)
-
             # Capture output artifact reference (immutable)
-            artifact: Optional[Artifact] = self.db.query(Artifact).filter(
-                Artifact.agent_run_id == agent_run_id
-            ).first()
-            if artifact:
-                node_run.output_snapshot_ref = artifact.id
-
-            self._emit_event(
-                workflow_run.task_run_id,
-                "workflow.node.completed",
-                workflow_run_id=workflow_run.id,
-                workflow_node_run_id=node_run.id,
-            )
+            artifact_id = self.db.execute(
+                select(Artifact.id)
+                .where(Artifact.agent_run_id == agent_run_id)
+                .order_by(Artifact.created_at, Artifact.id)
+                .limit(1)
+            ).scalar_one_or_none()
+            values: Dict[str, Any] = {"status": WorkflowNodeRunStatus.COMPLETED, "ended_at": ended_at}
+            if artifact_id:
+                values["output_snapshot_ref"] = artifact_id
+            if self._cas_node_run(node_run.id, WorkflowNodeRunStatus.RUNNING, **values):
+                events.append(("workflow.node.completed", ids))
 
         elif agent_run.status == AgentRunStatus.FAILED:
-            node_run.status = WorkflowNodeRunStatus.FAILED
-            node_run.ended_at = datetime.now(timezone.utc)
-            workflow_run.status = WorkflowRunStatus.FAILED
-
-            self._emit_event(
-                workflow_run.task_run_id,
-                "workflow.node.failed",
-                workflow_run_id=workflow_run.id,
-                workflow_node_run_id=node_run.id,
-            )
-
-            self._emit_event(
-                workflow_run.task_run_id,
-                "workflow.failed",
-                workflow_run_id=workflow_run.id,
-                decision_summary="Agent node failed",
-            )
+            if self._cas_node_run(
+                node_run.id,
+                WorkflowNodeRunStatus.RUNNING,
+                status=WorkflowNodeRunStatus.FAILED,
+                ended_at=ended_at,
+            ):
+                self.db.execute(
+                    update(WorkflowRun)
+                    .where(
+                        WorkflowRun.id == workflow_run.id,
+                        WorkflowRun.status.notin_(
+                            (WorkflowRunStatus.COMPLETED, WorkflowRunStatus.FAILED, WorkflowRunStatus.CANCELLED)
+                        ),
+                    )
+                    .values(status=WorkflowRunStatus.FAILED)
+                    .execution_options(synchronize_session=False)
+                )
+                events.append(("workflow.node.failed", ids))
+                events.append(("workflow.failed", {"workflow_run_id": workflow_run.id, "decision_summary": "Agent node failed"}))
 
         elif agent_run.status in (AgentRunStatus.STOPPED, AgentRunStatus.CANCELLING):
-            node_run.status = WorkflowNodeRunStatus.CANCELLED
-            node_run.ended_at = datetime.now(timezone.utc)
-
-            if workflow_run.status == WorkflowRunStatus.RUNNING:
-                workflow_run.status = WorkflowRunStatus.CANCELLING
-
-            self._emit_event(
-                workflow_run.task_run_id,
-                "workflow.node.cancelled",
-                workflow_run_id=workflow_run.id,
-                workflow_node_run_id=node_run.id,
-            )
+            if self._cas_node_run(
+                node_run.id,
+                WorkflowNodeRunStatus.RUNNING,
+                status=WorkflowNodeRunStatus.CANCELLED,
+                ended_at=ended_at,
+            ):
+                self._cas_run(workflow_run.id, WorkflowRunStatus.RUNNING, status=WorkflowRunStatus.CANCELLING)
+                events.append(("workflow.node.cancelled", ids))
 
         self.db.commit()
+        for event_type, fields in events:
+            self._emit_event(workflow_run.task_run_id, event_type, **fields)
 
-        # If workflow still running, try to schedule next nodes
-        if workflow_run.status == WorkflowRunStatus.RUNNING:
-            self._schedule_ready_nodes(workflow_run.id)
+        self._advance_run(workflow_run.id)
+
+    def _advance_run(self, workflow_run_id: str) -> None:
+        """Make whatever progress is currently possible for a run, from
+        current committed state: a RUNNING run schedules its next ready
+        nodes (which also finalizes it when nothing is left); a CANCELLING
+        run -- finalize-on-drain -- becomes CANCELLED as soon as its last
+        in-flight node is terminal, with no reconciliation sweep needed.
+        Idempotent; a no-op for any other status."""
+        run = self._fresh_run(workflow_run_id)
+        if run is None:
+            return
+        if run.status == WorkflowRunStatus.RUNNING:
+            self._schedule_ready_nodes(run.id)
+        else:
+            self._check_workflow_complete(run.id)
 
     def cancel_workflow_run(self, workflow_run_id: str, cancelled_by_user_id: Optional[str] = None) -> None:
         """Cancel a running workflow and propagate to executing agents.
@@ -399,11 +480,39 @@ class WorkflowExecutionService(BaseService):
         ):
             return  # Already terminal
 
-        # Mark cancellation
-        workflow_run.cancellation_requested_at = datetime.now(timezone.utc)
-        workflow_run.cancellation_requested_by = cancelled_by_user_id
-        workflow_run.status = WorkflowRunStatus.CANCELLING
+        # Mark cancellation. A compare-and-swap on the run's non-terminal
+        # statuses, so it can never overwrite a run another actor has just
+        # finalized; and the original request time/user are written once --
+        # a repeated cancel converges without rewriting who asked first.
+        marked = self.db.execute(
+            update(WorkflowRun)
+            .where(
+                WorkflowRun.id == workflow_run_id,
+                WorkflowRun.status.in_(
+                    (
+                        WorkflowRunStatus.CREATED,
+                        WorkflowRunStatus.RUNNING,
+                        WorkflowRunStatus.NODE_WAITING_FOR_APPROVAL,
+                        WorkflowRunStatus.CANCELLING,
+                    )
+                ),
+            )
+            .values(status=WorkflowRunStatus.CANCELLING)
+            .execution_options(synchronize_session=False)
+        )
+        self.db.execute(
+            update(WorkflowRun)
+            .where(WorkflowRun.id == workflow_run_id, WorkflowRun.cancellation_requested_at.is_(None))
+            .values(
+                cancellation_requested_at=datetime.now(timezone.utc),
+                cancellation_requested_by=cancelled_by_user_id,
+            )
+            .execution_options(synchronize_session=False)
+        )
         self.db.commit()
+        if cast(CursorResult, marked).rowcount != 1:
+            return  # finalized by someone else while we were reading
+        workflow_run = self._fresh_run(workflow_run_id) or workflow_run
 
         # Cancel pending node runs
         self._cancel_pending_nodes(workflow_run_id)
@@ -413,21 +522,27 @@ class WorkflowExecutionService(BaseService):
         self._cancel_waiting_approval_nodes(workflow_run, cancelled_by_user_id)
 
         # Propagate to running agents
-        running_nodes: List[WorkflowNodeRun] = self.db.query(WorkflowNodeRun).filter(
-            and_(
-                WorkflowNodeRun.workflow_run_id == workflow_run_id,
-                WorkflowNodeRun.status == WorkflowNodeRunStatus.RUNNING,
-                WorkflowNodeRun.agent_run_id.isnot(None),
+        running_agent_run_ids = [
+            row[0]
+            for row in self.db.execute(
+                select(WorkflowNodeRun.agent_run_id).where(
+                    WorkflowNodeRun.workflow_run_id == workflow_run_id,
+                    WorkflowNodeRun.status == WorkflowNodeRunStatus.RUNNING,
+                    WorkflowNodeRun.agent_run_id.isnot(None),
+                )
+            ).all()
+        ]
+        for agent_run_id in running_agent_run_ids:
+            # Cooperative cancellation request; the first request wins.
+            self.db.execute(
+                update(AgentRun)
+                .where(AgentRun.id == agent_run_id, AgentRun.cancellation_requested_at.is_(None))
+                .values(
+                    cancellation_requested_at=datetime.now(timezone.utc),
+                    cancellation_requested_by=cancelled_by_user_id,
+                )
+                .execution_options(synchronize_session=False)
             )
-        ).all()
-
-        for node_run in running_nodes:
-            agent_run: Optional[AgentRun] = self.db.query(AgentRun).filter(
-                AgentRun.id == node_run.agent_run_id
-            ).first()
-            if agent_run:
-                agent_run.cancellation_requested_at = datetime.now(timezone.utc)
-                agent_run.cancellation_requested_by = cancelled_by_user_id
 
         self.db.commit()
 
@@ -436,6 +551,7 @@ class WorkflowExecutionService(BaseService):
             "workflow.cancelled",
             workflow_run_id=workflow_run_id,
             actor_user_id=cancelled_by_user_id,
+            decision_summary="cancellation requested",
         )
 
         # Check if all nodes are now terminal
@@ -474,43 +590,33 @@ class WorkflowExecutionService(BaseService):
             WorkflowNode.workflow_version_id == workflow_run.workflow_version_id
         ).all()
 
-        existing_node_runs: List[WorkflowNodeRun] = self.db.query(WorkflowNodeRun).filter(
-            WorkflowNodeRun.workflow_run_id == workflow_run_id
-        ).all()
+        existing_node_runs = self._fresh_node_runs(workflow_run_id)
 
         existing_ids = {nr.workflow_node_id for nr in existing_node_runs}
 
         # Create missing node runs (crash before node creation)
         for node in nodes:
             if node.id not in existing_ids:
-                try:
-                    node_run = WorkflowNodeRun(
+                self.db.add(
+                    WorkflowNodeRun(
                         workflow_run_id=workflow_run_id,
                         workflow_node_id=node.id,
                         iteration=0,
                         status=WorkflowNodeRunStatus.PENDING,
                     )
-                    self.db.add(node_run)
-                except IntegrityError:
-                    self.db.rollback()
-                    # Race condition: another worker/reconciliation created it
-                    continue
+                )
 
-        self.db.commit()
+        try:
+            self.db.commit()
+        except IntegrityError:
+            # Race: another worker/reconciliation created them first.
+            self.db.rollback()
 
-        # Reload node runs to check for completed agents
-        existing_node_runs = self.db.query(WorkflowNodeRun).filter(
-            WorkflowNodeRun.workflow_run_id == workflow_run_id
-        ).all()
+        # Reload node runs (current committed state) to check for completed agents
+        self._heal_agent_nodes(self._fresh_node_runs(workflow_run_id))
 
-        self._heal_agent_nodes(existing_node_runs)
-
-        # Try to schedule ready nodes
-        if workflow_run.status == WorkflowRunStatus.RUNNING:
-            self._schedule_ready_nodes(workflow_run_id)
-
-        # Check for completion
-        self._check_workflow_complete(workflow_run_id)
+        # Schedule ready nodes if still RUNNING, and finalize if nothing is left
+        self._advance_run(workflow_run_id)
 
     def reconcile_active_runs(self) -> int:
         """Idempotent sweep over every non-terminal WorkflowRun, run at
@@ -681,7 +787,7 @@ class WorkflowExecutionService(BaseService):
         the artifact it produced (id + content hash, read from the database,
         never from a cached object)."""
         upstream: List[Dict[str, Any]] = []
-        for up in sorted(self._get_upstream_node_runs(node_run), key=lambda r: r.id):
+        for _key, up in self._upstream_sources(node_run):
             content_hash = None
             if up.output_snapshot_ref:
                 content_hash = self.db.execute(
@@ -834,16 +940,27 @@ class WorkflowExecutionService(BaseService):
                     )
 
     def _cancel_pending_nodes(self, workflow_run_id: str) -> None:
-        pending_nodes: List[WorkflowNodeRun] = self.db.query(WorkflowNodeRun).filter(
-            and_(
-                WorkflowNodeRun.workflow_run_id == workflow_run_id,
-                WorkflowNodeRun.status == WorkflowNodeRunStatus.PENDING,
+        """Cancels every not-yet-dispatched node. Per node, a compare-and-swap
+        on PENDING: a node a concurrent dispatcher claimed between the read
+        and the write is left alone (it is RUNNING and is cancelled through
+        its AgentRun instead) -- a blind status write here could mark a node
+        CANCELLED while its job is queued and about to run."""
+        pending_ids = [
+            row[0]
+            for row in self.db.execute(
+                select(WorkflowNodeRun.id).where(
+                    WorkflowNodeRun.workflow_run_id == workflow_run_id,
+                    WorkflowNodeRun.status == WorkflowNodeRunStatus.PENDING,
+                )
+            ).all()
+        ]
+        for node_run_id in pending_ids:
+            self._cas_node_run(
+                node_run_id,
+                WorkflowNodeRunStatus.PENDING,
+                status=WorkflowNodeRunStatus.CANCELLED,
+                ended_at=datetime.now(timezone.utc),
             )
-        ).all()
-
-        for node_run in pending_nodes:
-            node_run.status = WorkflowNodeRunStatus.CANCELLED
-            node_run.ended_at = datetime.now(timezone.utc)
 
         self.db.commit()
 
@@ -898,8 +1015,7 @@ class WorkflowExecutionService(BaseService):
         request time/user."""
         self._cancel_pending_nodes(workflow_run.id)
         self._cancel_waiting_approval_nodes(workflow_run, workflow_run.cancellation_requested_by)
-        node_runs = self.db.query(WorkflowNodeRun).filter(WorkflowNodeRun.workflow_run_id == workflow_run.id).all()
-        self._heal_agent_nodes(node_runs)
+        self._heal_agent_nodes(self._fresh_node_runs(workflow_run.id))
         self._check_workflow_complete(workflow_run.id)
 
     def _heal_agent_nodes(self, node_runs: List[WorkflowNodeRun]) -> None:
@@ -911,9 +1027,9 @@ class WorkflowExecutionService(BaseService):
         for node_run in node_runs:
             if not (node_run.agent_run_id and node_run.status == WorkflowNodeRunStatus.RUNNING):
                 continue
-            agent_run: Optional[AgentRun] = self.db.query(AgentRun).filter(
-                AgentRun.id == node_run.agent_run_id
-            ).first()
+            agent_run: Optional[AgentRun] = self.db.execute(
+                select(AgentRun).where(AgentRun.id == node_run.agent_run_id).execution_options(populate_existing=True)
+            ).scalar_one_or_none()
             if agent_run is None:
                 continue
             if agent_run.status in (AgentRunStatus.COMPLETED, AgentRunStatus.FAILED, AgentRunStatus.STOPPED):
@@ -954,14 +1070,15 @@ class WorkflowExecutionService(BaseService):
 
         # Sequential-only: multiple ready = parallel (unsupported in MA7.2)
         if len(ready) > 1:
-            self._emit_event(
-                workflow_run.task_run_id,
-                "workflow.error",
-                workflow_run_id=workflow_run_id,
-                error=f"Multiple nodes ready: parallel execution unsupported in MA7.2",
-            )
-            workflow_run.status = WorkflowRunStatus.FAILED
+            failed = self._cas_run(workflow_run_id, WorkflowRunStatus.RUNNING, status=WorkflowRunStatus.FAILED)
             self.db.commit()
+            if failed:
+                self._emit_event(
+                    workflow_run.task_run_id,
+                    "workflow.error",
+                    workflow_run_id=workflow_run_id,
+                    error="Multiple nodes ready: parallel execution unsupported in MA7.2",
+                )
             return
 
         for node_run in ready:
@@ -976,47 +1093,49 @@ class WorkflowExecutionService(BaseService):
         self._check_workflow_complete(workflow_run_id)
 
     def _find_ready_nodes(self, workflow_run_id: str) -> List[WorkflowNodeRun]:
-        """Find PENDING nodes with all dependencies COMPLETED.
+        """Find PENDING nodes whose incoming dependencies are ALL COMPLETED
+        (an entry node, with no incoming edge, is ready).
 
-        Ready = no incoming edges OR all upstream nodes COMPLETED.
+        Decided from CURRENT committed state -- both the node runs and the
+        edges are read with ``populate_existing`` -- never from whatever
+        this session happened to load earlier: with several processes
+        completing nodes concurrently, a stale "not COMPLETED yet" would
+        stall a downstream node, and a stale "still PENDING" could re-offer a
+        node another process already claimed. Returned in node_key order so
+        dispatch order is deterministic.
         """
-        ready: List[WorkflowNodeRun] = []
+        run = self._fresh_run(workflow_run_id)
+        if run is None:
+            return []
 
-        node_runs: List[WorkflowNodeRun] = self.db.query(WorkflowNodeRun).filter(
-            and_(
-                WorkflowNodeRun.workflow_run_id == workflow_run_id,
-                WorkflowNodeRun.status == WorkflowNodeRunStatus.PENDING,
-            )
-        ).all()
-
-        for node_run in node_runs:
-            # Find incoming edges for this node
-            incoming_edges: List[WorkflowEdge] = self.db.query(WorkflowEdge).filter(
-                WorkflowEdge.to_node_id == node_run.workflow_node_id
+        node_runs = self._fresh_node_runs(workflow_run_id)
+        status_by_node = {nr.workflow_node_id: nr.status for nr in node_runs}
+        keys: Dict[str, str] = {
+            node_id: node_key
+            for node_id, node_key in self.db.execute(
+                select(WorkflowNode.id, WorkflowNode.node_key).where(
+                    WorkflowNode.workflow_version_id == run.workflow_version_id
+                )
             ).all()
+        }
+        sources_of: Dict[str, List[str]] = {}
+        for edge in self.db.execute(
+            select(WorkflowEdge)
+            .where(WorkflowEdge.workflow_version_id == run.workflow_version_id)
+            .execution_options(populate_existing=True)
+        ).scalars():
+            sources_of.setdefault(edge.to_node_id, []).append(edge.from_node_id)
 
-            # No incoming = entry node, ready
-            if not incoming_edges:
-                ready.append(node_run)
+        ready: List[WorkflowNodeRun] = []
+        for node_run in node_runs:
+            if node_run.status != WorkflowNodeRunStatus.PENDING:
                 continue
-
-            # Check if all dependencies completed
-            all_deps_done = True
-            for edge in incoming_edges:
-                dep_node_run: Optional[WorkflowNodeRun] = self.db.query(WorkflowNodeRun).filter(
-                    and_(
-                        WorkflowNodeRun.workflow_run_id == workflow_run_id,
-                        WorkflowNodeRun.workflow_node_id == edge.from_node_id,
-                    )
-                ).first()
-
-                if not dep_node_run or dep_node_run.status != WorkflowNodeRunStatus.COMPLETED:
-                    all_deps_done = False
-                    break
-
-            if all_deps_done:
+            sources = sources_of.get(node_run.workflow_node_id, [])
+            # A missing source node run counts as "not COMPLETED".
+            if all(status_by_node.get(source) == WorkflowNodeRunStatus.COMPLETED for source in sources):
                 ready.append(node_run)
 
+        ready.sort(key=lambda nr: (keys.get(nr.workflow_node_id, ""), nr.id))
         return ready
 
     def _dispatch_node_for_execution(self, node_run: WorkflowNodeRun) -> None:
@@ -1044,16 +1163,21 @@ class WorkflowExecutionService(BaseService):
 
         # Handle TERMINAL: no execution needed
         if node.node_type == WorkflowNodeType.TERMINAL:
-            node_run.status = WorkflowNodeRunStatus.COMPLETED
-            node_run.ended_at = datetime.now(timezone.utc)
+            completed = self._cas_node_run(
+                node_run.id,
+                WorkflowNodeRunStatus.PENDING,
+                status=WorkflowNodeRunStatus.COMPLETED,
+                ended_at=datetime.now(timezone.utc),
+            )
             self.db.commit()
 
-            self._emit_event(
-                workflow_run.task_run_id,
-                "workflow.node.completed",
-                workflow_run_id=workflow_run.id,
-                workflow_node_run_id=node_run.id,
-            )
+            if completed:  # only the dispatcher that made the change records it
+                self._emit_event(
+                    workflow_run.task_run_id,
+                    "workflow.node.completed",
+                    workflow_run_id=workflow_run.id,
+                    workflow_node_run_id=node_run.id,
+                )
             return
 
         # HUMAN_APPROVAL: a durable wait for a human, never an execution.
@@ -1126,17 +1250,21 @@ class WorkflowExecutionService(BaseService):
         )
 
         # Record immutable upstream artifact lineage
-        upstream_artifacts: List[str] = self._collect_upstream_artifacts(node_run)
-        upstream_node_runs: List[WorkflowNodeRun] = self._get_upstream_node_runs(node_run)
+        sources = self._upstream_sources(node_run)
+        upstream_evidence = self._upstream_evidence(sources)
 
-        if upstream_artifacts or upstream_node_runs:
+        if upstream_evidence or sources:
             agent_run.input_context_json = {
                 # ``kind`` lets AgentExecutionService render the upstream
                 # artifacts' actual content into this agent's prompt
                 # (MA7.3b); the ids remain the immutable lineage record.
                 "kind": "workflow_upstream",
-                "upstream_artifact_ids": upstream_artifacts,
-                "upstream_node_run_ids": [nr.id for nr in upstream_node_runs],
+                # Canonical order: source node_key ascending; each artifact id
+                # appears once. ``upstream`` labels every artifact with the
+                # node(s) that produced it (MA7.4a).
+                "upstream_artifact_ids": [entry["artifact_id"] for entry in upstream_evidence],
+                "upstream_node_run_ids": [nr.id for _key, nr in sources],
+                "upstream": upstream_evidence,
             }
 
         # Apply model policy override if present
@@ -1176,100 +1304,108 @@ class WorkflowExecutionService(BaseService):
             agent_run_id=agent_run.id,
         )
 
+    def _upstream_sources(self, node_run: WorkflowNodeRun) -> List[Tuple[str, WorkflowNodeRun]]:
+        """The COMPLETED source node runs of ``node_run``'s incoming edges, as
+        ``(source node_key, source node run)`` pairs in CANONICAL order:
+        ``node_key`` ascending (unique and immutable within a workflow
+        version, so identical across runs and restarts), ``node_run.id`` only
+        as a tie-break. Never edge-insertion or database order. Read from
+        current committed state."""
+        from_ids = [
+            row[0]
+            for row in self.db.execute(
+                select(WorkflowEdge.from_node_id).where(WorkflowEdge.to_node_id == node_run.workflow_node_id)
+            ).all()
+        ]
+        if not from_ids:
+            return []
+        rows = self.db.execute(
+            select(WorkflowNode.node_key, WorkflowNodeRun)
+            .join(WorkflowNodeRun, WorkflowNodeRun.workflow_node_id == WorkflowNode.id)
+            .where(
+                WorkflowNode.id.in_(from_ids),
+                WorkflowNodeRun.workflow_run_id == node_run.workflow_run_id,
+                WorkflowNodeRun.status == WorkflowNodeRunStatus.COMPLETED,
+            )
+            .execution_options(populate_existing=True)
+        ).all()
+        return sorted(((key, nr) for key, nr in rows), key=lambda pair: (pair[0], pair[1].id))
+
+    @staticmethod
+    def _upstream_evidence(sources: List[Tuple[str, WorkflowNodeRun]]) -> List[Dict[str, Any]]:
+        """Immutable, labelled upstream evidence for a downstream node: one
+        entry per DISTINCT artifact id, in canonical (source node_key
+        ascending) order. When several sources yield the same artifact
+        (e.g. a diamond, or a pass-through) the first source in canonical
+        order is the entry's ``node_key``/``node_run_id`` and every source is
+        listed in ``source_node_keys`` -- nothing is silently dropped, and
+        the result never depends on edge order."""
+        by_artifact: Dict[str, Dict[str, Any]] = {}
+        for key, source in sources:
+            artifact_id = source.output_snapshot_ref
+            if not artifact_id:
+                continue
+            entry = by_artifact.get(artifact_id)
+            if entry is None:
+                by_artifact[artifact_id] = {
+                    "artifact_id": artifact_id,
+                    "node_key": key,
+                    "node_run_id": source.id,
+                    "source_node_keys": [key],
+                }
+            elif key not in entry["source_node_keys"]:
+                entry["source_node_keys"].append(key)
+        return list(by_artifact.values())
+
     def _collect_upstream_artifacts(self, node_run: WorkflowNodeRun) -> List[str]:
-        """Collect immutable upstream artifact references (output_snapshot_refs)."""
-        artifacts: List[str] = []
-
-        upstream_nodes: List[WorkflowNodeRun] = self._get_upstream_node_runs(node_run)
-        for upstream_node_run in upstream_nodes:
-            if upstream_node_run.output_snapshot_ref:
-                artifacts.append(upstream_node_run.output_snapshot_ref)
-
-        return artifacts
+        """Immutable upstream artifact ids: canonical order, de-duplicated."""
+        return [entry["artifact_id"] for entry in self._upstream_evidence(self._upstream_sources(node_run))]
 
     def _get_upstream_node_runs(self, node_run: WorkflowNodeRun) -> List[WorkflowNodeRun]:
-        """Get all upstream completed node runs for a given node."""
-        node: Optional[WorkflowNode] = self.db.query(WorkflowNode).filter(
-            WorkflowNode.id == node_run.workflow_node_id
-        ).first()
-        if not node:
-            return []
-
-        incoming_edges: List[WorkflowEdge] = self.db.query(WorkflowEdge).filter(
-            WorkflowEdge.to_node_id == node.id
-        ).all()
-
-        upstream: List[WorkflowNodeRun] = []
-        for edge in incoming_edges:
-            upstream_node_run: Optional[WorkflowNodeRun] = self.db.query(WorkflowNodeRun).filter(
-                and_(
-                    WorkflowNodeRun.workflow_run_id == node_run.workflow_run_id,
-                    WorkflowNodeRun.workflow_node_id == edge.from_node_id,
-                    WorkflowNodeRun.status == WorkflowNodeRunStatus.COMPLETED,
-                )
-            ).first()
-            if upstream_node_run:
-                upstream.append(upstream_node_run)
-
-        return upstream
+        """All upstream COMPLETED node runs, in canonical (node_key) order."""
+        return [source for _key, source in self._upstream_sources(node_run)]
 
     def _check_workflow_complete(self, workflow_run_id: str) -> None:
-        """Check if workflow is terminal and update status.
+        """Finalize a run whose nodes have all reached a terminal status.
 
-        Complete when all nodes are terminal.
-        Idempotent: multiple calls safe.
+        Decided from CURRENT committed state, and applied as a
+        compare-and-swap on the status that was observed, so it is idempotent
+        and safe to call from any number of processes: exactly one caller
+        makes the transition and records its evidence; the rest are no-ops.
+        This is also the finalize-on-drain step -- a CANCELLING run becomes
+        CANCELLED the moment its last in-flight node is terminal (completed
+        siblings keep their results); a failed node makes the run FAILED
+        (failure outranks cancellation).
         """
-        workflow_run: Optional[WorkflowRun] = self.db.query(WorkflowRun).filter(
-            WorkflowRun.id == workflow_run_id
-        ).first()
+        workflow_run: Optional[WorkflowRun] = self._fresh_run(workflow_run_id)
         if not workflow_run:
             return
 
-        if workflow_run.status not in (WorkflowRunStatus.RUNNING, WorkflowRunStatus.CANCELLING):
-            return  # Already terminal
+        observed = workflow_run.status
+        if observed not in (WorkflowRunStatus.RUNNING, WorkflowRunStatus.CANCELLING):
+            return  # not active, or already terminal
 
-        node_runs: List[WorkflowNodeRun] = self.db.query(WorkflowNodeRun).filter(
-            WorkflowNodeRun.workflow_run_id == workflow_run_id
-        ).all()
-
-        all_terminal = True
-        has_failure = False
-
-        for node_run in node_runs:
-            if node_run.status not in (
+        statuses = [nr.status for nr in self._fresh_node_runs(workflow_run_id)]
+        if any(
+            status
+            not in (
                 WorkflowNodeRunStatus.COMPLETED,
                 WorkflowNodeRunStatus.FAILED,
                 WorkflowNodeRunStatus.CANCELLED,
-            ):
-                all_terminal = False
-                break
+            )
+            for status in statuses
+        ):
+            return  # something is still in flight
 
-            if node_run.status == WorkflowNodeRunStatus.FAILED:
-                has_failure = True
+        if WorkflowNodeRunStatus.FAILED in statuses:
+            target, event, summary = WorkflowRunStatus.FAILED, "workflow.failed", None
+        elif observed == WorkflowRunStatus.CANCELLING:
+            target, event, summary = WorkflowRunStatus.CANCELLED, "workflow.cancelled", "cancellation complete"
+        else:
+            target, event, summary = WorkflowRunStatus.COMPLETED, "workflow.completed", None
 
-        if all_terminal:
-            workflow_run.ended_at = datetime.now(timezone.utc)
-
-            if has_failure:
-                workflow_run.status = WorkflowRunStatus.FAILED
-                self._emit_event(
-                    workflow_run.task_run_id,
-                    "workflow.failed",
-                    workflow_run_id=workflow_run_id,
-                )
-            elif workflow_run.status == WorkflowRunStatus.CANCELLING:
-                workflow_run.status = WorkflowRunStatus.CANCELLED
-                self._emit_event(
-                    workflow_run.task_run_id,
-                    "workflow.cancelled",
-                    workflow_run_id=workflow_run_id,
-                )
-            else:
-                workflow_run.status = WorkflowRunStatus.COMPLETED
-                self._emit_event(
-                    workflow_run.task_run_id,
-                    "workflow.completed",
-                    workflow_run_id=workflow_run_id,
-                )
-
-            self.db.commit()
+        won = self._cas_run(workflow_run_id, observed, status=target, ended_at=_now())
+        self.db.commit()
+        if won:
+            extra = {"decision_summary": summary} if summary else {}
+            self._emit_event(workflow_run.task_run_id, event, workflow_run_id=workflow_run_id, **extra)

@@ -17,31 +17,35 @@ what proves a later re-derivation matches what was actually sent.
 import hashlib
 import json
 from dataclasses import dataclass
-from typing import Optional, Sequence, Tuple
+from typing import Mapping, Optional, Sequence, Tuple
 
 from app.models.agents import AgentVersion, PromptVersion
 from app.models.tasks import Task
 
 
-def build_workflow_upstream_extra_context(upstream: Sequence[Tuple[str, str, str]]) -> str:
+def build_workflow_upstream_extra_context(
+    upstream: Sequence[Tuple[str, str, str]], source_labels: Optional[Mapping[str, str]] = None
+) -> str:
     """MA7.3b: renders the upstream Workflow nodes' output artifacts -- the
     (artifact_id, sha256, text) triples the engine recorded in an Agent
     Run's ``input_context_json`` -- as the ``extra_context`` block of the
     downstream Agent's prompt, so a downstream node actually receives the
     (human-approved) upstream output rather than only a lineage id. The
-    sha256 is included so the exact reviewed content is identifiable."""
+    sha256 is included so the exact reviewed content is identifiable.
+
+    MA7.4a: ``source_labels`` (artifact_id -> the producing node_key(s), as
+    recorded by the engine) adds a ``source_node`` line to each block, so a
+    node with several upstream inputs can tell them apart. Blocks appear in
+    the order given, which the engine makes canonical (node_key ascending)."""
+    labels = source_labels or {}
     parts = []
     for artifact_id, artifact_sha256, text in upstream:
+        parts.append("--- UPSTREAM WORKFLOW OUTPUT ---")
+        parts.append(f"artifact_id: {artifact_id}")
+        if artifact_id in labels:
+            parts.append(f"source_node: {labels[artifact_id]}")
         parts.extend(
-            [
-                "--- UPSTREAM WORKFLOW OUTPUT ---",
-                f"artifact_id: {artifact_id}",
-                f"artifact_sha256: {artifact_sha256}",
-                "",
-                text,
-                "",
-                "--- END UPSTREAM WORKFLOW OUTPUT ---",
-            ]
+            [f"artifact_sha256: {artifact_sha256}", "", text, "", "--- END UPSTREAM WORKFLOW OUTPUT ---"]
         )
     return "\n".join(parts)
 

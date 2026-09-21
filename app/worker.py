@@ -57,6 +57,7 @@ class Worker:
         internal_test_work_seconds: float = 0.3,
         internal_test_iterations: int = 3,
         session_factory: Optional[sessionmaker] = None,
+        reconcile_interval_seconds: Optional[float] = None,
     ):
         self.worker_id = worker_id or new_worker_id()
         self._session_factory = session_factory or _default_session_factory
@@ -67,6 +68,15 @@ class Worker:
         )
         self.internal_test_work_seconds = internal_test_work_seconds
         self.internal_test_iterations = internal_test_iterations
+        # MA7.4a: how often an IDLE worker re-runs the workflow reconciliation
+        # sweep (0 = never; the startup sweep is unconditional). Explicit None
+        # check: 0 is a meaningful value here.
+        self.reconcile_interval_seconds = (
+            settings.worker_reconcile_interval_seconds
+            if reconcile_interval_seconds is None
+            else reconcile_interval_seconds
+        )
+        self._last_reconcile = time.monotonic()
 
         self._repo = JobQueueRepository()
         self._shutdown = threading.Event()
@@ -100,7 +110,7 @@ class Worker:
             # SIGTERM isn't meaningfully overridable on some platforms/threads.
             pass
 
-    def reconcile_workflows(self) -> int:
+    def reconcile_workflows(self, *, periodic: bool = False) -> int:
         """MA7.3: idempotent recovery sweep over every non-terminal
         WorkflowRun -- heals a run a previous process left mid-transition
         (e.g. an approved gate whose next node was never dispatched) and
@@ -109,13 +119,20 @@ class Worker:
         startup): every change it makes is a compare-and-swap or
         unique-constraint-guarded insert. Never raises -- a failing sweep
         must not stop the worker from claiming jobs. Returns the number of
-        runs reconciled (0 on failure)."""
+        runs reconciled (0 on failure). ``periodic`` sweeps (MA7.4a) log at
+        DEBUG so an idle worker stays quiet."""
         from app.services.workflow_execution_service import WorkflowExecutionService
 
         db = self._session_factory()
         try:
             reconciled = WorkflowExecutionService(db).reconcile_active_runs()
-            logger.info("worker_workflow_reconciliation worker_id=%s runs=%s", self.worker_id, reconciled)
+            logger.log(
+                logging.DEBUG if periodic else logging.INFO,
+                "worker_workflow_reconciliation worker_id=%s runs=%s periodic=%s",
+                self.worker_id,
+                reconciled,
+                periodic,
+            )
             return reconciled
         except Exception:
             logger.exception("worker_workflow_reconciliation_failed worker_id=%s", self.worker_id)
@@ -127,13 +144,33 @@ class Worker:
         self._install_signal_handlers()
         logger.info("worker_started worker_id=%s", self.worker_id)
         self.reconcile_workflows()
+        self._last_reconcile = time.monotonic()
         try:
             while not self._shutdown.is_set():
                 processed = self.run_once()
                 if not processed and not self._shutdown.is_set():
+                    # Idle: the one place a periodic recovery sweep may run.
+                    # It is throttled to reconcile_interval_seconds, so the
+                    # loop never spins on it -- the wait below still paces it.
+                    self._reconcile_if_due()
                     self._shutdown.wait(self.poll_interval_seconds)
         finally:
             logger.info("worker_stopped worker_id=%s", self.worker_id)
+
+    def _reconcile_if_due(self) -> Optional[int]:
+        """Runs the workflow reconciliation sweep if this worker is idle and
+        at least ``reconcile_interval_seconds`` have passed since the last
+        one (startup included). Returns the sweep result, or ``None`` when
+        disabled or not yet due. The clock is advanced *before* the sweep, so
+        a failing sweep is retried on the next interval, never in a tight
+        loop. Uses the existing sweep -- no second scheduler."""
+        if self.reconcile_interval_seconds <= 0:
+            return None
+        now = time.monotonic()
+        if now - self._last_reconcile < self.reconcile_interval_seconds:
+            return None
+        self._last_reconcile = now
+        return self.reconcile_workflows(periodic=True)
 
     # -- one claim/process cycle ----------------------------------------
 

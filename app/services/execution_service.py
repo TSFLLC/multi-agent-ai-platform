@@ -515,6 +515,14 @@ class AgentExecutionService:
         the content that was produced -- and, behind an approval gate, exactly
         what the human approved -- or the run fails with a categorized error;
         it never proceeds on missing or altered upstream output."""
+        # ids are the authority (canonical, de-duplicated); ``upstream`` only
+        # supplies the producing node_key label(s) for each -- absent on runs
+        # dispatched before MA7.4a, which simply render unlabelled.
+        labels = {
+            entry["artifact_id"]: ", ".join(entry.get("source_node_keys") or [entry.get("node_key", "")])
+            for entry in input_context.get("upstream") or []
+            if entry.get("artifact_id") and (entry.get("source_node_keys") or entry.get("node_key"))
+        }
         upstream = []
         for artifact_id in input_context.get("upstream_artifact_ids") or []:
             artifact = self.db.get(Artifact, artifact_id)
@@ -532,7 +540,7 @@ class AgentExecutionService:
                     f"Upstream artifact {artifact_id} content no longer matches its recorded sha256."
                 )
             upstream.append((artifact.id, artifact.content_hash or "", text))
-        return build_workflow_upstream_extra_context(upstream) if upstream else None
+        return build_workflow_upstream_extra_context(upstream, labels) if upstream else None
 
     def _build_evaluator_extra_context(self, input_context: dict) -> str:
         """MA6 Slice 3B: renders the subject task's own title/description/

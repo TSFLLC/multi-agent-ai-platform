@@ -60,6 +60,11 @@ class Settings(BaseSettings):
     worker_lease_seconds: int = 30
     worker_heartbeat_interval_seconds: float = 10.0
     worker_id_prefix: str = "worker"
+    # MA7.4a: while the worker is idle it re-runs the (idempotent) workflow
+    # reconciliation sweep at most this often, so a transient failure after
+    # a commit (e.g. a locked database) is recovered without a restart.
+    # 0 disables the periodic sweep (the startup sweep always runs).
+    worker_reconcile_interval_seconds: float = 60.0
 
     # Agent Run / Task Run defaults (Owner decision, frozen) — overridable
     # per-row (agent_runs.timeout_seconds / task_runs.timeout_seconds),
@@ -95,6 +100,15 @@ class Settings(BaseSettings):
         if upper not in allowed:
             raise ValueError(f"log_level must be one of {sorted(allowed)}, got {v!r}")
         return upper
+
+    @field_validator("worker_reconcile_interval_seconds")
+    @classmethod
+    def _validate_reconcile_interval(cls, v: float) -> float:
+        # Bounded: either disabled (0) or no more often than once a second --
+        # never a busy loop.
+        if v != 0 and v < 1.0:
+            raise ValueError("worker_reconcile_interval_seconds must be 0 (disabled) or >= 1.0")
+        return v
 
     @model_validator(mode="after")
     def _reject_unexplained_remote_bind(self) -> "Settings":
