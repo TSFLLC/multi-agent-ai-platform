@@ -15,6 +15,7 @@ from app.auth import get_current_user
 from app.authz import ProjectAction, check_project_access
 from app.db.enums import ApprovalScope, VersionStatus
 from app.errors import NotFoundError
+from app.models.evaluation_runs import EvaluationRun
 from app.models.governance import Approval
 from app.models.identity import User
 from app.models.workflow import Workflow, WorkflowNodeRun, WorkflowRun, WorkflowVersion
@@ -481,6 +482,20 @@ def list_workflow_node_runs(
         ).all()
     }
 
+    agent_run_ids = [nr.agent_run_id for nr in node_runs if nr.agent_run_id]
+    evaluation_run_ids: Dict[str, str] = (
+        {
+            evaluator_agent_run_id: evaluation_run_id
+            for evaluator_agent_run_id, evaluation_run_id in db.execute(
+                select(EvaluationRun.evaluator_agent_run_id, EvaluationRun.id).where(
+                    EvaluationRun.evaluator_agent_run_id.in_(agent_run_ids)
+                )
+            ).all()
+        }
+        if agent_run_ids
+        else {}
+    )
+
     return [
         WorkflowNodeRunRead(
             id=nr.id,
@@ -490,6 +505,7 @@ def list_workflow_node_runs(
             status=nr.status,
             agent_run_id=nr.agent_run_id,
             approval_id=approval_ids.get(nr.id),
+            evaluation_run_id=evaluation_run_ids.get(nr.agent_run_id) if nr.agent_run_id else None,
         )
         for nr in node_runs
     ]

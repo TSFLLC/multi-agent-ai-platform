@@ -50,12 +50,20 @@ from app.db.enums import (
     WorkflowRunStatus,
     WorkflowNodeRunStatus,
     WorkflowNodeType,
+    EvaluationRunStatus,
     JobType,
     JobQueueStatus,
     VersionStatus,
 )
-from app.errors import FingerprintMismatchError, InvalidStateTransitionError
+from app.errors import (
+    ArtifactHashMismatchError,
+    ConflictError,
+    FingerprintMismatchError,
+    InvalidStateTransitionError,
+    NotFoundError,
+)
 from app.models.artifacts_eval import Artifact
+from app.models.evaluation_runs import EvaluationRun
 from app.models.execution import JobQueue
 from app.models.governance import Approval
 from app.models.tasks import Task, TaskRun, AgentRun
@@ -66,6 +74,7 @@ from app.services.approval_service import (
     compute_action_fingerprint,
 )
 from app.services.base import BaseService
+from app.services.workflow_validation_service import evaluation_dependency_problems
 from app.services.flight_recorder import FlightRecorderService
 from app.repositories.job_queue_repository import JobQueueRepository
 
@@ -457,6 +466,22 @@ class WorkflowExecutionService(BaseService):
                 f"the maximum is {settings.workflow_max_fan_out}"
             )
 
+        # MA7.5A preflight: every EVALUATION node's frozen dependencies (its
+        # Evaluation Definition Version and evaluator Agent Version) must STILL
+        # be valid and ACTIVE. If one was deprecated/retired after publication
+        # the run is refused NOW -- before Planner/Engineer/provider work has
+        # incurred cost -- and the version is never silently swapped for a
+        # newer one: reproducibility outranks convenience.
+        evaluation_problems: List[str] = []
+        for node in sorted(nodes, key=lambda n: n.node_key):
+            if node.node_type == WorkflowNodeType.EVALUATION:
+                evaluation_problems.extend(evaluation_dependency_problems(self.db, node, workflow.project_id))
+        if evaluation_problems:
+            raise WorkflowExecutionError(
+                "Workflow version's evaluation dependencies are no longer valid; refusing to start: "
+                + "; ".join(evaluation_problems)
+            )
+
         # Create WorkflowRun
         workflow_run = WorkflowRun(
             task_run_id=task_run_id,
@@ -551,7 +576,20 @@ class WorkflowExecutionService(BaseService):
         ids = {"workflow_run_id": workflow_run.id, "workflow_node_run_id": node_run.id}
         events: List[Tuple[str, Dict[str, Any]]] = []
 
-        if agent_run.status == AgentRunStatus.COMPLETED:
+        # An EVALUATION node's outcome is its EvaluationRun's, NOT its
+        # evaluator Agent Run's: the evaluator can COMPLETE while its output is
+        # rejected (malformed JSON, wrong criteria, evidence that no longer
+        # verifies) -- that EvaluationRun is FAILED and so is the node. A valid
+        # EvaluationRun full of NOT_MET findings is evidence, not failure: the
+        # node COMPLETES. Everything below is keyed on ``agent_status``.
+        agent_status: Optional[AgentRunStatus] = agent_run.status
+        node_type = self.db.execute(
+            select(WorkflowNode.node_type).where(WorkflowNode.id == node_run.workflow_node_id)
+        ).scalar_one_or_none()
+        if node_type == WorkflowNodeType.EVALUATION:
+            agent_status = self._evaluation_outcome(agent_run)
+
+        if agent_status == AgentRunStatus.COMPLETED:
             # Capture output artifact reference (immutable)
             artifact_id = self.db.execute(
                 select(Artifact.id)
@@ -565,7 +603,7 @@ class WorkflowExecutionService(BaseService):
             if self._cas_node_run(node_run.id, WorkflowNodeRunStatus.RUNNING, **values):
                 events.append(("workflow.node.completed", ids))
 
-        elif agent_run.status == AgentRunStatus.FAILED:
+        elif agent_status == AgentRunStatus.FAILED:
             # Only the node is recorded here. What a failure MEANS for the run
             # (stop dispatching, stop the siblings, close the gates, finalize
             # once drained) is ``_propagate_failure``, reached through
@@ -579,7 +617,7 @@ class WorkflowExecutionService(BaseService):
             ):
                 events.append(("workflow.node.failed", ids))
 
-        elif agent_run.status in (AgentRunStatus.STOPPED, AgentRunStatus.CANCELLING):
+        elif agent_status in (AgentRunStatus.STOPPED, AgentRunStatus.CANCELLING):
             if self._cas_node_run(
                 node_run.id,
                 WorkflowNodeRunStatus.RUNNING,
@@ -598,6 +636,64 @@ class WorkflowExecutionService(BaseService):
             self._emit_event(workflow_run.task_run_id, event_type, **fields)
 
         self._advance_run(workflow_run.id)
+
+    def _evaluation_outcome(self, agent_run: AgentRun) -> Optional[AgentRunStatus]:
+        """The outcome of an EVALUATION node, as the ``AgentRunStatus`` the
+        completion handler already maps to a node status -- decided from the
+        node's EvaluationRun (found through the UNIQUE
+        ``EvaluationRun.evaluator_agent_run_id`` == the node's ``agent_run_id``):
+
+        * EvaluationRun COMPLETED -> COMPLETED; FAILED -> FAILED; CANCELLED ->
+          STOPPED. Each of these is exactly the EvaluationRun's own verdict.
+        * evaluator Agent Run terminal but the EvaluationRun not finalized yet
+          (the MA6 terminal notification never ran: a crash between the
+          TaskRun's terminal commit and the notify) -> finalize it NOW through
+          MA6's compare-and-swap finalizer, then map. Safe however many
+          callers/sweeps do this at once: exactly one writes the result.
+        * the evaluator still in flight -> ``None``: nothing to record yet.
+        * no EvaluationRun at all (cannot happen after the atomic dispatch) ->
+          FAILED, fail closed, once the agent is terminal.
+        """
+        from app.services.evaluation_execution_service import EvaluationExecutionService
+
+        agent_terminal = agent_run.status in (
+            AgentRunStatus.COMPLETED,
+            AgentRunStatus.FAILED,
+            AgentRunStatus.STOPPED,
+            AgentRunStatus.CANCELLING,
+        )
+
+        def fresh_run() -> Optional[EvaluationRun]:
+            return self.db.execute(
+                select(EvaluationRun)
+                .where(EvaluationRun.evaluator_agent_run_id == agent_run.id)
+                .execution_options(populate_existing=True)
+            ).scalar_one_or_none()
+
+        evaluation_run = fresh_run()
+        if evaluation_run is None:
+            return AgentRunStatus.FAILED if agent_terminal else None
+        if evaluation_run.status in (EvaluationRunStatus.PENDING, EvaluationRunStatus.RUNNING):
+            if not agent_terminal:
+                return None
+            as_task_run_status = {
+                AgentRunStatus.COMPLETED: TaskRunStatus.COMPLETED,
+                AgentRunStatus.FAILED: TaskRunStatus.FAILED,
+            }.get(agent_run.status, TaskRunStatus.CANCELLED)
+            EvaluationExecutionService(self.db).finalize_agent_evaluator_run(
+                evaluation_run.id, task_run_status=as_task_run_status
+            )
+            evaluation_run = fresh_run()
+            if evaluation_run is None or evaluation_run.status in (
+                EvaluationRunStatus.PENDING,
+                EvaluationRunStatus.RUNNING,
+            ):
+                return None
+        return {
+            EvaluationRunStatus.COMPLETED: AgentRunStatus.COMPLETED,
+            EvaluationRunStatus.FAILED: AgentRunStatus.FAILED,
+            EvaluationRunStatus.CANCELLED: AgentRunStatus.STOPPED,
+        }[evaluation_run.status]
 
     def _advance_run(self, workflow_run_id: str) -> None:
         """Make whatever progress is currently possible for a run, from
@@ -1542,6 +1638,12 @@ class WorkflowExecutionService(BaseService):
             self._dispatch_human_approval(node_run, node, workflow_run)
             return
 
+        # EVALUATION (MA7.5A): one MA6 agent-evaluator run over one upstream
+        # AGENT node's output artifact.
+        if node.node_type == WorkflowNodeType.EVALUATION:
+            self._dispatch_evaluation(node_run, node, workflow_run)
+            return
+
         # Unsupported node type (JUDGE, CONSENSUS, CONDITIONAL, PARALLEL_GROUP,
         # REPAIR_LOOP): fail closed -- never repurposed as a fan-out.
         if node.node_type != WorkflowNodeType.AGENT:
@@ -1643,6 +1745,149 @@ class WorkflowExecutionService(BaseService):
             workflow_run_id=workflow_run.id,
             workflow_node_run_id=node_run.id,
             agent_run_id=agent_run.id,
+        )
+
+    def _dispatch_evaluation(self, node_run: WorkflowNodeRun, node: WorkflowNode, workflow_run: WorkflowRun) -> None:
+        """Dispatches an EVALUATION node: exactly one MA6 EvaluationRun over
+        the single output artifact of its single upstream AGENT node.
+
+        Order of operations (everything that can fail closed does so BEFORE
+        any row exists):
+
+        1. structure + frozen configuration re-checked (defense in depth
+           behind publish validation);
+        2. the subject is resolved -- the upstream AGENT node's COMPLETED
+           AgentRun and its output artifact -- and its ownership, stored hash
+           AND actual file bytes are verified (a missing/foreign/tampered
+           artifact fails the node here, not later, and never reaches an
+           evaluator);
+        3. MA6's non-committing builder constructs the evaluator's Task,
+           TaskRun, AgentRun and the EvaluationRun (flushed only);
+        4. the per-node compare-and-swap claim links
+           ``WorkflowNodeRun.agent_run_id`` = the evaluator AgentRun and
+           commits EVERYTHING in one transaction -- a dispatcher that loses
+           the race rolls all of it back: no Task, TaskRun, AgentRun,
+           EvaluationRun or job survives;
+        5. exactly one ordinary AGENT_RUN job is enqueued (the unmodified MA3
+           pipeline executes it; MA6's terminal notification finalizes the
+           EvaluationRun).
+
+        No score, ranking, winner or approval exists anywhere in this path.
+        """
+        from app.services.evaluation_execution_service import (
+            EvaluationExecutionService,
+            verify_artifact_bytes,
+        )
+
+        if not self._accepts_dispatch(workflow_run.id):
+            return
+        config = node.config or {}
+        definition_version_id = config.get("evaluation_definition_version_id")
+        evaluator_agent_version_id = config.get("evaluator_agent_version_id")
+        if not isinstance(definition_version_id, str) or not isinstance(evaluator_agent_version_id, str):
+            self._fail_node_at_dispatch(
+                node_run,
+                workflow_run,
+                "EVALUATION node missing config.evaluation_definition_version_id / evaluator_agent_version_id",
+            )
+            return
+
+        incoming = self.db.query(WorkflowEdge).filter(WorkflowEdge.to_node_id == node.id).all()
+        parent_node = self.db.get(WorkflowNode, incoming[0].from_node_id) if len(incoming) == 1 else None
+        if parent_node is None or parent_node.node_type != WorkflowNodeType.AGENT:
+            self._fail_node_at_dispatch(
+                node_run, workflow_run, "EVALUATION node must have exactly one incoming edge from an AGENT node"
+            )
+            return
+        parent_run: Optional[WorkflowNodeRun] = self.db.execute(
+            select(WorkflowNodeRun)
+            .where(
+                WorkflowNodeRun.workflow_run_id == node_run.workflow_run_id,
+                WorkflowNodeRun.workflow_node_id == parent_node.id,
+            )
+            .execution_options(populate_existing=True)
+        ).scalar_one_or_none()
+        if parent_run is None or parent_run.status != WorkflowNodeRunStatus.COMPLETED:
+            return  # not ready (the scheduler only dispatches ready nodes; nothing to do)
+        if not parent_run.agent_run_id or not parent_run.output_snapshot_ref:
+            self._fail_node_at_dispatch(
+                node_run, workflow_run, "EVALUATION node's upstream AGENT node produced no output artifact"
+            )
+            return
+
+        # Fresh read (like every engine decision): a stale identity-mapped row
+        # must never vouch for evidence that has since changed.
+        artifact = self.db.execute(
+            select(Artifact).where(Artifact.id == parent_run.output_snapshot_ref).execution_options(populate_existing=True)
+        ).scalar_one_or_none()
+        if artifact is None or artifact.agent_run_id != parent_run.agent_run_id:
+            self._fail_node_at_dispatch(
+                node_run,
+                workflow_run,
+                "EVALUATION node's subject artifact is missing or does not belong to the upstream Agent Run",
+            )
+            return
+        if not artifact.content_hash:
+            self._fail_node_at_dispatch(
+                node_run, workflow_run, "EVALUATION node's subject artifact has no content hash to bind"
+            )
+            return
+        try:
+            verify_artifact_bytes(artifact, artifact.content_hash)
+        except (ConflictError, ArtifactHashMismatchError) as exc:
+            self._fail_node_at_dispatch(node_run, workflow_run, f"EVALUATION node's subject artifact: {exc}")
+            return
+
+        parent_task_run = self.db.query(TaskRun).filter(TaskRun.id == workflow_run.task_run_id).first()
+        if parent_task_run is None:
+            return
+
+        try:
+            built = EvaluationExecutionService(self.db).build_agent_evaluator_run(
+                agent_run_id=parent_run.agent_run_id,
+                subject_artifact_id=artifact.id,
+                evaluation_definition_version_id=definition_version_id,
+                evaluator_agent_version_id=evaluator_agent_version_id,
+                evaluator_model_policy_override=config.get("evaluator_model_policy_override") or None,
+                budget_id=parent_task_run.budget_id,  # share the workflow's budget, like every node
+                requested_by_user_id=None,  # authorized by the published workflow, not a live request
+                initial_task_run_status=TaskRunStatus.QUEUED,
+                task_run_config_snapshot={
+                    "node_key": node.node_key,
+                    "node_type": node.node_type.value,
+                    "iteration": node_run.iteration,
+                    "workflow_run_id": workflow_run.id,
+                    "workflow_node_run_id": node_run.id,
+                },
+                task_run_workflow_version_id=workflow_run.workflow_version_id,
+                input_context_extra={
+                    "workflow_run_id": workflow_run.id,
+                    "workflow_node_run_id": node_run.id,
+                    "upstream_node_run_ids": [parent_run.id],
+                },
+            )
+        except (NotFoundError, ConflictError) as exc:
+            # e.g. a bound version was deprecated between preflight and now:
+            # fail closed, never substitute another version.
+            self.db.rollback()
+            self._fail_node_at_dispatch(node_run, workflow_run, f"EVALUATION node cannot be dispatched: {exc}")
+            return
+        evaluator_agent_run = built.evaluator_agent_run
+
+        if not self._atomically_claim_node_for_execution(node_run.id, evaluator_agent_run.id):
+            return  # lost the race (or the run stopped accepting dispatches): everything above was rolled back
+
+        try:
+            self.job_queue_repo.enqueue(self.db, job_type=JobType.AGENT_RUN, payload_ref=evaluator_agent_run.id)
+        except IntegrityError:
+            self.db.rollback()  # already queued (replay/race): fine
+
+        self._emit_event(
+            workflow_run.task_run_id,
+            "workflow.node.scheduled",
+            workflow_run_id=workflow_run.id,
+            workflow_node_run_id=node_run.id,
+            agent_run_id=evaluator_agent_run.id,
         )
 
     def _upstream_sources(self, node_run: WorkflowNodeRun) -> List[Tuple[str, WorkflowNodeRun]]:

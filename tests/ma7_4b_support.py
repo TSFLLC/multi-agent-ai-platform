@@ -13,14 +13,17 @@
   at a time; thread concurrency INSIDE a Worker is MA7.4c, not tested here).
 """
 
+import json
 import threading
 import time
 from collections import namedtuple
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from decimal import Decimal
+from types import SimpleNamespace
 
 from app.db.enums import TaskRunStatus, VersionStatus, WorkflowNodeType
+from app.models.evaluation_definitions import EvaluationCriterion, EvaluationDefinitionVersion
 from app.models.providers import Provider
 from app.models.tasks import TaskRun
 from app.providers.base import InvokeResponse
@@ -30,6 +33,7 @@ from app.worker import Worker
 from tests.conftest import (
     make_agent,
     make_agent_version,
+    make_evaluation_definition,
     make_model,
     make_provider,
     make_provider_model,
@@ -39,14 +43,103 @@ from tests.ma7_3b_support import AGENT, APPROVAL, TERMINAL, Built
 
 Graph = namedtuple("Graph", "built role_of")
 
+EVALUATION = "evaluation"  # MA7.5A node kind for build_graph (config comes from ``evaluations=``)
+
 _KIND_TO_TYPE = {
     AGENT: WorkflowNodeType.AGENT,
     APPROVAL: WorkflowNodeType.HUMAN_APPROVAL,
     TERMINAL: WorkflowNodeType.TERMINAL,
+    EVALUATION: WorkflowNodeType.EVALUATION,
 }
 
 
-def build_graph(db, project, nodes, edges, *, label, real=False, publish=True, approval_group="eng-leads"):
+def make_evaluation_setup(
+    db,
+    project,
+    label="ev",
+    criteria=("correctness", "security"),
+    *,
+    role="evaluator",
+    priced=False,
+    version_status=VersionStatus.ACTIVE,
+    agent_status=VersionStatus.ACTIVE,
+):
+    """An Evaluation Definition Version (ACTIVE by default, with ``criteria`` in
+    order) and an evaluator Agent Version whose manual model policy points at
+    its OWN provider model, so the fake provider can recognise the evaluator by
+    ``role``. ``priced`` gives that model a real price (for budget tests).
+    ``.role_of`` maps the model id to ``role`` -- merge it into the graph's."""
+    definition = make_evaluation_definition(db, project, name=f"{label}-rubric")
+    version = EvaluationDefinitionVersion(
+        evaluation_definition_id=definition.id, version=1, status=version_status
+    )
+    db.add(version)
+    db.flush()
+    for index, key in enumerate(criteria):
+        db.add(
+            EvaluationCriterion(
+                evaluation_definition_version_id=version.id,
+                key=key,
+                label=key.replace("_", " ").title(),
+                order_index=index,
+            )
+        )
+    provider = db.query(Provider).first() or make_provider(db)
+    agent_version = make_agent_version(db, make_agent(db, project, f"{label}-evaluator"), status=agent_status)
+    canonical = f"fake/{label}-evaluator"
+    price = Decimal(1000) if priced else Decimal(0)
+    provider_model = make_provider_model(
+        db,
+        model=make_model(db, canonical_model_id=canonical),
+        provider=provider,
+        cost_input_per_mtok=price,
+        cost_output_per_mtok=price,
+    )
+    agent_version.model_policy = {"mode": "manual", "manual_provider_model_id": provider_model.id}
+    db.commit()
+    return SimpleNamespace(
+        definition=definition,
+        version=version,
+        agent_version=agent_version,
+        criteria=list(criteria),
+        role=role,
+        role_of={canonical: role},
+        model=provider_model.model_id,
+    )
+
+
+def evaluator_json(criteria, findings=None, *, fence=False):
+    """A valid evaluator response covering exactly ``criteria`` (``findings``
+    maps key -> MET/PARTIAL/NOT_MET/NOT_APPLICABLE; default MET)."""
+    findings = findings or {}
+    body = json.dumps(
+        {
+            "criteria": [
+                {
+                    "key": key,
+                    "finding": findings.get(key, "MET"),
+                    "rationale": f"rationale for {key}",
+                    "evidence": [],
+                }
+                for key in criteria
+            ]
+        }
+    )
+    return f"```json\n{body}\n```" if fence else body
+
+
+def build_graph(
+    db,
+    project,
+    nodes,
+    edges,
+    *,
+    label,
+    real=False,
+    publish=True,
+    approval_group="eng-leads",
+    evaluations=None,
+):
     """A workflow with the given ``nodes`` -- ordered ``(node_key, kind)`` --
     and ``edges`` -- ``(from_key, to_key)`` -- published through the real
     definition service (so publish-time validation runs). With ``real=True``
@@ -93,6 +186,18 @@ def build_graph(db, project, nodes, edges, *, label, real=False, publish=True, a
                 key,
                 WorkflowNodeType.HUMAN_APPROVAL,
                 config={"approval_group": approval_group},
+            )
+        elif kind == EVALUATION:
+            setup = (evaluations or {})[key]
+            config = {
+                "evaluation_definition_version_id": setup.version.id,
+                "evaluator_agent_version_id": setup.agent_version.id,
+            }
+            override = getattr(setup, "override", None)
+            if override:
+                config["evaluator_model_policy_override"] = override
+            created[key] = definitions.add_node(
+                workflow.id, version.version, key, WorkflowNodeType.EVALUATION, config=config
             )
         else:
             created[key] = definitions.add_node(workflow.id, version.version, key, _KIND_TO_TYPE[kind])

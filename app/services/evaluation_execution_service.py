@@ -49,9 +49,10 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple, cast
 
-from sqlalchemy import select
+from sqlalchemy import select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -189,6 +190,44 @@ _DETERMINISTIC_CHECKERS: Dict[
 }
 
 
+@dataclass
+class EvaluatorRows:
+    """What ``build_agent_evaluator_run`` constructed (flushed, uncommitted)."""
+
+    run: EvaluationRun
+    evaluator_task: Task
+    evaluator_task_run: TaskRun
+    evaluator_agent_run: AgentRun
+    subject_task: Task
+    subject_task_run: TaskRun
+    evaluator_agent_version: AgentVersion
+
+
+def verify_artifact_bytes(artifact: Artifact, expected_hash: str) -> bytes:
+    """Re-reads the artifact's FILE and re-hashes it (MA7.5A). The stored
+    ``content_hash`` is only a recorded claim; evidence handed to an evaluator
+    -- or trusted afterwards -- must be the bytes that hash was computed from.
+    Returns the verified bytes. Raises ``ConflictError`` if the file is
+    missing/unreadable and ``ArtifactHashMismatchError`` if its content no
+    longer hashes to ``expected_hash``. The error text carries ids and hashes
+    only -- never artifact content."""
+    try:
+        content = Path(artifact.storage_ref).read_bytes()
+    except OSError as exc:
+        raise ConflictError(
+            f"Artifact {artifact.id} content could not be read ({type(exc).__name__}) -- refusing to "
+            "evaluate evidence that cannot be verified."
+        ) from exc
+    actual = hashlib.sha256(content).hexdigest()
+    if actual != expected_hash:
+        raise ArtifactHashMismatchError(
+            f"Artifact {artifact.id} content no longer matches its bound sha256 -- refusing to evaluate "
+            "different bytes than were bound.",
+            detail={"expected_artifact_hash": expected_hash, "actual_artifact_hash": actual},
+        )
+    return content
+
+
 class EvaluationExecutionService(BaseService):
     def __init__(self, db: Session):
         super().__init__(db)
@@ -283,7 +322,86 @@ class EvaluationExecutionService(BaseService):
         via ``JobType.AGENT_RUN`` (never ``JobType.EVALUATION``, which
         remains the deterministic path's own dispatch). One evaluator
         Agent Run performs exactly one inference covering the complete
-        immutable rubric -- never one call per criterion."""
+        immutable rubric -- never one call per criterion.
+
+        The row construction lives in ``build_agent_evaluator_run`` (MA7.5A)
+        so a caller that owns its own transaction -- the Workflow Engine's
+        EVALUATION node, inside its node claim -- can build the exact same
+        rows without this method's commits and enqueue. From a caller's
+        perspective this method behaves exactly as before."""
+        built = self.build_agent_evaluator_run(
+            agent_run_id=agent_run_id,
+            subject_artifact_id=subject_artifact_id,
+            evaluation_definition_version_id=evaluation_definition_version_id,
+            evaluator_agent_version_id=evaluator_agent_version_id,
+            evaluator_model_policy_override=evaluator_model_policy_override,
+            budget_id=budget_id,
+            requested_by_user_id=requested_by_user_id,
+        )
+        run, evaluator_task_run, evaluator_agent_run = built.run, built.evaluator_task_run, built.evaluator_agent_run
+        task, task_run, evaluator_task = built.subject_task, built.subject_task_run, built.evaluator_task
+        evaluator_agent_version = built.evaluator_agent_version
+        self.db.commit()
+        self.db.refresh(run)
+
+        evaluator_task_run.status = TaskRunStatus.QUEUED
+        self.db.commit()
+
+        self._jobs.enqueue(self.db, job_type=JobType.AGENT_RUN, payload_ref=evaluator_agent_run.id)
+
+        self._event(
+            task,
+            task_run,
+            run,
+            "evaluation_run.requested",
+            decision_summary=(
+                f"agent-evaluator evaluation requested for artifact {subject_artifact_id} against "
+                f"definition version {evaluation_definition_version_id} using evaluator Agent Version "
+                f"{evaluator_agent_version_id}"
+            ),
+        )
+        self._evaluator_event(
+            evaluator_task,
+            evaluator_task_run,
+            evaluator_agent_run,
+            "evaluation_run.evaluator_queued",
+            agent_id=evaluator_agent_version.agent_id,
+            agent_version_id=evaluator_agent_version.id,
+            decision_summary=f"evaluator Agent Run {evaluator_agent_run.id} queued for evaluation run {run.id}",
+        )
+        return run
+
+    def build_agent_evaluator_run(
+        self,
+        *,
+        agent_run_id: str,
+        subject_artifact_id: str,
+        evaluation_definition_version_id: str,
+        evaluator_agent_version_id: str,
+        evaluator_model_policy_override: Optional[dict] = None,
+        budget_id: Optional[str] = None,
+        requested_by_user_id: Optional[str] = None,
+        initial_task_run_status: TaskRunStatus = TaskRunStatus.CREATED,
+        task_run_config_snapshot: Optional[dict] = None,
+        task_run_workflow_version_id: Optional[str] = None,
+        input_context_extra: Optional[dict] = None,
+    ) -> "EvaluatorRows":
+        """MA7.5A: validates and constructs -- but does NOT commit, enqueue or
+        record any event -- every row of one agent-evaluator evaluation: the
+        evaluator's dedicated Task, TaskRun and Agent Run, and the
+        EvaluationRun binding them to the subject artifact. Rows are added and
+        flushed into the CALLER's transaction, so the caller decides when (and
+        whether) they become durable: the Workflow Engine builds them inside
+        its per-node compare-and-swap claim and simply rolls the whole thing
+        back if it loses the race -- no orphan Task/TaskRun/AgentRun/
+        EvaluationRun can survive a lost dispatch.
+
+        Raises ``NotFoundError`` / ``ConflictError`` exactly as
+        ``create_agent_evaluator_run`` always did. The optional arguments are
+        the workflow lineage hooks (TaskRun ``config_snapshot`` /
+        ``workflow_version_id``, extra keys merged into the evaluator's
+        ``input_context_json`` -- which the evaluator prompt builder ignores);
+        left at their defaults the rows are identical to MA6's."""
         _agent_run, task_run, task = self._load_subject_chain(agent_run_id)
 
         artifact = self.db.get(Artifact, subject_artifact_id)
@@ -340,9 +458,11 @@ class EvaluationExecutionService(BaseService):
 
         evaluator_task_run = TaskRun(
             task_id=evaluator_task.id,
-            status=TaskRunStatus.CREATED,
+            status=initial_task_run_status,
             budget_id=budget_id,
             timeout_seconds=settings.default_task_run_timeout_seconds,
+            config_snapshot=task_run_config_snapshot,
+            workflow_version_id=task_run_workflow_version_id,
         )
         self.db.add(evaluator_task_run)
         self.db.flush()
@@ -360,6 +480,7 @@ class EvaluationExecutionService(BaseService):
             # prompt from DB state alone, the same guarantee MA4's own
             # review_request/repair_request kinds already give.
             input_context_json={
+                **(input_context_extra or {}),
                 "kind": "evaluation_request",
                 "subject_agent_run_id": agent_run_id,
                 "subject_artifact_id": subject_artifact_id,
@@ -391,35 +512,16 @@ class EvaluationExecutionService(BaseService):
             started_at=_utcnow(),
         )
         self.db.add(run)
-        self.db.commit()
-        self.db.refresh(run)
-
-        evaluator_task_run.status = TaskRunStatus.QUEUED
-        self.db.commit()
-
-        self._jobs.enqueue(self.db, job_type=JobType.AGENT_RUN, payload_ref=evaluator_agent_run.id)
-
-        self._event(
-            task,
-            task_run,
-            run,
-            "evaluation_run.requested",
-            decision_summary=(
-                f"agent-evaluator evaluation requested for artifact {subject_artifact_id} against "
-                f"definition version {evaluation_definition_version_id} using evaluator Agent Version "
-                f"{evaluator_agent_version_id}"
-            ),
+        self.db.flush()
+        return EvaluatorRows(
+            run=run,
+            evaluator_task=evaluator_task,
+            evaluator_task_run=evaluator_task_run,
+            evaluator_agent_run=evaluator_agent_run,
+            subject_task=task,
+            subject_task_run=task_run,
+            evaluator_agent_version=evaluator_agent_version,
         )
-        self._evaluator_event(
-            evaluator_task,
-            evaluator_task_run,
-            evaluator_agent_run,
-            "evaluation_run.evaluator_queued",
-            agent_id=evaluator_agent_version.agent_id,
-            agent_version_id=evaluator_agent_version.id,
-            decision_summary=f"evaluator Agent Run {evaluator_agent_run.id} queued for evaluation run {run.id}",
-        )
-        return run
 
     # -- creation: Comparison fan-out (Slice 3C) -----------------------------
 
@@ -695,8 +797,54 @@ class EvaluationExecutionService(BaseService):
     # (never touches comparison_progress_service.py or ComparisonRun/
     # ComparisonCandidate state).
 
-    def finalize_agent_evaluator_run(self, evaluation_run_id: str, *, task_run_status: TaskRunStatus) -> None:
+    def _cas_terminal(
+        self, evaluation_run_id: str, status: EvaluationRunStatus, *, failure_reason: Optional[str] = None
+    ) -> bool:
+        """The ONLY way an agent-evaluator EvaluationRun reaches a terminal
+        status (MA7.5A): ``UPDATE .. WHERE status IN (pending, running)``.
+        True only for the single caller that made the change. A stale or
+        concurrent finalizer -- a worker's terminal notification racing a
+        reconciliation, or a replay -- gets False and must write nothing, so a
+        COMPLETED run can never be overwritten by FAILED, and criterion
+        results are inserted at most once (they are added only by the winner,
+        in the same transaction as the status change). The caller commits."""
+        result = cast(
+            CursorResult,
+            self.db.execute(
+                update(EvaluationRun)
+                .where(
+                    EvaluationRun.id == evaluation_run_id,
+                    EvaluationRun.status.in_((EvaluationRunStatus.PENDING, EvaluationRunStatus.RUNNING)),
+                )
+                .values(status=status, ended_at=_utcnow(), failure_reason=failure_reason)
+                .execution_options(synchronize_session=False)
+            ),
+        )
+        return result.rowcount == 1
+
+    def _finish_run(
+        self, evaluation_run_id: str, status: EvaluationRunStatus, *, failure_reason: Optional[str] = None
+    ) -> bool:
+        """``_cas_terminal`` + commit (or rollback if another finalizer won);
+        the run row is refreshed either way so callers see the truth."""
+        won = self._cas_terminal(evaluation_run_id, status, failure_reason=failure_reason)
+        if won:
+            self.db.commit()
+        else:
+            self.db.rollback()
         run = self.db.get(EvaluationRun, evaluation_run_id)
+        if run is not None:
+            self.db.refresh(run)
+        return won
+
+    def finalize_agent_evaluator_run(self, evaluation_run_id: str, *, task_run_status: TaskRunStatus) -> None:
+        """Idempotent and safe to call from any number of processes (MA7.5A):
+        the worker's terminal notification, a workflow reconciliation and a
+        replay may all arrive; exactly one of them writes the terminal status
+        (and, for COMPLETED, the criterion results); the others are no-ops."""
+        run = self.db.execute(
+            select(EvaluationRun).where(EvaluationRun.id == evaluation_run_id).execution_options(populate_existing=True)
+        ).scalar_one_or_none()
         if run is None:
             logger.error("evaluation_run_missing evaluation_run_id=%s", evaluation_run_id)
             return
@@ -712,41 +860,38 @@ class EvaluationExecutionService(BaseService):
         task_run = self.db.get(TaskRun, run.evaluator_task_run_id)
         task = self.db.get(Task, task_run.task_id) if task_run else None
         if evaluator_agent_run is None or task_run is None or task is None:
-            run.status = EvaluationRunStatus.FAILED
-            run.ended_at = _utcnow()
-            run.failure_reason = "Evaluator Agent Run's own Task Run/Task no longer exists."
-            self.db.commit()
+            self._finish_run(
+                evaluation_run_id,
+                EvaluationRunStatus.FAILED,
+                failure_reason="Evaluator Agent Run's own Task Run/Task no longer exists.",
+            )
             logger.error("evaluation_run_evaluator_chain_missing evaluation_run_id=%s", evaluation_run_id)
             return
 
         if task_run_status == TaskRunStatus.CANCELLED:
-            run.status = EvaluationRunStatus.CANCELLED
-            run.ended_at = _utcnow()
-            run.failure_reason = "Evaluator Agent Run was cancelled."
-            self.db.commit()
-            self._evaluator_event(
-                task,
-                task_run,
-                evaluator_agent_run,
-                "evaluation_run.cancelled",
-                decision_summary="evaluator Agent Run cancelled",
-            )
+            if self._finish_run(
+                evaluation_run_id, EvaluationRunStatus.CANCELLED, failure_reason="Evaluator Agent Run was cancelled."
+            ):
+                self._evaluator_event(
+                    task,
+                    task_run,
+                    evaluator_agent_run,
+                    "evaluation_run.cancelled",
+                    decision_summary="evaluator Agent Run cancelled",
+                )
             return
 
         if task_run_status == TaskRunStatus.FAILED:
             reason = self._describe_agent_run_failure(evaluator_agent_run)
-            run.status = EvaluationRunStatus.FAILED
-            run.ended_at = _utcnow()
-            run.failure_reason = reason
-            self.db.commit()
-            self._evaluator_event(
-                task,
-                task_run,
-                evaluator_agent_run,
-                "evaluation_run.failed",
-                decision_summary=reason,
-                error={"message": reason},
-            )
+            if self._finish_run(evaluation_run_id, EvaluationRunStatus.FAILED, failure_reason=reason):
+                self._evaluator_event(
+                    task,
+                    task_run,
+                    evaluator_agent_run,
+                    "evaluation_run.failed",
+                    decision_summary=reason,
+                    error={"message": reason},
+                )
             return
 
         # COMPLETED: the evaluator Agent Run itself succeeded (inference
@@ -759,20 +904,19 @@ class EvaluationExecutionService(BaseService):
             # hash mismatch it raised) must still leave the Evaluation Run
             # in a terminal state rather than stuck RUNNING forever -- same
             # worker-failure-handling guarantee AgentExecutionService.execute
-            # gives Agent Runs.
+            # gives Agent Runs. Compare-and-swap: if another finalizer already
+            # completed this run, it stays completed.
             logger.exception("evaluation_run_finalize_error evaluation_run_id=%s", evaluation_run_id)
-            run.status = EvaluationRunStatus.FAILED
-            run.ended_at = _utcnow()
-            run.failure_reason = str(exc)
-            self.db.commit()
-            self._evaluator_event(
-                task,
-                task_run,
-                evaluator_agent_run,
-                "evaluation_run.failed",
-                decision_summary=str(exc),
-                error={"message": str(exc)},
-            )
+            self.db.rollback()
+            if self._finish_run(evaluation_run_id, EvaluationRunStatus.FAILED, failure_reason=str(exc)):
+                self._evaluator_event(
+                    task,
+                    task_run,
+                    evaluator_agent_run,
+                    "evaluation_run.failed",
+                    decision_summary=str(exc),
+                    error={"message": str(exc)},
+                )
 
     def _finalize_agent_evaluator_success(
         self, run: EvaluationRun, evaluator_agent_run: AgentRun, task: Task, task_run: TaskRun
@@ -793,6 +937,9 @@ class EvaluationExecutionService(BaseService):
                     "actual_artifact_hash": subject_artifact.content_hash,
                 },
             )
+        # MA7.5A: the recorded hash is only a claim -- the bytes must still
+        # hash to it before any result derived from them is trusted.
+        verify_artifact_bytes(subject_artifact, run.subject_artifact_content_hash)
 
         version = self.db.get(EvaluationDefinitionVersion, run.evaluation_definition_version_id)
         if version is None:
@@ -813,21 +960,24 @@ class EvaluationExecutionService(BaseService):
         parsed = parse_evaluation_response(raw_text, expected_criterion_keys=list(criteria_by_key.keys()))
 
         if not parsed.is_valid:
-            run.status = EvaluationRunStatus.FAILED
-            run.ended_at = _utcnow()
-            run.failure_reason = parsed.parse_error
-            self.db.commit()
-            self._evaluator_event(
-                task,
-                task_run,
-                evaluator_agent_run,
-                "evaluation_run.failed",
-                artifact_refs=[output_artifact.id],
-                decision_summary=parsed.parse_error,
-                error={"category": "evaluator_response_invalid", "message": parsed.parse_error},
-            )
+            if self._finish_run(run.id, EvaluationRunStatus.FAILED, failure_reason=parsed.parse_error):
+                self._evaluator_event(
+                    task,
+                    task_run,
+                    evaluator_agent_run,
+                    "evaluation_run.failed",
+                    artifact_refs=[output_artifact.id],
+                    decision_summary=parsed.parse_error,
+                    error={"category": "evaluator_response_invalid", "message": parsed.parse_error},
+                )
             return
 
+        # Only the caller that wins the terminal compare-and-swap writes the
+        # criterion results -- in the same transaction as the status change,
+        # so a run is never COMPLETED without them and never has them twice.
+        if not self._cas_terminal(run.id, EvaluationRunStatus.COMPLETED):
+            self.db.rollback()
+            return
         for finding in parsed.findings:
             criterion = criteria_by_key[finding.key]
             evidence_refs = [
@@ -844,8 +994,6 @@ class EvaluationExecutionService(BaseService):
                     evidence_refs=evidence_refs,
                 )
             )
-        run.status = EvaluationRunStatus.COMPLETED
-        run.ended_at = _utcnow()
         self.db.commit()
         self.db.refresh(run)
         self._evaluator_event(

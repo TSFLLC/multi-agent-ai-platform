@@ -62,7 +62,10 @@ def test_revision_chain_places_this_migration_directly_after_the_previous_head()
     from alembic.script import ScriptDirectory
 
     script = ScriptDirectory.from_config(_cfg())
-    assert script.get_current_head() == REVISION
+    # MA7.5A: this revision is no longer the head -- later slices add
+    # migrations after it. What this test pins is its own place in the chain:
+    # still directly after PREVIOUS_HEAD, and still an ancestor of the head.
+    assert REVISION in {revision.revision for revision in script.walk_revisions()}
     assert script.get_revision(REVISION).down_revision == PREVIOUS_HEAD
 
 
@@ -73,7 +76,7 @@ def test_upgrade_adds_nullable_resolution_note_and_the_partial_unique_index(disp
     assert "resolution_note" not in {c["name"] for c in insp.get_columns("approvals")}
     assert insp.get_indexes("approvals") == []
 
-    command.upgrade(_cfg(), "head")
+    command.upgrade(_cfg(), REVISION)
     assert _revision(engine) == REVISION
 
     insp = inspect(engine)
@@ -95,7 +98,7 @@ def test_upgrade_preserves_existing_approval_rows_and_check_constraints(disposab
     with engine.begin() as conn:
         _insert_approval(conn, "pre-existing", scope="task_run", ref="t-1", status="approved")
 
-    command.upgrade(_cfg(), "head")
+    command.upgrade(_cfg(), REVISION)
 
     with engine.connect() as conn:
         row = conn.execute(text("SELECT id, status, resolution_note FROM approvals")).one()
@@ -110,7 +113,7 @@ def test_upgrade_preserves_existing_approval_rows_and_check_constraints(disposab
 
 def test_index_forbids_duplicate_workflow_node_approvals_but_only_for_that_scope(disposable_db):
     _, engine = disposable_db
-    command.upgrade(_cfg(), "head")
+    command.upgrade(_cfg(), REVISION)
 
     with engine.begin() as conn:
         _insert_approval(conn, "w1", scope="workflow_node_run", ref="node-run-1", op="gate")
@@ -130,7 +133,7 @@ def test_index_forbids_duplicate_workflow_node_approvals_but_only_for_that_scope
 
 def test_downgrade_one_step_removes_column_and_index_and_keeps_rows(disposable_db):
     _, engine = disposable_db
-    command.upgrade(_cfg(), "head")
+    command.upgrade(_cfg(), REVISION)
     with engine.begin() as conn:
         _insert_approval(conn, "keep-me", ref="node-run-9")
         conn.execute(text("UPDATE approvals SET resolution_note = 'note'"))
@@ -152,9 +155,9 @@ def test_downgrade_one_step_removes_column_and_index_and_keeps_rows(disposable_d
 def test_upgrade_downgrade_upgrade_round_trip_is_stable(disposable_db):
     _, engine = disposable_db
     cfg = _cfg()
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, REVISION)
     command.downgrade(cfg, PREVIOUS_HEAD)
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, REVISION)
 
     assert _revision(engine) == REVISION
     insp = inspect(engine)
@@ -165,10 +168,10 @@ def test_upgrade_downgrade_upgrade_round_trip_is_stable(disposable_db):
 def test_full_chain_downgrade_to_base_and_back_on_a_disposable_db(disposable_db):
     _, engine = disposable_db
     cfg = _cfg()
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, REVISION)
     command.downgrade(cfg, "base")
     assert set(inspect(engine).get_table_names()) - {"alembic_version"} == set()
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, REVISION)
     assert _revision(engine) == REVISION
 
 
@@ -176,7 +179,7 @@ def test_migrated_schema_matches_the_model_for_approvals(disposable_db, tmp_path
     """create_all (what the test suite uses) and the migration chain (what
     production uses) must agree on the approvals table."""
     _, migrated = disposable_db
-    command.upgrade(_cfg(), "head")
+    command.upgrade(_cfg(), REVISION)
 
     from app import models  # noqa: F401 -- populates Base.metadata
 

@@ -136,6 +136,11 @@ class WorkflowNodeType(str, enum.Enum):
     CONSENSUS = "consensus"
     HUMAN_APPROVAL = "human_approval"
     TERMINAL = "terminal"
+    # MA7.5A: runs one MA6 agent-evaluator EvaluationRun over the output of
+    # exactly one upstream AGENT node. Evidence, never a decision: it is not a
+    # JUDGE (a decision-making node type that stays unsupported) and has no
+    # score/rank/approve semantics.
+    EVALUATION = "evaluation"
 
 
 # --- Approval (Section 26.5) ----------------------------------------------

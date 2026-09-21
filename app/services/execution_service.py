@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Type
 
 from sqlalchemy.orm import Session
 
@@ -291,6 +291,10 @@ class AgentExecutionService:
             self.governor.release(reservation)
             self._finalize_failed(ctx, category="workflow_context_too_large", message=str(exc), attempt=attempt)
             raise ExecutionAborted(str(exc)) from exc
+        except _EvaluationContextTooLarge as exc:
+            self.governor.release(reservation)
+            self._finalize_failed(ctx, category="evaluation_context_too_large", message=str(exc), attempt=attempt)
+            raise ExecutionAborted(str(exc)) from exc
         except _MissingReviewContext as exc:
             self.governor.release(reservation)
             self._finalize_failed(ctx, category="review_context_error", message=str(exc), attempt=attempt)
@@ -521,7 +525,7 @@ class AgentExecutionService:
             )
 
         if kind == "evaluation_request":
-            return self._build_evaluator_extra_context(input_context)
+            return self._build_evaluator_extra_context(input_context, resolved)
 
         if kind == "workflow_upstream":
             return self._build_workflow_upstream_context(input_context, resolved)
@@ -575,16 +579,37 @@ class AgentExecutionService:
         """MA7.4c: fan-in can multiply prompt size, and the evidence a human
         approved must reach the model COMPLETE -- so oversized evidence FAILS
         the node here, before any provider call. Never truncated, summarized
-        or partially dropped.
+        or partially dropped. (See ``_enforce_context_limit`` for the rule.)"""
+        self._enforce_context_limit(
+            size_chars,
+            artifact_count,
+            resolved,
+            cap=settings.workflow_upstream_context_max_chars,
+            cap_name="platform cap (MAP_WORKFLOW_UPSTREAM_CONTEXT_MAX_CHARS)",
+            error_cls=_WorkflowContextTooLarge,
+            what="The upstream evidence for this node",
+        )
 
-        The platform hard cap (``workflow_upstream_context_max_chars``) is
-        authoritative. A model's KNOWN context window can only lower the
-        effective limit (``window_tokens * _CHARS_PER_TOKEN_FLOOR`` -- a
-        deliberately pessimistic conversion, since a window is in tokens and
-        the evidence in characters); a model with no recorded window is held to
-        the platform cap only -- no limit is invented for it."""
-        limit = settings.workflow_upstream_context_max_chars
-        source = "platform cap (MAP_WORKFLOW_UPSTREAM_CONTEXT_MAX_CHARS)"
+    def _enforce_context_limit(
+        self,
+        size_chars: int,
+        artifact_count: int,
+        resolved: Optional[ResolvedModel],
+        *,
+        cap: int,
+        cap_name: str,
+        error_cls: Type[Exception],
+        what: str,
+    ) -> None:
+        """The platform hard cap (``cap``) is authoritative. A model's KNOWN
+        context window can only lower the effective limit
+        (``window_tokens * _CHARS_PER_TOKEN_FLOOR`` -- a deliberately
+        pessimistic conversion, since a window is in tokens and the evidence
+        in characters); a model with no recorded window is held to the
+        platform cap only -- no limit is invented for it. The message carries
+        counts and limits only, never content."""
+        limit = cap
+        source = cap_name
         window = None
         if resolved is not None:
             window = resolved.model.context_window
@@ -593,14 +618,14 @@ class AgentExecutionService:
             if model_limit < limit:
                 limit, source = model_limit, f"model context window ({window} tokens)"
         if size_chars > limit:
-            raise _WorkflowContextTooLarge(
-                f"The upstream evidence for this node ({artifact_count} artifact(s), {size_chars} characters) "
+            raise error_cls(
+                f"{what} ({artifact_count} artifact(s), {size_chars} characters) "
                 f"exceeds the limit of {limit} characters set by the {source}. It is never truncated: "
-                "reduce or split the upstream outputs, use a model with a larger context window, or raise "
+                "reduce or split the evidence, use a model with a larger context window, or raise "
                 "the platform cap."
             )
 
-    def _build_evaluator_extra_context(self, input_context: dict) -> str:
+    def _build_evaluator_extra_context(self, input_context: dict, resolved: Optional[ResolvedModel] = None) -> str:
         """MA6 Slice 3B: renders the subject task's own title/description/
         requirements + the exact subject candidate Artifact content +
         the immutable rubric's full ordered criteria + structured-output
@@ -650,13 +675,28 @@ class AgentExecutionService:
                 f"Evaluation Definition Version {evaluation_definition_version_id} no longer exists."
             )
 
-        candidate_text = Path(subject_artifact.storage_ref).read_text(encoding="utf-8")
+        # MA7.5A: the recorded hash is only a claim. The subject bytes handed to
+        # the evaluator must still hash to the hash bound when the run was
+        # created -- a missing, unreadable, non-UTF-8 or altered file fails the
+        # run here, categorized, before any provider call or spend.
+        try:
+            subject_bytes = Path(subject_artifact.storage_ref).read_bytes()
+            candidate_text = subject_bytes.decode("utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            raise _MissingEvaluationContext(
+                f"Subject artifact {subject_artifact_id} content could not be read: {type(exc).__name__}."
+            ) from exc
+        if hashlib.sha256(subject_bytes).hexdigest() != subject_artifact_hash:
+            raise _MissingEvaluationContext(
+                f"Subject artifact {subject_artifact_id} content no longer matches its bound sha256 -- "
+                "refusing to evaluate different bytes than were bound."
+            )
         requirements_text = (
             json.dumps(subject_task.requirements, sort_keys=True, default=str)
             if subject_task.requirements
             else None
         )
-        return build_evaluator_extra_context(
+        rendered = build_evaluator_extra_context(
             subject_task_title=subject_task.title,
             subject_task_description=subject_task.description,
             subject_task_requirements=requirements_text,
@@ -667,6 +707,16 @@ class AgentExecutionService:
                 {"key": c.key, "label": c.label, "description": c.description} for c in version.criteria
             ],
         )
+        self._enforce_context_limit(
+            len(rendered),
+            1,
+            resolved,
+            cap=settings.evaluation_context_max_chars,
+            cap_name="platform cap (MAP_EVALUATION_CONTEXT_MAX_CHARS)",
+            error_cls=_EvaluationContextTooLarge,
+            what="The evaluator input for this run",
+        )
+        return rendered
 
     # -- provider invocation -------------------------------------------------
 
@@ -850,6 +900,13 @@ class _MissingReviewContext(Exception):
     immutable and never deleted while their owning Agent Run exists), but
     handled as a proper categorized failure rather than an unhandled I/O
     error, consistent with every other failure category in this module."""
+
+
+class _EvaluationContextTooLarge(Exception):
+    """MA7.5A: the input for an MA6 agent evaluator (subject task text + the
+    complete subject artifact + rubric) exceeds the configured limit -- a
+    categorized failure (``evaluation_context_too_large``) raised before any
+    provider call/budget spend; the evidence is never cut down."""
 
 
 class _WorkflowContextTooLarge(Exception):

@@ -94,6 +94,14 @@ class Settings(BaseSettings):
     # raise it (see AgentExecutionService).
     workflow_upstream_context_max_chars: int = 200_000
 
+    # MA7.5A: the same hard cap, for the input handed to an MA6 agent
+    # evaluator (subject task text + the whole subject artifact + rubric), in
+    # characters. Oversized evidence fails the evaluator run before any
+    # provider call -- never truncated -- and applies to every evaluator run,
+    # workflow-dispatched or not. A model's known context window can only
+    # lower it (same rule as the workflow-upstream cap).
+    evaluation_context_max_chars: int = 200_000
+
     # Agent Run / Task Run defaults (Owner decision, frozen) — overridable
     # per-row (agent_runs.timeout_seconds / task_runs.timeout_seconds),
     # these are only the defaults new rows are created with.
@@ -154,6 +162,13 @@ class Settings(BaseSettings):
         # cap cannot be silently disabled.
         if not 1_000 <= v <= 10_000_000:
             raise ValueError("workflow_upstream_context_max_chars must be between 1000 and 10000000")
+        return v
+
+    @field_validator("evaluation_context_max_chars")
+    @classmethod
+    def _validate_evaluation_context_max_chars(cls, v: int) -> int:
+        if not 1_000 <= v <= 10_000_000:
+            raise ValueError("evaluation_context_max_chars must be between 1000 and 10000000")
         return v
 
     @field_validator("workflow_max_fan_out")

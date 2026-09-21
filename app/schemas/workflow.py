@@ -48,3 +48,8 @@ class WorkflowNodeRunRead(BaseModel):
     # MA7.3b: the Approval a HUMAN_APPROVAL node run is waiting on / was
     # resolved by (None for every other node run).
     approval_id: Optional[str] = None
+    # MA7.5A: the MA6 EvaluationRun an EVALUATION node run executes (None for
+    # every other node run). Derived -- never stored on the node run: it is
+    # the EvaluationRun whose UNIQUE evaluator_agent_run_id is this node run's
+    # agent_run_id. Read the findings via GET /evaluation-runs/{id}.
+    evaluation_run_id: Optional[str] = None
