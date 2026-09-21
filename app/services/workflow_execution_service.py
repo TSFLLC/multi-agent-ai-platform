@@ -30,9 +30,11 @@ compare-and-swap, so any number of workers/sweeps/replays converge on one
 outcome without duplicating a TaskRun, AgentRun, job, event or dispatch.
 """
 
+import hashlib
 import logging
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple, cast
 from sqlalchemy import exists, select, update
 from sqlalchemy.engine import CursorResult
@@ -834,14 +836,21 @@ class WorkflowExecutionService(BaseService):
         now = _now()
         run_accepts = run.status in _DISPATCHABLE_RUN_STATUSES and not self._has_failed_node(run.id)
         if decision == ApprovalStatus.APPROVED:
-            payload = self._approval_action_payload(node_run, node)
+            # The "second check": the ENTIRE bound evidence set, artifact files
+            # re-hashed. Any changed, replaced, deleted or tampered output
+            # fails closed and the decision is rolled back (nothing approved).
+            payload = self._approval_action_payload(node_run, node, verify_content=True)
             if compute_action_fingerprint(payload) != approval.action_fingerprint:
                 raise FingerprintMismatchError(
                     "The workflow node's upstream action no longer matches the fingerprint that was "
                     "approved -- refusing to advance the workflow.",
                     detail={"expected_action_fingerprint": approval.action_fingerprint},
                 )
-            output_ref = payload["upstream"][0]["artifact_id"] if payload["upstream"] else None
+            # A single-input gate passes its one artifact through as its own
+            # output (MA7.3). A gate approving SEVERAL outputs produces none of
+            # its own: downstream nodes resolve through it to every approved
+            # artifact (``_upstream_sources``).
+            output_ref = payload["upstream"][0]["artifact_id"] if len(payload["upstream"]) == 1 else None
             applied = run_accepts and self._cas_node_run(
                 node_run.id,
                 WorkflowNodeRunStatus.WAITING_FOR_APPROVAL,
@@ -943,26 +952,73 @@ class WorkflowExecutionService(BaseService):
                 error={"code": "approval_rejected", "approval_id": approval.id},
             )
 
-    def _approval_action_payload(self, node_run: WorkflowNodeRun, node: WorkflowNode) -> Dict[str, Any]:
+    def _artifact_content_hash(self, artifact_id: Optional[str], *, verify_content: bool) -> Optional[str]:
+        """The content hash an approval binds for ``artifact_id``: the hash
+        RECORDED in the database. With ``verify_content`` the artifact's FILE
+        is also re-read and re-hashed, and the recorded hash is returned only
+        if the file still matches it -- otherwise a marker that can never equal
+        a bound hash (``None`` if the file is gone or unreadable). So an
+        artifact edited on disk, deleted, or whose recorded hash was altered,
+        all produce a different payload (a fingerprint mismatch); nothing
+        passes on the strength of either the file or the row alone. An
+        artifact recorded without a hash has nothing to verify and yields
+        ``None`` either way."""
+        if not artifact_id:
+            return None
+        row = self.db.execute(
+            select(Artifact.content_hash, Artifact.storage_ref).where(Artifact.id == artifact_id)
+        ).first()
+        if row is None:
+            return None  # deleted: the bound artifact id no longer resolves
+        recorded, storage_ref = row
+        if not verify_content or not recorded:
+            return recorded
+        try:
+            actual = hashlib.sha256(Path(storage_ref).read_bytes()).hexdigest()
+        except OSError:
+            return None
+        return recorded if actual == recorded else f"content-mismatch:{actual}"
+
+    def _approval_action_payload(
+        self, node_run: WorkflowNodeRun, node: WorkflowNode, *, verify_content: bool = False
+    ) -> Dict[str, Any]:
         """The exact action a human approves -- what the fingerprint binds:
         this node run, its approval group, and every upstream node run with
         the artifact it produced (id + content hash, read from the database,
-        never from a cached object)."""
+        never from a cached object), in canonical (source node_key) order.
+
+        Two payload shapes, chosen by the gate's number of incoming edges
+        (immutable within a published version, so the shape never depends on
+        run state and needs no stored marker):
+
+        * one parent (MA7.3): unchanged, byte for byte -- an approval that
+          is already PENDING keeps verifying. The source node run id already
+          pins the producing node.
+        * several parents (MA7.4c): ``evidence_version`` 2, where every entry
+          also carries the producing ``node_key``, so the approval binds
+          (source node, source node run, artifact id, content hash) for the
+          WHOLE set: "the human approved exactly these outputs".
+
+        ``verify_content`` additionally re-hashes each artifact file (see
+        ``_artifact_content_hash``); the decision path uses it."""
+        incoming = self.db.query(WorkflowEdge).filter(WorkflowEdge.to_node_id == node.id).count()
+        multi_parent = incoming > 1
         upstream: List[Dict[str, Any]] = []
-        for _key, up in self._upstream_sources(node_run):
-            content_hash = None
-            if up.output_snapshot_ref:
-                content_hash = self.db.execute(
-                    select(Artifact.content_hash).where(Artifact.id == up.output_snapshot_ref)
-                ).scalar_one_or_none()
-            upstream.append(
+        for key, up in self._upstream_sources(node_run):
+            entry: Dict[str, Any] = {}
+            if multi_parent:
+                entry["node_key"] = key
+            entry.update(
                 {
                     "node_run_id": up.id,
                     "artifact_id": up.output_snapshot_ref,
-                    "artifact_content_hash": content_hash,
+                    "artifact_content_hash": self._artifact_content_hash(
+                        up.output_snapshot_ref, verify_content=verify_content
+                    ),
                 }
             )
-        return {
+            upstream.append(entry)
+        payload: Dict[str, Any] = {
             "kind": WORKFLOW_HUMAN_APPROVAL_OPERATION,
             "workflow_run_id": node_run.workflow_run_id,
             "workflow_node_run_id": node_run.id,
@@ -971,6 +1027,56 @@ class WorkflowExecutionService(BaseService):
             "iteration": node_run.iteration,
             "approval_group": (node.config or {}).get("approval_group"),
             "upstream": upstream,
+        }
+        if multi_parent:
+            payload["evidence_version"] = 2
+        return payload
+
+    def approval_evidence(self, approval: Approval) -> Dict[str, Any]:
+        """The canonical evidence set of a workflow gate's Approval, derived
+        from the (immutable, COMPLETED) source node runs, plus whether it
+        STILL matches what the approval bound.
+
+        ``fingerprint_matches`` recomputes the action payload from current
+        state -- re-hashing every artifact file -- and compares it with the
+        stored fingerprint: False if any bound output was changed, replaced,
+        deleted or tampered with (approving such an approval fails closed).
+        Each entry's ``content_intact`` says whether that artifact still
+        exists and its file still hashes to the recorded value. Artifact
+        CONTENT is deliberately not returned here: it is served, authorized,
+        by ``GET /artifacts/{id}/content``.
+        """
+        node_run = self._fresh_node_run(approval.scope_ref_id)
+        node = self.db.get(WorkflowNode, node_run.workflow_node_id) if node_run else None
+        if node_run is None or node is None:
+            raise InvalidStateTransitionError("The workflow node run for this approval no longer exists.")
+
+        payload = self._approval_action_payload(node_run, node, verify_content=True)
+        entries: List[Dict[str, Any]] = []
+        for key, source in self._upstream_sources(node_run):
+            artifact_id = source.output_snapshot_ref
+            recorded = (
+                self.db.execute(select(Artifact.content_hash).where(Artifact.id == artifact_id)).scalar_one_or_none()
+                if artifact_id
+                else None
+            )
+            actual = self._artifact_content_hash(artifact_id, verify_content=True)
+            entries.append(
+                {
+                    "node_key": key,
+                    "node_run_id": source.id,
+                    "artifact_id": artifact_id,
+                    "content_hash": recorded,
+                    "content_intact": recorded is not None and actual == recorded,
+                }
+            )
+        return {
+            "approval_id": approval.id,
+            "workflow_node_run_id": node_run.id,
+            "evidence_version": payload.get("evidence_version", 1),
+            "action_fingerprint": approval.action_fingerprint,
+            "fingerprint_matches": compute_action_fingerprint(payload) == approval.action_fingerprint,
+            "evidence": entries,
         }
 
     def _dispatch_human_approval(
@@ -990,22 +1096,16 @@ class WorkflowExecutionService(BaseService):
         run only becomes NODE_WAITING_FOR_APPROVAL if nothing else -- a
         running or ready sibling branch -- can progress.
 
-        MA7.4b: this is a normal node, so a gate may be one branch of a
-        fan-out. It still has exactly ONE upstream dependency (multi-parent
-        Human Approval is not enabled), enforced below.
+        MA7.4b/c: this is a normal node, so a gate may be one branch of a
+        fan-out AND the fan-in barrier of several branches: it is only ever
+        dispatched once ALL its sources are COMPLETED (the scheduler's
+        readiness rule), and the Approval it creates binds every source's
+        output. Whatever its number of parents it creates no TaskRun, AgentRun
+        or model call.
         """
-        incoming = self.db.query(WorkflowEdge).filter(WorkflowEdge.to_node_id == node.id).count()
         approval_group = (node.config or {}).get("approval_group")
-        problem: Optional[str] = None
-        if incoming > 1:
-            problem = (
-                "HUMAN_APPROVAL node has more than one upstream dependency "
-                "(fan-in is not supported before MA7.4)"
-            )
-        elif not isinstance(approval_group, str) or not approval_group.strip():
-            problem = "HUMAN_APPROVAL node missing config.approval_group"
-        if problem:
-            self._fail_node_at_dispatch(node_run, workflow_run, problem)
+        if not isinstance(approval_group, str) or not approval_group.strip():
+            self._fail_node_at_dispatch(node_run, workflow_run, "HUMAN_APPROVAL node missing config.approval_group")
             return
 
         payload = self._approval_action_payload(node_run, node)
@@ -1551,7 +1651,14 @@ class WorkflowExecutionService(BaseService):
         ``node_key`` ascending (unique and immutable within a workflow
         version, so identical across runs and restarts), ``node_run.id`` only
         as a tie-break. Never edge-insertion or database order. Read from
-        current committed state."""
+        current committed state.
+
+        MA7.4c: a COMPLETED HUMAN_APPROVAL source that produced no single
+        output artifact (a gate with several parents approves a SET of outputs
+        and has no artifact of its own) is transparent: its own sources are
+        returned in its place, so nothing an approval covered is silently
+        lost to a downstream node -- and every entry keeps the node_key of the
+        node that actually produced it."""
         from_ids = [
             row[0]
             for row in self.db.execute(
@@ -1561,7 +1668,7 @@ class WorkflowExecutionService(BaseService):
         if not from_ids:
             return []
         rows = self.db.execute(
-            select(WorkflowNode.node_key, WorkflowNodeRun)
+            select(WorkflowNode.node_key, WorkflowNode.node_type, WorkflowNodeRun)
             .join(WorkflowNodeRun, WorkflowNodeRun.workflow_node_id == WorkflowNode.id)
             .where(
                 WorkflowNode.id.in_(from_ids),
@@ -1570,7 +1677,13 @@ class WorkflowExecutionService(BaseService):
             )
             .execution_options(populate_existing=True)
         ).all()
-        return sorted(((key, nr) for key, nr in rows), key=lambda pair: (pair[0], pair[1].id))
+        resolved: List[Tuple[str, WorkflowNodeRun]] = []
+        for key, node_type, source in rows:
+            if node_type == WorkflowNodeType.HUMAN_APPROVAL and not source.output_snapshot_ref:
+                resolved.extend(self._upstream_sources(source))
+            else:
+                resolved.append((key, source))
+        return sorted(resolved, key=lambda pair: (pair[0], pair[1].id))
 
     @staticmethod
     def _upstream_evidence(sources: List[Tuple[str, WorkflowNodeRun]]) -> List[Dict[str, Any]]:

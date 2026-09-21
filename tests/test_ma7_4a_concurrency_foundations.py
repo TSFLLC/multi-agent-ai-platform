@@ -1268,8 +1268,10 @@ def test_multi_ready_no_longer_fails_the_run_fan_out_dispatches_every_branch(db,
     assert "workflow.error" not in event_types(session_factory, built.task_run.id)
 
 
-def test_a_human_approval_with_two_upstream_dependencies_is_still_rejected(db, bootstrap):
-    """Multi-parent Human Approval is MA7.4c, not this slice."""
+def test_a_human_approval_with_two_upstream_dependencies_is_accepted_from_ma7_4c(db, bootstrap):
+    """MA7.4a pinned "still rejected -- multi-parent Human Approval is MA7.4c".
+    MA7.4c is where it becomes legal; the full behavior is covered in
+    tests/test_ma7_4c_parallel_approval.py."""
     definitions = WorkflowDefinitionService(db)
     workflow = definitions.create_workflow(bootstrap.project.id, "g2")
     version = definitions.get_latest_version(workflow.id)
@@ -1293,6 +1295,4 @@ def test_a_human_approval_with_two_upstream_dependencies_is_still_rejected(db, b
             workflow.id, version.version, nodes[up].id, (gate if down == "gate" else nodes[down]).id
         )
     definitions.add_edge(workflow.id, version.version, gate.id, end.id)
-    with pytest.raises(DAGValidationError) as exc:
-        definitions.publish_version(workflow.id, version.version)
-    assert any("exactly one is supported" in issue for issue in exc.value.issues)
+    assert definitions.publish_version(workflow.id, version.version).status.value == "active"

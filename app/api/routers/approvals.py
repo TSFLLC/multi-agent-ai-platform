@@ -3,7 +3,8 @@ decision) is V1's initial consequential-action acceptance case; real
 protected-branch merge stays disabled until Git Tool safety testing.
 
 MA7.3a (Approval Core): ``GET /approvals``, ``GET /approvals/{id}`` and
-``POST /approvals/{id}/resolve`` are real. Viewing requires READ on the
+``POST /approvals/{id}/resolve`` are real; MA7.4c adds
+``GET /approvals/{id}/evidence``. Viewing requires READ on the
 approval's owning project; approving/rejecting requires MODIFY. Authorization
 is enforced inside ``ApprovalService`` (the one place decisions are made), so
 these handlers stay thin and cannot bypass it."""
@@ -18,7 +19,7 @@ from app.auth import get_current_user
 from app.authz import ProjectAction, require_org_admin
 from app.db.enums import ApprovalStatus
 from app.models.identity import User
-from app.schemas.approvals import ApprovalRead, ApprovalResolveRequest
+from app.schemas.approvals import ApprovalEvidenceRead, ApprovalRead, ApprovalResolveRequest
 from app.schemas.common import FingerprintMismatch
 from app.schemas.events import AuditEventRead
 from app.services.approval_service import ApprovalService
@@ -54,6 +55,25 @@ def get_approval(
     """Requires READ on the approval's owning project."""
     approval = ApprovalService(db).get_for_user(approval_id, user=user, action=ProjectAction.READ)
     return ApprovalRead.model_validate(approval)
+
+
+@router.get("/approvals/{approval_id}/evidence", response_model=ApprovalEvidenceRead)
+def get_approval_evidence(
+    approval_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """The canonical evidence set this approval binds (MA7.4c): for each
+    source output its ``node_key``, ``node_run_id``, ``artifact_id``,
+    ``content_hash`` and whether it is still intact, plus whether the whole set
+    still matches the approval's fingerprint. Requires READ on the approval's
+    owning project (same resource-then-authorize order and cross-project
+    isolation as ``GET /approvals/{id}``). Artifact content is NOT duplicated
+    here -- fetch it from ``GET /artifacts/{artifact_id}/content``."""
+    from app.services.workflow_execution_service import WorkflowExecutionService
+
+    approval = ApprovalService(db).get_for_user(approval_id, user=user, action=ProjectAction.READ)
+    return ApprovalEvidenceRead(**WorkflowExecutionService(db).approval_evidence(approval))
 
 
 @router.post(

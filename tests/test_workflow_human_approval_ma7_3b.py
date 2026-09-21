@@ -1073,20 +1073,22 @@ def test_gate_configuration_that_could_auto_approve_is_rejected_at_publish(
     assert any(fragment in issue for issue in exc.value.issues), exc.value.issues
 
 
-def test_a_gate_with_two_upstream_dependencies_is_rejected_at_publish(db, bootstrap):
+def test_a_gate_with_two_upstream_dependencies_now_publishes(db, bootstrap):
+    """MA7.3 rejected this ("exactly one is supported ... MA7.4"); MA7.4c makes
+    the gate itself the ALL-of barrier. Everything else about a gate is still
+    validated (see the forbidden-config tests above)."""
     definitions, workflow, version = _draft_with_gate(
         db, bootstrap.project, gate_config={"approval_group": "g"}, extra_edge_into_gate=True
     )
-    with pytest.raises(DAGValidationError) as exc:
-        definitions.publish_version(workflow.id, version.version)
-    assert any("exactly one is supported" in issue and "MA7.4" in issue for issue in exc.value.issues)
+    assert definitions.publish_version(workflow.id, version.version).status.value == "active"
 
 
-def test_runtime_fails_closed_on_a_fan_in_gate_that_bypassed_validation(
+def test_a_multi_input_gate_waits_for_all_its_sources_and_runs_nothing(
     db, session_factory, bootstrap, worker, calls
 ):
-    """Defense in depth: even a version activated without validation never
-    executes a multi-input gate."""
+    """MA7.4c (was: "runtime fails closed on a fan-in gate"): a gate with two
+    inputs is dispatched only once BOTH are COMPLETED, becomes one durable wait
+    with one Approval, and creates no AgentRun/TaskRun/job of its own."""
     definitions = WorkflowDefinitionService(db)
     workflow = definitions.create_workflow(bootstrap.project.id, "fanin")
     version = definitions.get_latest_version(workflow.id)
@@ -1110,7 +1112,7 @@ def test_runtime_fails_closed_on_a_fan_in_gate_that_bypassed_validation(
     end = definitions.add_node(workflow.id, version.version, "end", WorkflowNodeType.TERMINAL)
     for up, down in ((a, b), (b, gate), (a, gate), (gate, end)):
         definitions.add_edge(workflow.id, version.version, up.id, down.id)
-    version.status = VersionStatus.ACTIVE  # bypasses publish-time validation
+    version.status = VersionStatus.ACTIVE
     task_run = TaskRun(task_id=make_task(db, bootstrap.project).id, status=TaskRunStatus.CREATED)
     db.add(task_run)
     db.commit()
@@ -1120,10 +1122,10 @@ def test_runtime_fails_closed_on_a_fan_in_gate_that_bypassed_validation(
 
     state = snapshot(session_factory, run.id)
     assert calls == ["a", "b"]
-    assert state["nodes"]["gate"] == WorkflowNodeRunStatus.FAILED
-    assert state["run"] == WorkflowRunStatus.FAILED
-    assert state["approvals"] == []
-    assert "workflow.error" in event_types(session_factory, task_run.id)
+    assert state["nodes"]["gate"] == WorkflowNodeRunStatus.WAITING_FOR_APPROVAL  # after BOTH a and b
+    assert state["run"] == WorkflowRunStatus.NODE_WAITING_FOR_APPROVAL
+    assert len(state["approvals"]) == 1
+    assert "workflow.error" not in event_types(session_factory, task_run.id)
     assert (state["agent_runs_total"], state["jobs_total"]) == (2, 2)  # the gate created neither
 
 

@@ -81,6 +81,11 @@ logger = logging.getLogger("app.services.execution_service")
 
 _RETRYABLE_ERROR_CATEGORIES = {"provider_connection_error", "provider_timeout"}
 
+# Pessimistic characters-per-token used ONLY to compare a character count with
+# a model's known context window (in tokens). Real text is usually 3-4; using 2
+# means we fail closed on evidence that might not fit rather than admit it.
+_CHARS_PER_TOKEN_FLOOR = 2
+
 
 class ExecutionAborted(Exception):
     """Internal control-flow signal: the run reached a terminal
@@ -281,7 +286,11 @@ class AgentExecutionService:
 
         # 3. Prompt assembly --------------------------------------------------
         try:
-            extra_context = self._build_extra_context(agent_run)
+            extra_context = self._build_extra_context(agent_run, resolved=resolved)
+        except _WorkflowContextTooLarge as exc:
+            self.governor.release(reservation)
+            self._finalize_failed(ctx, category="workflow_context_too_large", message=str(exc), attempt=attempt)
+            raise ExecutionAborted(str(exc)) from exc
         except _MissingReviewContext as exc:
             self.governor.release(reservation)
             self._finalize_failed(ctx, category="review_context_error", message=str(exc), attempt=attempt)
@@ -469,7 +478,9 @@ class AgentExecutionService:
 
     # -- extra prompt context (MA4 reviewer/repair runs only) --------------
 
-    def _build_extra_context(self, agent_run: AgentRun) -> Optional[str]:
+    def _build_extra_context(
+        self, agent_run: AgentRun, resolved: Optional[ResolvedModel] = None
+    ) -> Optional[str]:
         """Resolves ``agent_run.input_context_json`` (set only for
         REVIEWER/REPAIR Agent Runs by ReviewOrchestrationService) into the
         rendered text block ``build_prompt`` appends to the user prompt.
@@ -513,11 +524,13 @@ class AgentExecutionService:
             return self._build_evaluator_extra_context(input_context)
 
         if kind == "workflow_upstream":
-            return self._build_workflow_upstream_context(input_context)
+            return self._build_workflow_upstream_context(input_context, resolved)
 
         return None
 
-    def _build_workflow_upstream_context(self, input_context: dict) -> Optional[str]:
+    def _build_workflow_upstream_context(
+        self, input_context: dict, resolved: Optional[ResolvedModel] = None
+    ) -> Optional[str]:
         """MA7.3b: a Workflow-dispatched Agent Run's ``input_context_json``
         lists the immutable upstream artifact ids (already passed through any
         Human Approval node). Each artifact is read from disk and checked
@@ -550,7 +563,42 @@ class AgentExecutionService:
                     f"Upstream artifact {artifact_id} content no longer matches its recorded sha256."
                 )
             upstream.append((artifact.id, artifact.content_hash or "", text))
-        return build_workflow_upstream_extra_context(upstream, labels) if upstream else None
+        if not upstream:
+            return None
+        rendered = build_workflow_upstream_extra_context(upstream, labels)
+        self._enforce_upstream_context_limit(len(rendered), len(upstream), resolved)
+        return rendered
+
+    def _enforce_upstream_context_limit(
+        self, size_chars: int, artifact_count: int, resolved: Optional[ResolvedModel]
+    ) -> None:
+        """MA7.4c: fan-in can multiply prompt size, and the evidence a human
+        approved must reach the model COMPLETE -- so oversized evidence FAILS
+        the node here, before any provider call. Never truncated, summarized
+        or partially dropped.
+
+        The platform hard cap (``workflow_upstream_context_max_chars``) is
+        authoritative. A model's KNOWN context window can only lower the
+        effective limit (``window_tokens * _CHARS_PER_TOKEN_FLOOR`` -- a
+        deliberately pessimistic conversion, since a window is in tokens and
+        the evidence in characters); a model with no recorded window is held to
+        the platform cap only -- no limit is invented for it."""
+        limit = settings.workflow_upstream_context_max_chars
+        source = "platform cap (MAP_WORKFLOW_UPSTREAM_CONTEXT_MAX_CHARS)"
+        window = None
+        if resolved is not None:
+            window = resolved.model.context_window
+        if window:
+            model_limit = window * _CHARS_PER_TOKEN_FLOOR
+            if model_limit < limit:
+                limit, source = model_limit, f"model context window ({window} tokens)"
+        if size_chars > limit:
+            raise _WorkflowContextTooLarge(
+                f"The upstream evidence for this node ({artifact_count} artifact(s), {size_chars} characters) "
+                f"exceeds the limit of {limit} characters set by the {source}. It is never truncated: "
+                "reduce or split the upstream outputs, use a model with a larger context window, or raise "
+                "the platform cap."
+            )
 
     def _build_evaluator_extra_context(self, input_context: dict) -> str:
         """MA6 Slice 3B: renders the subject task's own title/description/
@@ -802,6 +850,12 @@ class _MissingReviewContext(Exception):
     immutable and never deleted while their owning Agent Run exists), but
     handled as a proper categorized failure rather than an unhandled I/O
     error, consistent with every other failure category in this module."""
+
+
+class _WorkflowContextTooLarge(Exception):
+    """MA7.4c: the complete required upstream evidence exceeds the configured
+    limit -- a categorized failure (``workflow_context_too_large``) raised
+    before any provider call/budget spend; the evidence is never cut down."""
 
 
 class _MissingWorkflowContext(Exception):

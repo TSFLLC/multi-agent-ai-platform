@@ -15,9 +15,18 @@ MA3+.
 
 Run standalone with::
 
-    python -m app.worker
+    python -m app.worker                    # one job at a time (default)
+    python -m app.worker --concurrency 3    # up to 3 jobs at once (MAP_WORKER_CONCURRENCY)
+
+MA7.4c concurrency: ``concurrency=N`` runs N *lanes* in this one process, each a
+thread with its own worker id and its own short-lived DB sessions, all
+claiming from the same SQLite ``job_queue`` with the same leases, heartbeats
+and fencing tokens (a lane is exactly the historical single worker loop), and
+all stopping on the one shared shutdown event. ``concurrency=1`` (the default)
+is the unchanged single loop -- no thread is started.
 """
 
+import argparse
 import logging
 import os
 import platform
@@ -27,11 +36,11 @@ import threading
 import time
 import uuid
 from types import FrameType
-from typing import Optional
+from typing import Optional, Sequence
 
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.config import settings
+from app.config import MAX_WORKER_CONCURRENCY, MIN_WORKER_CONCURRENCY, settings
 from app.db.enums import JobQueueStatus, JobType
 from app.db.session import SessionLocal as _default_session_factory
 from app.models.execution import JobQueue
@@ -58,8 +67,16 @@ class Worker:
         internal_test_iterations: int = 3,
         session_factory: Optional[sessionmaker] = None,
         reconcile_interval_seconds: Optional[float] = None,
+        concurrency: Optional[int] = None,
     ):
         self.worker_id = worker_id or new_worker_id()
+        # Explicit None check: it is the only "use the setting" signal.
+        self.concurrency = settings.worker_concurrency if concurrency is None else concurrency
+        if not MIN_WORKER_CONCURRENCY <= self.concurrency <= MAX_WORKER_CONCURRENCY:
+            raise ValueError(
+                f"concurrency must be between {MIN_WORKER_CONCURRENCY} and {MAX_WORKER_CONCURRENCY}, "
+                f"got {self.concurrency}"
+            )
         self._session_factory = session_factory or _default_session_factory
         self.poll_interval_seconds = poll_interval_seconds or settings.worker_poll_interval_seconds
         self.lease_seconds = lease_seconds or settings.worker_lease_seconds
@@ -142,20 +159,78 @@ class Worker:
 
     def run_forever(self) -> None:
         self._install_signal_handlers()
-        logger.info("worker_started worker_id=%s", self.worker_id)
+        logger.info("worker_started worker_id=%s concurrency=%s", self.worker_id, self.concurrency)
         self.reconcile_workflows()
         self._last_reconcile = time.monotonic()
         try:
-            while not self._shutdown.is_set():
-                processed = self.run_once()
-                if not processed and not self._shutdown.is_set():
-                    # Idle: the one place a periodic recovery sweep may run.
-                    # It is throttled to reconcile_interval_seconds, so the
-                    # loop never spins on it -- the wait below still paces it.
-                    self._reconcile_if_due()
-                    self._shutdown.wait(self.poll_interval_seconds)
+            if self.concurrency == 1:
+                self._lane_loop()
+            else:
+                self._run_lanes()
         finally:
             logger.info("worker_stopped worker_id=%s", self.worker_id)
+
+    def _lane_loop(self) -> None:
+        """One claim/process loop -- the whole of the historical worker."""
+        while not self._shutdown.is_set():
+            processed = self.run_once()
+            if not processed and not self._shutdown.is_set():
+                # Idle: the one place a periodic recovery sweep may run.
+                # It is throttled to reconcile_interval_seconds, so the
+                # loop never spins on it -- the wait below still paces it.
+                self._reconcile_if_due()
+                self._shutdown.wait(self.poll_interval_seconds)
+
+    def _run_lanes(self) -> None:
+        """MA7.4c: ``concurrency`` lanes, each an independent ``Worker`` (own
+        worker id => own lease owner / attempt records, own per-call DB
+        sessions) sharing this worker's shutdown event. Only lane 0 runs the
+        idle reconciliation sweep, so it is not repeated N times an interval.
+        If a lane dies of an unexpected error the whole worker stops -- loudly
+        and re-raised here, like the single loop would -- rather than silently
+        continuing with fewer lanes."""
+        failures = []
+
+        def run_lane(lane: "Worker") -> None:
+            try:
+                lane._lane_loop()
+            except BaseException as exc:  # re-raised below, after every lane has stopped
+                logger.exception("worker_lane_failed worker_id=%s", lane.worker_id)
+                failures.append(exc)
+                self.request_shutdown()
+
+        lanes = []
+        for index in range(self.concurrency):
+            lane = Worker(
+                worker_id=f"{self.worker_id}:lane{index}",
+                poll_interval_seconds=self.poll_interval_seconds,
+                lease_seconds=self.lease_seconds,
+                heartbeat_interval_seconds=self.heartbeat_interval_seconds,
+                internal_test_work_seconds=self.internal_test_work_seconds,
+                internal_test_iterations=self.internal_test_iterations,
+                session_factory=self._session_factory,
+                reconcile_interval_seconds=self.reconcile_interval_seconds if index == 0 else 0,
+                concurrency=1,
+            )
+            lane._shutdown = self._shutdown
+            lanes.append(lane)
+        threads = [
+            threading.Thread(target=run_lane, args=(lane,), name=f"worker-lane-{i}", daemon=True)
+            for i, lane in enumerate(lanes)
+        ]
+        for thread in threads:
+            thread.start()
+        try:
+            # Short joins keep the main thread responsive to SIGINT/SIGTERM.
+            while any(thread.is_alive() for thread in threads):
+                for thread in threads:
+                    thread.join(0.2)
+        finally:
+            self.request_shutdown()
+            for thread in threads:
+                thread.join()
+        if failures:
+            raise failures[0]
 
     def _reconcile_if_due(self) -> Optional[int]:
         """Runs the workflow reconciliation sweep if this worker is idle and
@@ -516,11 +591,39 @@ class Worker:
             db.close()
 
 
-def main() -> None:
+def _concurrency_arg(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{value!r} is not an integer") from None
+    if not MIN_WORKER_CONCURRENCY <= parsed <= MAX_WORKER_CONCURRENCY:
+        raise argparse.ArgumentTypeError(
+            f"must be between {MIN_WORKER_CONCURRENCY} and {MAX_WORKER_CONCURRENCY}, got {parsed}"
+        )
+    return parsed
+
+
+def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="python -m app.worker", description="Local job-queue worker.")
+    parser.add_argument(
+        "--concurrency",
+        type=_concurrency_arg,
+        default=None,
+        metavar="N",
+        help=(
+            f"jobs to run at once, {MIN_WORKER_CONCURRENCY}-{MAX_WORKER_CONCURRENCY} "
+            "(default: MAP_WORKER_CONCURRENCY, else 1)"
+        ),
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: Optional[Sequence[str]] = None) -> None:
     from app.logging_config import configure_logging
 
+    args = parse_args(argv)
     configure_logging()
-    Worker().run_forever()
+    Worker(concurrency=args.concurrency).run_forever()
 
 
 if __name__ == "__main__":

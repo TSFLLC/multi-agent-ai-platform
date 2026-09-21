@@ -130,6 +130,29 @@ def build_acceptance(db, project, *, label="acc", real=True):
     return build_graph(db, project, ACCEPTANCE_NODES, ACCEPTANCE_EDGES, label=label, real=real)
 
 
+# MA7.4c: Planner -> Engineer -> {Test Engineer, Security Reviewer, Code Reviewer}
+#         -> Human Approval (the ALL-of barrier itself; no JOIN node) -> TERMINAL
+GATE_ACCEPTANCE_NODES = [
+    ("planner", AGENT),
+    ("engineer", AGENT),
+    ("test_engineer", AGENT),
+    ("security_reviewer", AGENT),
+    ("code_reviewer", AGENT),
+    ("gate", APPROVAL),
+    ("result", TERMINAL),
+]
+GATE_ACCEPTANCE_EDGES = (
+    [("planner", "engineer")]
+    + [("engineer", reviewer) for reviewer in REVIEWERS]
+    + [(reviewer, "gate") for reviewer in REVIEWERS]
+    + [("gate", "result")]
+)
+
+
+def build_gate_acceptance(db, project, *, label="gacc", real=True):
+    return build_graph(db, project, GATE_ACCEPTANCE_NODES, GATE_ACCEPTANCE_EDGES, label=label, real=real)
+
+
 def build_star(db, project, width, *, label="star"):
     """entry -> width branches -> join (a single fan-out of ``width``); every
     node an AGENT except the TERMINAL end. Published, so it is validated."""
@@ -210,6 +233,29 @@ def running_workers(session_factory, count=1):
         for thread in threads:
             thread.join(timeout=30)
         assert not any(thread.is_alive() for thread in threads), "a worker thread did not stop"
+
+
+@contextmanager
+def running_worker(session_factory, concurrency):
+    """ONE real ``Worker(concurrency=N)`` -- N lanes inside a single worker
+    process/object -- run on a thread the way ``python -m app.worker
+    --concurrency N`` runs it. Always shut down and joined."""
+    worker = Worker(
+        session_factory=session_factory,
+        poll_interval_seconds=0.01,
+        lease_seconds=60,
+        heartbeat_interval_seconds=0.05,
+        reconcile_interval_seconds=0,
+        concurrency=concurrency,
+    )
+    thread = threading.Thread(target=worker.run_forever, daemon=True)
+    thread.start()
+    try:
+        yield worker
+    finally:
+        worker.request_shutdown()
+        thread.join(timeout=30)
+        assert not thread.is_alive(), "the worker did not stop"
 
 
 def wait_until(predicate, timeout=30.0, interval=0.02):

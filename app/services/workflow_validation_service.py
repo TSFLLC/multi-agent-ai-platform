@@ -400,15 +400,13 @@ class WorkflowValidator:
         - ``config.approval_group`` is a non-empty string label;
         - no auto-approve / timeout / agent-approver configuration, and no
           node-level ``timeout_seconds``: nothing but a human may resolve it;
-        - at most ONE upstream dependency -- fan-in (several inputs to one
-          gate) is MA7.4, and is rejected here rather than executed with
-          ambiguous artifact lineage.
-        """
-        incoming: Dict[str, int] = {}
-        for _from_id, to_id, _edge in edges:
-            incoming[to_id] = incoming.get(to_id, 0) + 1
 
-        for node_id, node in nodes.items():
+        MA7.4c: a gate may have SEVERAL upstream dependencies. It is then the
+        ALL-of barrier itself (ready only when every source is COMPLETED) and
+        its Approval binds every source's output -- there is no separate JOIN
+        node. Single-parent gates are unchanged.
+        """
+        for node in nodes.values():
             if node.node_type != WorkflowNodeType.HUMAN_APPROVAL:
                 continue
             config = node.config or {}
@@ -425,11 +423,6 @@ class WorkflowValidator:
                 )
             if node.timeout_seconds is not None:
                 self.issues.append(f"HUMAN_APPROVAL node {node.node_key} must not set timeout_seconds")
-            if incoming.get(node_id, 0) > 1:
-                self.issues.append(
-                    f"HUMAN_APPROVAL node {node.node_key} has {incoming[node_id]} upstream dependencies; "
-                    "exactly one is supported (fan-in is MA7.4)"
-                )
 
     def _validate_referenced_agents(self, nodes: Dict[str, WorkflowNode], project_id: str) -> None:
         """Validate that all referenced agent versions exist and belong to the project."""

@@ -15,6 +15,10 @@ DATA_DIR = PROJECT_ROOT / "data"
 
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
+# MA7.4c: bounds of ``worker_concurrency`` (also the ``--concurrency`` CLI flag).
+MIN_WORKER_CONCURRENCY = 1
+MAX_WORKER_CONCURRENCY = 4
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="MAP_", env_file=".env", extra="ignore")
@@ -65,6 +69,12 @@ class Settings(BaseSettings):
     # a commit (e.g. a locked database) is recovered without a restart.
     # 0 disables the periodic sweep (the startup sweep always runs).
     worker_reconcile_interval_seconds: float = 60.0
+    # MA7.4c: how many jobs ONE worker process may run at once. Each lane is a
+    # thread with its own DB sessions on the same SQLite queue (same leases,
+    # heartbeats and fencing). 1 (the default) is exactly the historical
+    # single-loop worker. Bounded small on purpose: SQLite has one writer, so
+    # a handful of lanes is what a local-first V1 can usefully feed.
+    worker_concurrency: int = 1
 
     # MA7.4b: the most direct outgoing branches (edges) any single workflow
     # node may have. Every branch is one Agent Run -- a provider call and a
@@ -74,6 +84,15 @@ class Settings(BaseSettings):
     # keeping the worst case for one node small. Enforced at publish and
     # again at start; provider-agnostic on purpose.
     workflow_max_fan_out: int = 8
+
+    # MA7.4c: hard platform cap on the rendered upstream evidence a workflow
+    # node's Agent may be given (characters, not tokens: model-independent and
+    # exactly measurable). Fan-in can multiply prompt size, so evidence larger
+    # than this FAILS the node before any provider call -- it is never
+    # truncated or summarized. ~200k characters is on the order of 50k tokens.
+    # A model's known context window can only LOWER the effective limit, never
+    # raise it (see AgentExecutionService).
+    workflow_upstream_context_max_chars: int = 200_000
 
     # Agent Run / Task Run defaults (Owner decision, frozen) — overridable
     # per-row (agent_runs.timeout_seconds / task_runs.timeout_seconds),
@@ -117,6 +136,24 @@ class Settings(BaseSettings):
         # never a busy loop.
         if v != 0 and v < 1.0:
             raise ValueError("worker_reconcile_interval_seconds must be 0 (disabled) or >= 1.0")
+        return v
+
+    @field_validator("worker_concurrency")
+    @classmethod
+    def _validate_worker_concurrency(cls, v: int) -> int:
+        if not MIN_WORKER_CONCURRENCY <= v <= MAX_WORKER_CONCURRENCY:
+            raise ValueError(
+                f"worker_concurrency must be between {MIN_WORKER_CONCURRENCY} and {MAX_WORKER_CONCURRENCY}"
+            )
+        return v
+
+    @field_validator("workflow_upstream_context_max_chars")
+    @classmethod
+    def _validate_upstream_context_max_chars(cls, v: int) -> int:
+        # A floor so a typo cannot make every fan-in fail; a ceiling so the
+        # cap cannot be silently disabled.
+        if not 1_000 <= v <= 10_000_000:
+            raise ValueError("workflow_upstream_context_max_chars must be between 1000 and 10000000")
         return v
 
     @field_validator("workflow_max_fan_out")
