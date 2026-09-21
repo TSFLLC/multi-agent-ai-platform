@@ -70,20 +70,20 @@ def temp_db(tmp_path):
 @pytest.fixture
 def setup_workflow_context(temp_db):
     """Create base workflow infrastructure: project, agents, active workflow."""
-    from tests.conftest import make_project, make_agent, make_agent_version, make_task
+    from tests.conftest import make_project, make_agent, make_runnable_agent_version, make_task
 
     db = temp_db
     project = make_project(db, name="test-project")
 
     # Create agents
     agent1 = make_agent(db, project, "planner")
-    agent1_v = make_agent_version(db, agent1)
+    agent1_v = make_runnable_agent_version(db, agent1)
 
     agent2 = make_agent(db, project, "engineer")
-    agent2_v = make_agent_version(db, agent2)
+    agent2_v = make_runnable_agent_version(db, agent2)
 
     agent3 = make_agent(db, project, "reviewer")
-    agent3_v = make_agent_version(db, agent3)
+    agent3_v = make_runnable_agent_version(db, agent3)
 
     # Create workflow
     def_service = WorkflowDefinitionService(db)

@@ -17,7 +17,6 @@ from app.db.enums import (
     ArtifactType,
     JobType,
     TaskRunStatus,
-    VersionStatus,
     WorkflowNodeType,
 )
 from app.models.artifacts_eval import Artifact
@@ -29,7 +28,7 @@ from app.models.workflow import WorkflowNode, WorkflowNodeRun, WorkflowRun
 from app.services.approval_service import WORKFLOW_HUMAN_APPROVAL_OPERATION
 from app.services.workflow_definition_service import WorkflowDefinitionService
 from app.services.workflow_execution_service import WorkflowExecutionService
-from tests.conftest import make_agent, make_agent_version, make_task
+from tests.conftest import make_agent, make_runnable_agent_version, make_task
 
 Built = namedtuple("Built", "workflow version published nodes agent_versions task_run project")
 
@@ -49,9 +48,7 @@ def build_chain(db, project, layout, *, label="wf", approval_group="eng-leads", 
     for key, kind in layout:
         if kind == AGENT:
             agent = make_agent(db, project, f"{label}-{key}")
-            agent_version = make_agent_version(
-                db, agent, status=VersionStatus.ACTIVE if activate_agents else VersionStatus.DRAFT
-            )
+            agent_version = make_runnable_agent_version(db, agent)  # publishable; ``activate_agents`` kept for callers
             agent_versions[key] = agent_version
             nodes[key] = definitions.add_node(
                 workflow.id,

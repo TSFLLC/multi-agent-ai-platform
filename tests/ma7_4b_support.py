@@ -37,6 +37,7 @@ from tests.conftest import (
     make_model,
     make_provider,
     make_provider_model,
+    make_runnable_agent_version,
     make_task,
 )
 from tests.ma7_3b_support import AGENT, APPROVAL, TERMINAL, Built
@@ -155,11 +156,7 @@ def build_graph(
     created, agent_versions, role_of = {}, {}, {}
     for key, kind in nodes:
         if kind == AGENT:
-            agent_version = make_agent_version(
-                db,
-                make_agent(db, project, f"{label}-{key}"),
-                status=VersionStatus.ACTIVE if real else VersionStatus.DRAFT,
-            )
+            agent_version = make_runnable_agent_version(db, make_agent(db, project, f"{label}-{key}"))
             if real:
                 canonical = f"fake/{label}-{key}"
                 provider_model = make_provider_model(

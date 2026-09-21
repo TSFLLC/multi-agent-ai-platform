@@ -58,6 +58,15 @@ class ConflictError(AppError):
     code = "conflict"
 
 
+class WorkflowValidationFailedError(AppError):
+    """A workflow version failed publish-time validation (MA7.6A). ``detail``
+    carries ``{"issues": [...]}`` -- one entry per problem -- so a client can
+    show each issue individually instead of parsing a stringified message."""
+
+    status_code = status.HTTP_400_BAD_REQUEST
+    code = "workflow_validation_failed"
+
+
 class InvalidStateTransitionError(AppError):
     status_code = status.HTTP_409_CONFLICT
     code = "invalid_state_transition"

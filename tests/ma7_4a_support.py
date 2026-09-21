@@ -24,7 +24,7 @@ from app.models.artifacts_eval import Artifact
 from app.models.tasks import AgentRun, TaskRun
 from app.models.workflow import WorkflowNodeRun, WorkflowRun
 from app.services.workflow_definition_service import WorkflowDefinitionService
-from tests.conftest import make_agent, make_agent_version, make_task
+from tests.conftest import make_agent, make_runnable_agent_version, make_task
 from tests.ma7_3b_support import Built
 
 BRANCHES = ("test", "security", "code")
@@ -44,7 +44,7 @@ def build_diamond(db, project, *, insert_order=BRANCHES, label="dia", join_agent
     nodes, agent_versions = {}, {}
     agent_keys = ["eng", *BRANCHES] + (["join"] if join_agent else [])
     for key in agent_keys:
-        agent_version = make_agent_version(db, make_agent(db, project, f"{label}-{key}"))
+        agent_version = make_runnable_agent_version(db, make_agent(db, project, f"{label}-{key}"))
         agent_versions[key] = agent_version
         nodes[key] = definitions.add_node(
             workflow.id,

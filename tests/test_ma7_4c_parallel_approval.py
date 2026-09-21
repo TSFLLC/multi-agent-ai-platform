@@ -56,7 +56,7 @@ from app.services.workflow_definition_service import WorkflowDefinitionService
 from app.services.workflow_execution_service import WorkflowExecutionService
 from app.services.workflow_validation_service import DAGValidationError
 from app.worker import Worker, parse_args
-from tests.conftest import make_agent, make_agent_version
+from tests.conftest import make_agent, make_runnable_agent_version
 from tests.ma7_3b_support import (
     AGENT,
     APPROVAL,
@@ -722,7 +722,7 @@ def test_gate_configuration_is_still_validated_for_a_multi_parent_gate(db, boots
             version.version,
             key,
             WorkflowNodeType.AGENT,
-            config={"agent_version_id": make_agent_version(db, make_agent(db, bootstrap.project, key)).id},
+            config={"agent_version_id": make_runnable_agent_version(db, make_agent(db, bootstrap.project, key)).id},
         )
         for key in ("a", "b")
     ]

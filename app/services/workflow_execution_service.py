@@ -531,6 +531,57 @@ class WorkflowExecutionService(BaseService):
 
         return workflow_run
 
+    def start_workflow_run_from_task(self, workflow_version_id: str, task_id: str) -> WorkflowRun:
+        """Starts an ACTIVE workflow version for a Task (MA7.6A): creates the
+        run's parent TaskRun -- and ONLY a TaskRun: no AgentRun, no job, so no
+        stray standalone execution -- then starts the WorkflowRun exactly as
+        ``start_workflow_run`` does.
+
+        The TaskRun is flushed but not committed before ``start_workflow_run``
+        runs; that method validates everything (ACTIVE version, same project,
+        no conditional edges, fan-out cap, evaluation dependencies) BEFORE it
+        writes, and commits the TaskRun, WorkflowRun and node runs together. Any
+        refusal rolls the TaskRun back, so a failed start leaves nothing behind.
+        The version binding is the requested ``workflow_version_id`` and nothing
+        else.
+
+        Raises WorkflowExecutionError if the version or task is missing, or
+        they belong to different projects, or the version cannot be started."""
+        wv: Optional[WorkflowVersion] = self.db.query(WorkflowVersion).filter(
+            WorkflowVersion.id == workflow_version_id
+        ).first()
+        if not wv:
+            raise WorkflowExecutionError(f"Workflow version {workflow_version_id} not found")
+        workflow: Optional[Workflow] = self.db.query(Workflow).filter(Workflow.id == wv.workflow_id).first()
+        task: Optional[Task] = self.db.query(Task).filter(Task.id == task_id).first()
+        if not workflow or not task:
+            raise WorkflowExecutionError("Workflow and Task ownership could not be established")
+        if workflow.project_id != task.project_id:
+            raise WorkflowExecutionError("Workflow and Task must belong to the same project")
+
+        task_run = TaskRun(
+            task_id=task.id,
+            workflow_version_id=wv.id,
+            status=TaskRunStatus.CREATED,
+            config_snapshot={
+                "task_title": task.title,
+                "task_description": task.description,
+                "execution_mode": task.execution_mode.value,
+                "workflow_id": workflow.id,
+                "workflow_version_id": wv.id,
+                "workflow_version": wv.version,
+            },
+            timeout_seconds=settings.default_task_run_timeout_seconds,
+            created_at=datetime.now(timezone.utc),
+        )
+        self.db.add(task_run)
+        self.db.flush()
+        try:
+            return self.start_workflow_run(wv.id, task_run.id)
+        except Exception:
+            self.db.rollback()
+            raise
+
     def on_agent_run_complete(self, agent_run_id: str) -> None:
         """Reconciliation: handle agent completion and unlock downstream nodes.
 

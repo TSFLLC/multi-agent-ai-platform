@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import List, Optional
 
 from pydantic import BaseModel
 
@@ -22,6 +22,31 @@ class WorkflowNodeCreate(BaseModel):
     node_type: WorkflowNodeType
     config: Optional[dict] = None
     max_iterations: Optional[int] = None
+
+
+class WorkflowNodeUpdate(BaseModel):
+    """PATCH body for a node of a DRAFT version. Only ``config`` is updatable:
+    the domain service exposes nothing else (a node's key and type are fixed
+    once created)."""
+
+    config: Optional[dict] = None
+
+
+class WorkflowValidationRead(BaseModel):
+    """Dry-run validation result. ``issues`` are the validator's own messages,
+    one per problem, in its order -- textual, so a client must not assume they
+    map to exactly one node."""
+
+    valid: bool
+    issues: List[str] = []
+
+
+class WorkflowRunStart(BaseModel):
+    """Start body: exactly one of ``task_run_id`` (an existing parent TaskRun)
+    or ``task_id`` (the run's parent TaskRun is created with the run)."""
+
+    task_run_id: Optional[str] = None
+    task_id: Optional[str] = None
 
 
 class WorkflowVersionRead(BaseModel):

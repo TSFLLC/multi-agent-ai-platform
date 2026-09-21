@@ -4,30 +4,36 @@ MA7.1: Workflow authoring, versioning, DAG validation, publish.
 No execution (WorkflowRun/WorkflowNodeRun execution is MA7.2+).
 """
 
+import uuid
 from typing import Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from sqlalchemy import and_, select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db
 from app.auth import get_current_user
 from app.authz import ProjectAction, check_project_access
-from app.db.enums import ApprovalScope, VersionStatus
-from app.errors import NotFoundError
+from app.db.enums import ApprovalScope, IdempotencyScope, VersionStatus
+from app.errors import ConflictError, NotFoundError, WorkflowValidationFailedError
 from app.models.evaluation_runs import EvaluationRun
 from app.models.governance import Approval
 from app.models.identity import User
+from app.models.tasks import Task
 from app.models.workflow import Workflow, WorkflowNodeRun, WorkflowRun, WorkflowVersion
 from app.schemas.workflow import (
     WorkflowCreate,
     WorkflowNodeCreate,
     WorkflowNodeRunRead,
+    WorkflowNodeUpdate,
     WorkflowRead,
     WorkflowRunRead,
+    WorkflowRunStart,
+    WorkflowValidationRead,
     WorkflowVersionRead,
 )
 from app.services.approval_service import WORKFLOW_HUMAN_APPROVAL_OPERATION
+from app.services.idempotency_service import BeginOutcome, IdempotencyService
 from app.services.workflow_definition_service import WorkflowDefinitionService
 from app.services.workflow_validation_service import DAGValidationError
 
@@ -190,18 +196,55 @@ def publish_workflow_version(
             version=version,
             status=published_version.status,
         )
+    except DAGValidationError as e:
+        # A ValueError subclass, so it must be handled before the ValueError
+        # branch. The issues stay a structured list in the error envelope
+        # (``error.detail.issues``), never a stringified dict.
+        raise WorkflowValidationFailedError(
+            f"Workflow validation failed ({len(e.issues)} issue{'' if len(e.issues) == 1 else 's'}).",
+            detail={"issues": list(e.issues)},
+        )
     except ValueError as e:
         if "not found" in str(e):
             raise HTTPException(status_code=404, detail=str(e))
         raise HTTPException(status_code=400, detail=str(e))
-    except DAGValidationError as e:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error": "DAG validation failed",
-                "issues": e.issues,
-            },
-        )
+
+
+@router.post("/workflows/{workflow_id}/versions/{version}/validate", response_model=WorkflowValidationRead)
+def validate_workflow_version(
+    workflow_id: str, version: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)
+):
+    """Dry-run of publish validation for a DRAFT version (MA7.6A). Runs the
+    same ``WorkflowValidator`` publish uses and changes nothing. Project READ
+    suffices: it only reads the graph and the registry rows it references."""
+    _require_workflow_access(db, user, workflow_id, ProjectAction.READ)
+    service = WorkflowDefinitionService(db)
+    try:
+        issues = service.validate_version(workflow_id, version)
+    except ValueError as e:
+        if "not found" in str(e):
+            raise HTTPException(status_code=404, detail=str(e))
+        raise ConflictError(str(e))
+    return WorkflowValidationRead(valid=not issues, issues=issues)
+
+
+@router.post("/workflows/{workflow_id}/versions/{version}/clone", response_model=WorkflowVersionRead, status_code=201)
+def clone_workflow_version(
+    workflow_id: str, version: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)
+):
+    """Creates a new DRAFT version of the same workflow from ``version`` --
+    "edit as new version" (MA7.6A). Atomic; the source version is untouched."""
+    _require_workflow_access(db, user, workflow_id, ProjectAction.MODIFY)
+    service = WorkflowDefinitionService(db)
+    try:
+        new_version = service.clone_version(workflow_id, version)
+    except ValueError as e:
+        if "not found" in str(e):
+            raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e))
+    return WorkflowVersionRead(
+        id=new_version.id, workflow_id=workflow_id, version=new_version.version, status=new_version.status
+    )
 
 
 @router.get("/workflows/{workflow_id}/versions/{version}", response_model=WorkflowVersionRead)
@@ -252,6 +295,29 @@ def add_workflow_node(
             max_iterations=body.max_iterations,
         )
         return {"id": node.id, "node_key": node.node_key, "node_type": node.node_type}
+    except ValueError as e:
+        if "not found" in str(e):
+            raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.patch("/workflows/{workflow_id}/versions/{version}/nodes/{node_id}")
+def update_workflow_node(
+    workflow_id: str,
+    version: int,
+    node_id: str,
+    body: WorkflowNodeUpdate,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Update a node's configuration in a DRAFT workflow version (MA7.6A).
+    Exposes ``WorkflowDefinitionService.update_node`` unchanged: config only,
+    DRAFT only. The config is validated by validate/publish, like add_node's."""
+    _require_workflow_access(db, user, workflow_id, ProjectAction.MODIFY)
+    service = WorkflowDefinitionService(db)
+    try:
+        node = service.update_node(workflow_id, version, node_id, config=body.config)
+        return {"id": node.id, "node_key": node.node_key, "node_type": node.node_type, "config": node.config}
     except ValueError as e:
         if "not found" in str(e):
             raise HTTPException(status_code=404, detail=str(e))
@@ -362,13 +428,21 @@ def get_workflow_graph(
 def start_workflow_run(
     workflow_id: str,
     version: int,
-    body: dict,
+    body: WorkflowRunStart,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
+    idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
 ):
     """Start execution of an ACTIVE workflow version.
 
-    Body: {"task_run_id": "<task_run_id>"}
+    Body: exactly ONE of
+      {"task_run_id": "<existing parent TaskRun>"}   (MA7.2)
+      {"task_id": "<Task>"}                          (MA7.6A)
+
+    With ``task_id`` the run's parent TaskRun is created together with the
+    run -- no AgentRun and no job for it -- after checking the Task belongs
+    to the workflow's project. ``Idempotency-Key`` (optional) makes a retried
+    ``task_id`` start return the run it already created.
 
     Creates WorkflowRun with initial node runs, schedules entry nodes.
 
@@ -379,26 +453,53 @@ def start_workflow_run(
 
     service = WorkflowExecutionService(db)
 
+    def read(run) -> WorkflowRunRead:
+        return WorkflowRunRead(
+            id=run.id,
+            workflow_version_id=run.workflow_version_id,
+            task_run_id=run.task_run_id,
+            status=run.status,
+        )
+
     try:
-        task_run_id = body.get("task_run_id")
-        if not task_run_id:
+        if body.task_run_id and body.task_id:
+            raise HTTPException(status_code=400, detail="provide exactly one of task_run_id or task_id, not both")
+        if not body.task_run_id and not body.task_id:
             raise HTTPException(status_code=400, detail="task_run_id required")
 
         wv = _get_workflow_version_or_404(db, workflow_id, version)
-        check_project_access(
-            db,
-            user=user,
-            project_id=_workflow_project_id(db, wv),
-            action=ProjectAction.MODIFY,
-        )
+        project_id = _workflow_project_id(db, wv)
+        check_project_access(db, user=user, project_id=project_id, action=ProjectAction.MODIFY)
 
-        workflow_run = service.start_workflow_run(wv.id, task_run_id)
-        return WorkflowRunRead(
-            id=workflow_run.id,
-            workflow_version_id=workflow_run.workflow_version_id,
-            task_run_id=workflow_run.task_run_id,
-            status=workflow_run.status,
-        )
+        if body.task_run_id:
+            return read(service.start_workflow_run(wv.id, body.task_run_id))
+
+        task = db.get(Task, body.task_id)
+        if task is None:
+            raise NotFoundError(f"Task {body.task_id} not found.")
+        # The caller must be allowed to act on the Task's OWN project (403 if
+        # it belongs to one they have no access to) ...
+        check_project_access(db, user=user, project_id=task.project_id, action=ProjectAction.MODIFY)
+        # ... and it must be the workflow's project.
+        if task.project_id != project_id:
+            raise HTTPException(status_code=400, detail="Workflow and Task must belong to the same project")
+
+        key = idempotency_key or f"auto:{uuid.uuid4()}"
+        idempotency = IdempotencyService(db)
+        begin = idempotency.begin(key, scope=IdempotencyScope.API_REQUEST, resource_type="workflow_run")
+        if begin.outcome == BeginOutcome.ALREADY_COMPLETED:
+            run_id = (begin.key_row.result_ref or {}).get("workflow_run_id")
+            existing = db.get(WorkflowRun, run_id) if run_id else None
+            if existing is None or existing.workflow_version_id != wv.id:
+                raise ConflictError(f"Idempotency-Key {key!r} was already used for a different request.")
+            return read(existing)
+        try:
+            workflow_run = service.start_workflow_run_from_task(wv.id, task.id)
+            idempotency.complete(key, result_ref={"workflow_run_id": workflow_run.id})
+            return read(workflow_run)
+        except Exception:
+            idempotency.fail(key)
+            raise
     except WorkflowExecutionError as e:
         raise HTTPException(status_code=400, detail=str(e))
 

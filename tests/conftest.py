@@ -180,6 +180,22 @@ def make_agent_version(db, agent=None, version=1, status=VersionStatus.DRAFT):
     return av
 
 
+def make_runnable_agent_version(db, agent=None, version=1):
+    """An ACTIVE Agent Version whose model policy names a real provider model
+    -- what a workflow AGENT node needs to be publishable (MA7.6A: publish
+    refuses a node that could never resolve a model)."""
+    import uuid
+
+    agent = agent or make_agent(db)
+    av = make_agent_version(db, agent, version=version, status=VersionStatus.ACTIVE)
+    provider = make_provider(db)
+    model = make_model(db, canonical_model_id=f"test/runnable-{uuid.uuid4().hex[:12]}")
+    provider_model = make_provider_model(db, model=model, provider=provider)
+    av.model_policy = {"mode": "manual", "manual_provider_model_id": provider_model.id}
+    db.flush()
+    return av
+
+
 def make_evaluation_definition(db, project=None, name="Software Engineer Correctness Rubric"):
     from app.models.evaluation_definitions import EvaluationDefinition
 

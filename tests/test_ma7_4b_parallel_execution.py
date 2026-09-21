@@ -47,7 +47,7 @@ from app.repositories.job_queue_repository import JobQueueRepository
 from app.services.workflow_definition_service import WorkflowDefinitionService
 from app.services.workflow_execution_service import WorkflowExecutionError, WorkflowExecutionService
 from app.services.workflow_validation_service import DAGValidationError
-from tests.conftest import make_agent, make_agent_version, make_task
+from tests.conftest import make_agent, make_runnable_agent_version, make_task
 from tests.ma7_3b_support import (
     AGENT,
     APPROVAL,
@@ -1524,7 +1524,7 @@ def test_an_unsupported_branch_fails_the_run_fast_and_stops_its_siblings(
             version.version,
             key,
             WorkflowNodeType.AGENT,
-            config={"agent_version_id": make_agent_version(db, make_agent(db, bootstrap.project, key)).id},
+            config={"agent_version_id": make_runnable_agent_version(db, make_agent(db, bootstrap.project, key)).id},
         )
     made["judge"] = definitions.add_node(workflow.id, version.version, "judge", WorkflowNodeType.JUDGE, config={})
     definitions.add_edge(workflow.id, version.version, made["entry"].id, made["a_agent"].id)

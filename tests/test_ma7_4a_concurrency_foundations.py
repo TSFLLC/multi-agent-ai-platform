@@ -53,7 +53,13 @@ from app.services.workflow_definition_service import WorkflowDefinitionService
 from app.services.workflow_execution_service import WorkflowExecutionError, WorkflowExecutionService
 from app.services.workflow_validation_service import DAGValidationError
 from app.worker import Worker
-from tests.conftest import make_agent, make_agent_version, make_model, make_provider, make_provider_model
+from tests.conftest import (
+    make_agent,
+    make_model,
+    make_provider,
+    make_provider_model,
+    make_runnable_agent_version,
+)
 from tests.ma7_3b_support import (
     AGENT,
     APPROVAL,
@@ -1181,7 +1187,7 @@ def test_an_empty_condition_object_is_still_a_condition(db, bootstrap):
         version.version,
         "a",
         WorkflowNodeType.AGENT,
-        config={"agent_version_id": make_agent_version(db, make_agent(db, bootstrap.project, "f1e")).id},
+        config={"agent_version_id": make_runnable_agent_version(db, make_agent(db, bootstrap.project, "f1e")).id},
     )
     end = definitions.add_node(workflow.id, version.version, "end", WorkflowNodeType.TERMINAL)
     definitions.add_edge(workflow.id, version.version, agent_node.id, end.id, condition={})
@@ -1283,7 +1289,7 @@ def test_a_human_approval_with_two_upstream_dependencies_is_accepted_from_ma7_4c
             key,
             WorkflowNodeType.AGENT,
             config={
-                "agent_version_id": make_agent_version(db, make_agent(db, bootstrap.project, f"g2{key}")).id
+                "agent_version_id": make_runnable_agent_version(db, make_agent(db, bootstrap.project, f"g2{key}")).id
             },
         )
     gate = definitions.add_node(

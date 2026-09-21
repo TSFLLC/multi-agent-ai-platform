@@ -1009,14 +1009,14 @@ def _draft_with_gate(db, project, *, gate_config, gate_kwargs=None, extra_edge_i
     definitions = WorkflowDefinitionService(db)
     workflow = definitions.create_workflow(project.id, "validation-workflow")
     version = definitions.get_latest_version(workflow.id)
-    from tests.conftest import make_agent, make_agent_version
+    from tests.conftest import make_agent, make_runnable_agent_version
 
     a = definitions.add_node(
         workflow.id,
         version.version,
         "a",
         WorkflowNodeType.AGENT,
-        config={"agent_version_id": make_agent_version(db, make_agent(db, project, "va")).id},
+        config={"agent_version_id": make_runnable_agent_version(db, make_agent(db, project, "va")).id},
     )
     gate = definitions.add_node(
         workflow.id,
@@ -1035,7 +1035,7 @@ def _draft_with_gate(db, project, *, gate_config, gate_kwargs=None, extra_edge_i
             version.version,
             "b",
             WorkflowNodeType.AGENT,
-            config={"agent_version_id": make_agent_version(db, make_agent(db, project, "vb")).id},
+            config={"agent_version_id": make_runnable_agent_version(db, make_agent(db, project, "vb")).id},
         )
         definitions.add_edge(workflow.id, version.version, b.id, gate.id)
     return definitions, workflow, version
@@ -1094,7 +1094,7 @@ def test_a_multi_input_gate_waits_for_all_its_sources_and_runs_nothing(
     version = definitions.get_latest_version(workflow.id)
     from app.db.enums import TaskRunStatus, VersionStatus
     from app.models.tasks import TaskRun
-    from tests.conftest import make_agent, make_agent_version, make_task
+    from tests.conftest import make_agent, make_runnable_agent_version, make_task
 
     def agent(key):
         return definitions.add_node(
@@ -1102,7 +1102,7 @@ def test_a_multi_input_gate_waits_for_all_its_sources_and_runs_nothing(
             version.version,
             key,
             WorkflowNodeType.AGENT,
-            config={"agent_version_id": make_agent_version(db, make_agent(db, bootstrap.project, key)).id},
+            config={"agent_version_id": make_runnable_agent_version(db, make_agent(db, bootstrap.project, key)).id},
         )
 
     a, b = agent("a"), agent("b")

@@ -9,10 +9,10 @@ from typing import Dict, List, Optional, Set, Any
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.db.enums import ModelSelectionMode, RouterFreePolicy, VersionStatus, WorkflowNodeType
+from app.db.enums import ModelSelectionMode, ModelStatus, RouterFreePolicy, VersionStatus, WorkflowNodeType
 from app.models.agents import Agent, AgentVersion
 from app.models.evaluation_definitions import EvaluationDefinition, EvaluationDefinitionVersion
-from app.models.providers import ProviderModel
+from app.models.providers import Model, ProviderModel
 from app.models.workflow import WorkflowVersion, WorkflowNode, WorkflowEdge
 
 # MA7.5A -- the ONLY configuration an EVALUATION node may carry. There is
@@ -106,20 +106,37 @@ def evaluation_dependency_problems(db: Session, node: WorkflowNode, project_id: 
     return problems
 
 
-def _model_policy_override_problems(db: Session, node_key: str, override: object) -> List[str]:
-    prefix = f"EVALUATION node {node_key} evaluator_model_policy_override"
+def _model_policy_override_problems(
+    db: Session,
+    node_key: str,
+    override: object,
+    *,
+    prefix: Optional[str] = None,
+    default_mode: Optional[str] = None,
+    require_active_model: bool = False,
+) -> List[str]:
+    """Problems with a model policy/override object. Defaults reproduce the
+    EVALUATION node check exactly; MA7.6A reuses it for AGENT nodes (a
+    ``prefix`` naming the AGENT node, the runtime's default ``mode`` of
+    manual, and a persistent-failure check that the model is still ACTIVE)."""
+    prefix = prefix or f"EVALUATION node {node_key} evaluator_model_policy_override"
     if not isinstance(override, dict) or not override:
         return [f"{prefix} must be a non-empty object"]
     unknown = sorted(set(override) - _OVERRIDE_ALLOWED_KEYS)
     if unknown:
         return [f"{prefix} has unsupported key(s): {', '.join(unknown)}"]
-    mode = override.get("mode")
+    mode = override.get("mode", default_mode)
     if mode == ModelSelectionMode.MANUAL.value:
         model_id = override.get("manual_provider_model_id")
         if not isinstance(model_id, str) or not model_id:
             return [f"{prefix} mode 'manual' requires manual_provider_model_id"]
-        if db.get(ProviderModel, model_id) is None:
+        provider_model = db.get(ProviderModel, model_id)
+        if provider_model is None:
             return [f"{prefix} references unknown provider model {model_id}"]
+        if require_active_model:
+            model = db.get(Model, provider_model.model_id)
+            if model is None or model.status != ModelStatus.ACTIVE:
+                return [f"{prefix} references a model that is not active ({model_id})"]
         return []
     if mode == ModelSelectionMode.AUTO.value:
         allowed = {policy.value for policy in RouterFreePolicy}
@@ -599,7 +616,7 @@ class WorkflowValidator:
             if node.node_type == WorkflowNodeType.AGENT:
                 agent_version_id = node.config.get("agent_version_id") if node.config else None
                 if agent_version_id:
-                    self._validate_agent_version_exists(agent_version_id, project_id, node.node_key)
+                    self._validate_agent_node(node, agent_version_id, project_id)
 
             elif node.node_type in (WorkflowNodeType.JUDGE, WorkflowNodeType.PARALLEL_GROUP):
                 config = node.config or {}
@@ -616,6 +633,56 @@ class WorkflowValidator:
                             self._validate_agent_version_exists(
                                 candidate_version_id, project_id, f"{node.node_key}[{i}]"
                             )
+
+    def _validate_agent_node(self, node: WorkflowNode, agent_version_id: str, project_id: str) -> None:
+        """MA7.6A: an AGENT node must not be publishable if it is guaranteed to
+        fail at runtime. Beyond existing in this project, its Agent Version
+        must be ACTIVE (only a published version can run) and a model must be
+        resolvable: an explicit manual model override on the node, OR the
+        Agent Version's own usable model policy. No routing is invented -- this
+        mirrors the runtime's own precedence (override, then the version's
+        policy) and only reports what could never resolve."""
+        key = node.node_key
+        before = len(self.issues)
+        self._validate_agent_version_exists(agent_version_id, project_id, key)
+        if len(self.issues) != before:
+            return  # unknown / foreign version: already reported, nothing more to check
+        agent_version = self.db.query(AgentVersion).filter(AgentVersion.id == agent_version_id).first()
+        if agent_version is None:
+            return
+        if agent_version.status != VersionStatus.ACTIVE:
+            self.issues.append(
+                f"AGENT node {key} references an agent version that is not ACTIVE "
+                f"(status={agent_version.status.value}): publish that Agent Version first"
+            )
+        config = node.config or {}
+        if "model_policy_override" in config:
+            self.issues.extend(
+                _model_policy_override_problems(
+                    self.db,
+                    key,
+                    config["model_policy_override"],
+                    prefix=f"AGENT node {key} model_policy_override",
+                    default_mode=ModelSelectionMode.MANUAL.value,
+                    require_active_model=True,
+                )
+            )
+        elif not agent_version.model_policy:
+            self.issues.append(
+                f"AGENT node {key} has no model: choose a model for this node, or use an Agent Version "
+                "whose model policy names one"
+            )
+        else:
+            self.issues.extend(
+                _model_policy_override_problems(
+                    self.db,
+                    key,
+                    agent_version.model_policy,
+                    prefix=f"AGENT node {key} agent version model_policy",
+                    default_mode=ModelSelectionMode.MANUAL.value,
+                    require_active_model=True,
+                )
+            )
 
     def _validate_agent_version_exists(self, agent_version_id: str, project_id: str, node_key: str) -> None:
         """Validate a specific agent version exists and is in the correct project."""

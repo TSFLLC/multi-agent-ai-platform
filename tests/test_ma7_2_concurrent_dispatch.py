@@ -14,7 +14,6 @@ from app import models  # noqa
 from app.db.base import Base
 from app.db.session import build_engine
 from app.db.enums import (
-    VersionStatus,
     WorkflowNodeType,
     WorkflowRunStatus,
     WorkflowNodeRunStatus,
@@ -53,18 +52,18 @@ def test_concurrent_dispatch_atomic_claim(concurrent_db):
     # Setup: create project, agent, workflow
     setup_session = session_factory()
 
-    from tests.conftest import make_project, make_agent, make_agent_version
+    from tests.conftest import make_project, make_agent, make_runnable_agent_version
 
     project = make_project(setup_session, name="concurrent-test")
     agent = make_agent(setup_session, project, "test-agent")
-    agent_v = make_agent_version(setup_session, agent)
+    agent_v = make_runnable_agent_version(setup_session, agent)
 
     # Create workflow
     workflow = Workflow(project_id=project.id, name="concurrent-workflow")
     setup_session.add(workflow)
     setup_session.flush()
 
-    wv = WorkflowVersion(workflow_id=workflow.id, version=1, status=VersionStatus.ACTIVE)
+    wv = WorkflowVersion(workflow_id=workflow.id, version=1)
     setup_session.add(wv)
     setup_session.flush()
 

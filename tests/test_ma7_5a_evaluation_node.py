@@ -75,10 +75,10 @@ from app.worker import Worker
 from tests.conftest import (
     make_agent,
     make_agent_run,
-    make_agent_version,
     make_budget,
     make_model,
     make_provider_model,
+    make_runnable_agent_version,
 )
 from tests.ma7_3b_support import AGENT, APPROVAL, TERMINAL, events, resolve_via_api, snapshot, start
 from tests.ma7_4a_support import finish_agent
@@ -266,7 +266,7 @@ def draft_workflow(db, project, label, *, config=None, parents=("engineer",), pa
                 version.version,
                 key,
                 WorkflowNodeType.AGENT,
-                config={"agent_version_id": make_agent_version(db, make_agent(db, project, key)).id},
+                config={"agent_version_id": make_runnable_agent_version(db, make_agent(db, project, key)).id},
             )
         else:
             made[key] = definitions.add_node(

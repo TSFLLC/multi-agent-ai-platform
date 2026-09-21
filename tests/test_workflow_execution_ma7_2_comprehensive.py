@@ -11,36 +11,42 @@ Tests:
 All tests use disposable temp DBs.
 """
 
-import pytest
 import threading
-from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
-from sqlalchemy.orm import Session, sessionmaker
-from sqlalchemy.exc import IntegrityError
+from datetime import datetime, timezone
 
+import pytest
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session, sessionmaker
+
+import app.services.execution_service as execution_service_module
 from app import models  # noqa
 from app.db.base import Base
-from app.db.session import build_engine
 from app.db.enums import (
+    AgentRunStatus,
     ArtifactType,
     JobQueueStatus,
     JobType,
-    VersionStatus,
+    TaskRunStatus,
+    WorkflowNodeRunStatus,
     WorkflowNodeType,
     WorkflowRunStatus,
-    WorkflowNodeRunStatus,
-    AgentRunStatus,
-    TaskRunStatus,
 )
-from app.models.workflow import Workflow, WorkflowVersion, WorkflowNode, WorkflowEdge, WorkflowRun, WorkflowNodeRun
-from app.models.tasks import TaskRun, AgentRun
+from app.db.session import build_engine
 from app.models.artifacts_eval import Artifact
 from app.models.execution import JobQueue
+from app.models.tasks import AgentRun, TaskRun
+from app.models.workflow import (
+    Workflow,
+    WorkflowEdge,
+    WorkflowNode,
+    WorkflowNodeRun,
+    WorkflowRun,
+    WorkflowVersion,
+)
 from app.services.workflow_definition_service import WorkflowDefinitionService
 from app.services.workflow_execution_service import WorkflowExecutionService
 from app.worker import Worker
-
-import app.services.execution_service as execution_service_module
 
 
 @pytest.fixture
@@ -71,19 +77,17 @@ class TestConcurrentDispatchSafety:
         session, session_factory, engine = temp_db
 
         # Setup
-        from tests.conftest import make_project, make_agent_version, make_task
-
-        from tests.conftest import make_agent
+        from tests.conftest import make_agent, make_project, make_runnable_agent_version, make_task
         project = make_project(session, name="test-project")
         agent = make_agent(session, project, "test-agent")
-        agent_v = make_agent_version(session, agent)
+        agent_v = make_runnable_agent_version(session, agent)
 
         # Simplified: just create workflow + node directly
         workflow = Workflow(project_id=project.id, name="concurrent-test")
         session.add(workflow)
         session.flush()
 
-        wv = WorkflowVersion(workflow_id=workflow.id, version=1, status=VersionStatus.ACTIVE)
+        wv = WorkflowVersion(workflow_id=workflow.id, version=1)
         session.add(wv)
         session.flush()
 
@@ -259,16 +263,16 @@ class TestWorkerIntegration:
     def test_workflow_execution_via_worker(self, temp_db, monkeypatch):
         """End-to-end: workflow -> job -> worker -> agent -> completion,
         planner -> engineer -> reviewer -> terminal."""
-        from tests.conftest import make_agent, make_agent_version, make_project, make_task
+        from tests.conftest import make_agent, make_project, make_runnable_agent_version, make_task
 
         session, session_factory, _engine = temp_db
         db = session
 
         project = make_project(db, name="worker-integration-project")
         agent_versions = {
-            "planner": make_agent_version(db, make_agent(db, project, "planner")),
-            "engineer": make_agent_version(db, make_agent(db, project, "engineer")),
-            "reviewer": make_agent_version(db, make_agent(db, project, "reviewer")),
+            "planner": make_runnable_agent_version(db, make_agent(db, project, "planner")),
+            "engineer": make_runnable_agent_version(db, make_agent(db, project, "engineer")),
+            "reviewer": make_runnable_agent_version(db, make_agent(db, project, "reviewer")),
         }
 
         def_service = WorkflowDefinitionService(db)
@@ -405,13 +409,13 @@ class TestWorkerIntegration:
         exactly as before: the new Worker._reconcile_workflow_node call is
         a no-op for them, verified by asserting no WorkflowNodeRun/Run rows
         exist at all and the job still completes normally."""
-        from tests.conftest import make_agent, make_agent_version, make_project, make_task
+        from tests.conftest import make_agent, make_project, make_runnable_agent_version, make_task
 
         session, session_factory, _engine = temp_db
         db = session
 
         project = make_project(db, name="non-workflow-project")
-        agent_version = make_agent_version(db, make_agent(db, project, "solo"))
+        agent_version = make_runnable_agent_version(db, make_agent(db, project, "solo"))
         task = make_task(db, project)
         task_run = TaskRun(task_id=task.id, status=TaskRunStatus.CREATED, created_at=datetime.now(timezone.utc))
         db.add(task_run)

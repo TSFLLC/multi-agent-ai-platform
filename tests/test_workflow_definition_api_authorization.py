@@ -9,14 +9,14 @@ from app.db.enums import ProjectRole, WorkflowNodeType
 from app.models.identity import Project, ProjectMembership
 from app.models.workflow import Workflow, WorkflowEdge, WorkflowNode, WorkflowVersion
 from app.services.workflow_definition_service import WorkflowDefinitionService
-from tests.conftest import make_agent, make_agent_version
+from tests.conftest import make_agent, make_runnable_agent_version
 
 
 def _draft_workflow_with_node(db, project, label="def"):
     """A DRAFT workflow version with one AGENT node -- enough to exercise
     add_edge/delete_node/delete_edge/publish without a full DAG."""
     agent = make_agent(db, project, f"{label}-agent")
-    agent_version = make_agent_version(db, agent)
+    agent_version = make_runnable_agent_version(db, agent)
     service = WorkflowDefinitionService(db)
     workflow = service.create_workflow(project.id, f"{label}-workflow")
     version = service.get_latest_version(workflow.id)
@@ -196,7 +196,7 @@ def test_modify_project_member_can_perform_full_definition_lifecycle(client, db,
     db.commit()
 
     agent = make_agent(db, member_project, "member-agent")
-    agent_version = make_agent_version(db, agent)
+    agent_version = make_runnable_agent_version(db, agent)
     db.commit()
 
     create = client.post(

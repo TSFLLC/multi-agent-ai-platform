@@ -16,7 +16,7 @@ import pytest
 from sqlalchemy import select
 
 from app.config import settings
-from app.db.enums import AgentRunStatus, ArtifactType, TaskRunStatus, VersionStatus
+from app.db.enums import AgentRunStatus, ArtifactType, TaskRunStatus
 from app.models.artifacts_eval import Artifact
 from app.models.observability import ExecutionEvent
 from app.models.tasks import AgentRunAttempt
@@ -26,11 +26,11 @@ from app.services.execution_service import AgentExecutionService, _MissingWorkfl
 from tests.conftest import (
     make_agent,
     make_agent_run,
-    make_agent_version,
     make_model,
     make_project,
     make_provider,
     make_provider_model,
+    make_runnable_agent_version,
     make_task,
     make_task_run,
 )
@@ -66,7 +66,7 @@ def _downstream_run(db, upstream_ids, *, kind="workflow_upstream", with_context=
         db, model=model, provider=provider, cost_input_per_mtok=Decimal(0), cost_output_per_mtok=Decimal(0)
     )
     agent = make_agent(db, project=project)
-    agent_version = make_agent_version(db, agent=agent, status=VersionStatus.ACTIVE)
+    agent_version = make_runnable_agent_version(db, agent=agent)
     agent_version.model_policy = _manual(pm)
     agent_run = make_agent_run(db, task_run=task_run, agent_version=agent_version)
     if with_context:

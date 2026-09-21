@@ -10,14 +10,14 @@ from app.models.tasks import TaskRun
 from app.models.workflow import WorkflowNodeRun, WorkflowRun
 from app.services.workflow_definition_service import WorkflowDefinitionService
 from app.services.workflow_execution_service import WorkflowExecutionService
-from tests.conftest import make_agent, make_agent_version, make_task
+from tests.conftest import make_agent, make_runnable_agent_version, make_task
 
 
 def _active_workflow(db, project, label="api"):
     planner = make_agent(db, project, f"{label}-planner")
-    planner_version = make_agent_version(db, planner)
+    planner_version = make_runnable_agent_version(db, planner)
     engineer = make_agent(db, project, f"{label}-engineer")
-    engineer_version = make_agent_version(db, engineer)
+    engineer_version = make_runnable_agent_version(db, engineer)
     service = WorkflowDefinitionService(db)
     workflow = service.create_workflow(project.id, f"{label}-workflow")
     version = service.get_latest_version(workflow.id)
