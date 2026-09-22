@@ -367,6 +367,68 @@ def test_provision_binds_workflow_nodes_to_latest_active_agent_version(monkeypat
     assert full_by_key["eval_code"]["config"]["evaluator_agent_version_id"] == "v2-code_reviewer"
 
 
+def test_every_executable_node_gets_a_usable_auto_prefer_free_model_policy_and_nothing_is_hardcoded(monkeypatch):
+    """MA7.7D provisioning correction: an AGENT node's model_policy_override
+    was already set to AUTO/prefer_free, but an EVALUATION node's
+    evaluator_model_policy_override was missing entirely -- so an evaluator
+    Agent Version with no default model_policy (true of every starter
+    Agent) had nothing to resolve at run time, even though publish never
+    required it (evaluator_model_policy_override is validated only when
+    present). Every executable node (agent + evaluation) must now carry the
+    same AUTO/prefer_free policy, and no node may name a specific model id
+    or provider (Agent != Model, ADR-1: a template never hardcodes one)."""
+    backend = FakeBackend()
+    monkeypatch.setattr(provision_mod, "_client", lambda base_url, token: _mock_client(backend.handler))
+
+    results = provision_mod.provision("https://instance.example", "token")
+
+    auto_prefer_free = {"mode": "auto", "auto_policy": "prefer_free"}
+    for key in ("simple_development", "full_software_development"):
+        workflow_id = results[key]["id"]
+        for node in backend.nodes[workflow_id].values():
+            config = node["config"] or {}
+            if node["node_type"] == "agent":
+                assert config.get("model_policy_override") == auto_prefer_free, node["node_key"]
+            elif node["node_type"] == "evaluation":
+                assert config.get("evaluator_model_policy_override") == auto_prefer_free, node["node_key"]
+            # No node anywhere names a specific model: the only model-shaped
+            # value in any config is the AUTO/prefer_free policy itself.
+            assert "manual_provider_model_id" not in json.dumps(config)
+
+
+def test_provision_workflow_designs_end_to_end_validates_with_zero_issues_no_model_step_required(
+    client, db, auth_token, bootstrap, monkeypatch
+):
+    """Exercises the REAL WorkflowValidator (not FakeBackend): both freshly
+    provisioned designs must validate with zero issues immediately after
+    provisioning -- proving the operator never has to open a second
+    (v2/v3) workflow version just to assign models before running them."""
+    from app.starter_agents import ensure_starter_agents
+    from scripts import provision_workflow_designs as provision_mod
+
+    ensure_starter_agents(db, project_id=bootstrap.project.id)
+    db.commit()
+
+    monkeypatch.setattr(
+        provision_mod, "_client", lambda base_url, token: _NoLifespanClientProxy(client, token)
+    )
+
+    results = provision_mod.provision("http://testserver", auth_token)
+    auth = {"Authorization": f"Bearer {auth_token}"}
+
+    # Both versions already published by provision() -- clone each back to a
+    # DRAFT (the only way to re-run /validate) and confirm zero issues, i.e.
+    # nothing about model configuration would have blocked the original publish.
+    for key in ("simple_development", "full_software_development"):
+        workflow_id = results[key]["id"]
+        cloned = client.post(f"/workflows/{workflow_id}/versions/1/clone", headers=auth)
+        assert cloned.status_code == 201, cloned.text
+        draft_version = cloned.json()["version"]
+        validation = client.post(f"/workflows/{workflow_id}/versions/{draft_version}/validate", headers=auth)
+        assert validation.status_code == 200, validation.text
+        assert validation.json() == {"valid": True, "issues": []}, (key, validation.json())
+
+
 def test_provision_is_idempotent_when_workflows_already_exist_and_v2_is_active(monkeypatch):
     """The fix must not disturb existing idempotent-skip behavior: an
     already-existing workflow is still left untouched even when a role

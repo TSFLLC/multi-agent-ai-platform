@@ -40,12 +40,14 @@ never a redesign of MA6 Evaluation) so the EVALUATION nodes have
 something valid to point at.
 
 No node hard-codes a specific Model or provider -- each AGENT node's
-config carries an AUTO/prefer_free model policy (Agent != Model, ADR-1:
-a policy/preference, never a stored model id), which is what
-WorkflowValidator's publish-time check requires every AGENT node to
-resolve to SOME model policy (from the config or the Agent Version); a
-manual, environment-specific model pick remains the operator's to make
-per node/run, never baked into the template.
+config, and each EVALUATION node's evaluator, carries an AUTO/prefer_free
+model policy (Agent != Model, ADR-1: a policy/preference, never a stored
+model id), which is what WorkflowValidator's publish-time check requires
+every AGENT node to resolve to SOME model policy (from the config or the
+Agent Version), and what an EVALUATION node's evaluator AgentRun needs to
+resolve a model at run time even though publish does not require it
+there; a manual, environment-specific model pick remains the operator's
+to make per node/run, never baked into the template.
 
 Idempotent: safe to re-run. A Workflow already existing by name is left
 completely untouched (not re-versioned, not re-published) -- once
@@ -86,6 +88,15 @@ _APPROVAL_GROUP = "owners"  # matches frontend/assets/js/workflowGraph.js's DEFA
 # Not MA8 routing: this policy is already a supported, validated
 # ModelPolicy shape today (app.schemas.agents.ModelPolicy) -- MA8 is the
 # (not-yet-built) intelligent scorer that would evaluate it live.
+#
+# EVALUATION nodes' evaluator AgentRun resolves its model through the exact
+# same code path (execution_service.py: ``agent_run.model_policy_override_json
+# or agent_version.model_policy``), so the same policy is used for
+# evaluator_model_policy_override below -- without it, an evaluator whose
+# Agent Version also carries no model_policy (true of every starter
+# Agent) would have nothing to resolve at run time, even though publish
+# does not require it (evaluator_model_policy_override is validated only
+# when present, unlike an AGENT node's model).
 _AUTO_PREFER_FREE = {"mode": "auto", "auto_policy": "prefer_free"}
 
 _EVAL_DEFINITIONS = {
@@ -395,6 +406,7 @@ def _full_software_development_nodes(
             "config": {
                 "evaluation_definition_version_id": eval_versions["test_engineer"],
                 "evaluator_agent_version_id": agent_versions["test_engineer"],
+                "evaluator_model_policy_override": _AUTO_PREFER_FREE,
             },
         },
         {
@@ -411,6 +423,7 @@ def _full_software_development_nodes(
             "config": {
                 "evaluation_definition_version_id": eval_versions["security_reviewer"],
                 "evaluator_agent_version_id": agent_versions["security_reviewer"],
+                "evaluator_model_policy_override": _AUTO_PREFER_FREE,
             },
         },
         {
@@ -427,6 +440,7 @@ def _full_software_development_nodes(
             "config": {
                 "evaluation_definition_version_id": eval_versions["code_reviewer"],
                 "evaluator_agent_version_id": agent_versions["code_reviewer"],
+                "evaluator_model_policy_override": _AUTO_PREFER_FREE,
             },
         },
         {
