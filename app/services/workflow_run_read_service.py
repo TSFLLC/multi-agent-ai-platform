@@ -107,7 +107,9 @@ def _latest_node_runs(node_runs: Sequence[WorkflowNodeRun]) -> Dict[str, Workflo
 def _calls_by_agent_run(db: Session, agent_run_ids: Sequence[str]) -> Dict[str, List[ModelCall]]:
     grouped: Dict[str, List[ModelCall]] = defaultdict(list)
     if agent_run_ids:
-        for call in db.execute(select(ModelCall).where(ModelCall.agent_run_id.in_(list(agent_run_ids)))).scalars():
+        for call in db.execute(
+            select(ModelCall).where(ModelCall.agent_run_id.in_(list(agent_run_ids)))
+        ).scalars():
             grouped[call.agent_run_id].append(call)
     return grouped
 
@@ -119,49 +121,108 @@ def build_run_detail(db: Session, run: WorkflowRun) -> WorkflowRunDetailRead:
     task = db.get(Task, task_run.task_id) if task_run else None
 
     nodes = sorted(
-        db.execute(select(WorkflowNode).where(WorkflowNode.workflow_version_id == run.workflow_version_id)).scalars(),
+        db.execute(
+            select(WorkflowNode).where(WorkflowNode.workflow_version_id == run.workflow_version_id)
+        ).scalars(),
         key=lambda node: node.node_key,
     )
-    edges = list(db.execute(select(WorkflowEdge).where(WorkflowEdge.workflow_version_id == run.workflow_version_id)).scalars())
-    node_runs = list(db.execute(select(WorkflowNodeRun).where(WorkflowNodeRun.workflow_run_id == run.id)).scalars())
+    edges = list(
+        db.execute(
+            select(WorkflowEdge).where(WorkflowEdge.workflow_version_id == run.workflow_version_id)
+        ).scalars()
+    )
+    node_runs = list(
+        db.execute(select(WorkflowNodeRun).where(WorkflowNodeRun.workflow_run_id == run.id)).scalars()
+    )
     latest = _latest_node_runs(node_runs)
+
+    # MA7.7D fix: the run-level usage TOTAL must include every iteration's
+    # cost/tokens, not just each node's current (latest) attempt -- a
+    # retried node's pre-retry failed attempt already spent real money
+    # (Section 24.4 #10 preserves its AgentRun/ModelCall rows), and
+    # "retries accounted as separate attempts without losing previous
+    # usage" means that spend must still show up in the run's total, even
+    # though the per-node display below intentionally shows only the
+    # current/latest attempt's own state.
+    all_iteration_agent_run_ids = [nr.agent_run_id for nr in node_runs if nr.agent_run_id]
+    all_iteration_calls = _calls_by_agent_run(db, all_iteration_agent_run_ids)
 
     agent_run_ids = [nr.agent_run_id for nr in latest.values() if nr.agent_run_id]
     node_run_ids = [nr.id for nr in latest.values()]
-    agent_runs = {
-        ar.id: ar for ar in db.execute(select(AgentRun).where(AgentRun.id.in_(agent_run_ids))).scalars()
-    } if agent_run_ids else {}
-    versions = {
-        av.id: av
-        for av in db.execute(
-            select(AgentVersion).where(AgentVersion.id.in_({ar.agent_version_id for ar in agent_runs.values()}))
-        ).scalars()
-    } if agent_runs else {}
-    agents = {
-        a.id: a for a in db.execute(select(Agent).where(Agent.id.in_({v.agent_id for v in versions.values()}))).scalars()
-    } if versions else {}
-    models = {
-        m.id: m for m in db.execute(select(Model).where(Model.id.in_({ar.model_id for ar in agent_runs.values() if ar.model_id}))).scalars()
-    } if agent_runs else {}
-    providers = {
-        p.id: p
-        for p in db.execute(select(Provider).where(Provider.id.in_({ar.provider_id for ar in agent_runs.values() if ar.provider_id}))).scalars()
-    } if agent_runs else {}
+    agent_runs = (
+        {ar.id: ar for ar in db.execute(select(AgentRun).where(AgentRun.id.in_(agent_run_ids))).scalars()}
+        if agent_run_ids
+        else {}
+    )
+    versions = (
+        {
+            av.id: av
+            for av in db.execute(
+                select(AgentVersion).where(
+                    AgentVersion.id.in_({ar.agent_version_id for ar in agent_runs.values()})
+                )
+            ).scalars()
+        }
+        if agent_runs
+        else {}
+    )
+    agents = (
+        {
+            a.id: a
+            for a in db.execute(
+                select(Agent).where(Agent.id.in_({v.agent_id for v in versions.values()}))
+            ).scalars()
+        }
+        if versions
+        else {}
+    )
+    models = (
+        {
+            m.id: m
+            for m in db.execute(
+                select(Model).where(Model.id.in_({ar.model_id for ar in agent_runs.values() if ar.model_id}))
+            ).scalars()
+        }
+        if agent_runs
+        else {}
+    )
+    providers = (
+        {
+            p.id: p
+            for p in db.execute(
+                select(Provider).where(
+                    Provider.id.in_({ar.provider_id for ar in agent_runs.values() if ar.provider_id})
+                )
+            ).scalars()
+        }
+        if agent_runs
+        else {}
+    )
 
-    evaluations = {
-        e.evaluator_agent_run_id: e
-        for e in db.execute(select(EvaluationRun).where(EvaluationRun.evaluator_agent_run_id.in_(agent_run_ids))).scalars()
-    } if agent_run_ids else {}
-    approvals = {
-        a.scope_ref_id: a
-        for a in db.execute(
-            select(Approval).where(
-                Approval.scope == ApprovalScope.WORKFLOW_NODE_RUN,
-                Approval.operation_type == WORKFLOW_HUMAN_APPROVAL_OPERATION,
-                Approval.scope_ref_id.in_(node_run_ids),
-            )
-        ).scalars()
-    } if node_run_ids else {}
+    evaluations = (
+        {
+            e.evaluator_agent_run_id: e
+            for e in db.execute(
+                select(EvaluationRun).where(EvaluationRun.evaluator_agent_run_id.in_(agent_run_ids))
+            ).scalars()
+        }
+        if agent_run_ids
+        else {}
+    )
+    approvals = (
+        {
+            a.scope_ref_id: a
+            for a in db.execute(
+                select(Approval).where(
+                    Approval.scope == ApprovalScope.WORKFLOW_NODE_RUN,
+                    Approval.operation_type == WORKFLOW_HUMAN_APPROVAL_OPERATION,
+                    Approval.scope_ref_id.in_(node_run_ids),
+                )
+            ).scalars()
+        }
+        if node_run_ids
+        else {}
+    )
     calls = _calls_by_agent_run(db, agent_run_ids)
 
     # The recorded error of each failed Agent Run's latest attempt, and dispatch-time node failures.
@@ -229,16 +290,26 @@ def build_run_detail(db: Session, run: WorkflowRun) -> WorkflowRunDetailRead:
         if node_run is not None and node_run.status == WorkflowNodeRunStatus.FAILED:
             if agent_run is not None and agent_run.id in attempt_error:
                 error = attempt_error[agent_run.id]
-                failure = RunFailureRead(category=error.get("category"), message=str(error.get("message") or ""), source="agent_run")
+                failure = RunFailureRead(
+                    category=error.get("category"),
+                    message=str(error.get("message") or ""),
+                    source="agent_run",
+                )
             elif evaluation is not None and evaluation.failure_reason:
-                failure = RunFailureRead(category=None, message=evaluation.failure_reason, source="evaluation")
+                failure = RunFailureRead(
+                    category=None, message=evaluation.failure_reason, source="evaluation"
+                )
             elif str((node_event_error.get(node_run.id) or {}).get("message") or ""):
                 # (a gate a human rejected also emits this event, without a message: that is a decision, not an error)
-                failure = RunFailureRead(category=None, message=str(node_event_error[node_run.id]["message"]), source="workflow")
+                failure = RunFailureRead(
+                    category=None, message=str(node_event_error[node_run.id]["message"]), source="workflow"
+                )
         approval = approvals.get(node_run.id) if node_run else None
         # The engine records a node run's end, but its START is recorded on the Agent Run that executes it:
         # use whichever the backend actually has (never a made-up time).
-        started_at = (node_run.started_at if node_run else None) or (agent_run.started_at if agent_run else None)
+        started_at = (node_run.started_at if node_run else None) or (
+            agent_run.started_at if agent_run else None
+        )
         ended_at = (node_run.ended_at if node_run else None) or (agent_run.ended_at if agent_run else None)
         node_reads.append(
             RunNodeRead(
@@ -262,7 +333,7 @@ def build_run_detail(db: Session, run: WorkflowRun) -> WorkflowRunDetailRead:
             )
         )
 
-    all_calls = [call for group in calls.values() for call in group]
+    all_calls = [call for group in all_iteration_calls.values() for call in group]
     return WorkflowRunDetailRead(
         id=run.id,
         status=run.status,
@@ -299,14 +370,25 @@ def list_runs_for_workflow(db: Session, workflow_id: str, limit: int = 50) -> Li
     if not rows:
         return []
     runs = [row[0] for row in rows]
-    task_runs = {tr.id: tr for tr in db.execute(select(TaskRun).where(TaskRun.id.in_([r.task_run_id for r in runs]))).scalars()}
-    tasks = {
-        t.id: t for t in db.execute(select(Task).where(Task.id.in_({tr.task_id for tr in task_runs.values()}))).scalars()
-    } if task_runs else {}
+    task_runs = {
+        tr.id: tr
+        for tr in db.execute(select(TaskRun).where(TaskRun.id.in_([r.task_run_id for r in runs]))).scalars()
+    }
+    tasks = (
+        {
+            t.id: t
+            for t in db.execute(
+                select(Task).where(Task.id.in_({tr.task_id for tr in task_runs.values()}))
+            ).scalars()
+        }
+        if task_runs
+        else {}
+    )
     agent_ids_by_run: Dict[str, List[str]] = defaultdict(list)
     for run_id, agent_run_id in db.execute(
         select(WorkflowNodeRun.workflow_run_id, WorkflowNodeRun.agent_run_id).where(
-            WorkflowNodeRun.workflow_run_id.in_([r.id for r in runs]), WorkflowNodeRun.agent_run_id.isnot(None)
+            WorkflowNodeRun.workflow_run_id.in_([r.id for r in runs]),
+            WorkflowNodeRun.agent_run_id.isnot(None),
         )
     ).all():
         agent_ids_by_run[run_id].append(agent_run_id)
@@ -317,7 +399,9 @@ def list_runs_for_workflow(db: Session, workflow_id: str, limit: int = 50) -> Li
     for run, version_number in rows:
         task_run = task_runs.get(run.task_run_id)
         task = tasks.get(task_run.task_id) if task_run else None
-        run_calls = [call for agent_id in agent_ids_by_run.get(run.id, []) for call in calls.get(agent_id, [])]
+        run_calls = [
+            call for agent_id in agent_ids_by_run.get(run.id, []) for call in calls.get(agent_id, [])
+        ]
         summaries.append(
             WorkflowRunSummaryRead(
                 id=run.id,

@@ -1,6 +1,6 @@
-"""Starter Agent catalog seeding — Section 12.5, MA2.
+"""Starter Agent catalog seeding — Section 12.5, MA2; extended MA7.7D.
 
-Six starter Agents, seeded idempotently, as seed data — not hard-coded
+Seven starter Agents, seeded idempotently, as seed data — not hard-coded
 platform behavior (users can create further Agents normally).
 """
 
@@ -10,11 +10,11 @@ from app.starter_agents import STARTER_AGENTS, ensure_starter_agents
 from tests.conftest import make_project
 
 
-def test_seeds_exactly_six_agents(db):
+def test_seeds_exactly_seven_agents(db):
     project = make_project(db)
     agents = ensure_starter_agents(db, project_id=project.id)
-    assert len(agents) == 6
-    assert len(STARTER_AGENTS) == 6
+    assert len(agents) == 7
+    assert len(STARTER_AGENTS) == 7
 
 
 def test_expected_roles_present(db):
@@ -28,7 +28,45 @@ def test_expected_roles_present(db):
         "Code Reviewer",
         "Security Reviewer",
         "Research Agent",
+        "Final Reviewer",
     }
+
+
+def test_final_reviewer_seeded_with_active_v1(db):
+    project = make_project(db)
+    agents = ensure_starter_agents(db, project_id=project.id)
+    final_reviewer = next(a for a in agents if a.role == "final_reviewer")
+    assert final_reviewer.name == "Final Reviewer"
+    assert final_reviewer.current_status == VersionStatus.ACTIVE
+
+    versions = db.query(AgentVersion).filter_by(agent_id=final_reviewer.id).all()
+    assert len(versions) == 1
+    assert versions[0].version == 1
+    assert versions[0].status == VersionStatus.ACTIVE
+
+
+def test_adding_final_reviewer_does_not_disturb_existing_six(db):
+    """Simulates an existing installation that already has the original
+    six (pre-MA7.7D) restarting against the updated STARTER_AGENTS list
+    that now includes a seventh entry -- only the new row is created."""
+    project = make_project(db)
+    original_six = [spec for spec in STARTER_AGENTS if spec.role != "final_reviewer"]
+    from app.starter_agents import _ensure_one
+
+    for spec in original_six:
+        _ensure_one(db, project_id=project.id, spec=spec)
+    db.commit()
+    assert db.query(Agent).count() == 6
+
+    agents = ensure_starter_agents(db, project_id=project.id)
+    assert len(agents) == 7
+    assert db.query(Agent).count() == 7
+    # The pre-existing six's rows are untouched (same ids, still exactly
+    # one version each).
+    for spec in original_six:
+        agent = db.get(Agent, spec.id)
+        assert agent is not None
+        assert db.query(AgentVersion).filter_by(agent_id=agent.id).count() == 1
 
 
 def test_each_starter_agent_has_a_published_version_and_prompt(db):
@@ -51,9 +89,9 @@ def test_seeding_is_idempotent_across_repeated_calls(db):
     ensure_starter_agents(db, project_id=project.id)
     ensure_starter_agents(db, project_id=project.id)
 
-    assert db.query(Agent).count() == 6
-    assert db.query(AgentVersion).count() == 6
-    assert db.query(PromptVersion).count() == 6
+    assert db.query(Agent).count() == 7
+    assert db.query(AgentVersion).count() == 7
+    assert db.query(PromptVersion).count() == 7
 
 
 def test_seeding_idempotent_across_separate_sessions(session_factory):
@@ -69,7 +107,7 @@ def test_seeding_idempotent_across_separate_sessions(session_factory):
     s2 = session_factory()
     try:
         ensure_starter_agents(s2, project_id=project_id)
-        assert s2.query(Agent).count() == 6
+        assert s2.query(Agent).count() == 7
     finally:
         s2.close()
 
@@ -96,5 +134,5 @@ def test_users_can_still_create_additional_agents_freely(db):
 
     svc = AgentRegistryService(db)
     custom = svc.create_agent(project_id=project.id, name="Custom Agent", role="custom")
-    assert db.query(Agent).count() == 7
+    assert db.query(Agent).count() == 8
     assert custom.name == "Custom Agent"
