@@ -82,6 +82,27 @@ def test_test_connection_requires_admin(client, db, auth_headers, bootstrap):
     assert resp.status_code == 403
 
 
+def test_rotate_provider_credential_requires_auth(client, db):
+    provider = make_provider(db)
+    db.commit()
+
+    resp = client.post(f"/providers/{provider.id}/rotate-credential", json={"api_key": "sk-x"})
+    assert resp.status_code == 401
+
+
+def test_rotate_provider_credential_denied_for_non_admin_role(client, db, auth_headers, bootstrap):
+    bootstrap.user.role = OrgRole.MEMBER
+    provider = make_provider(db)
+    db.commit()
+
+    resp = client.post(
+        f"/providers/{provider.id}/rotate-credential",
+        headers=auth_headers,
+        json={"api_key": "sk-x"},
+    )
+    assert resp.status_code == 403
+
+
 def test_get_model_requires_auth(client, db):
     model = make_model(db)
     db.commit()

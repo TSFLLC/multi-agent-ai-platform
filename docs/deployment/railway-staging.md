@@ -130,10 +130,13 @@ python -m scripts.provision_staging
 
 This creates the OpenRouter Provider (first run only) and triggers a
 model-catalog refresh through the application's own API — never by
-writing database rows directly. Re-running it later (without
-`STAGING_OPENROUTER_API_KEY`) just re-triggers a catalog refresh; it does
-not rotate an existing provider's key (there is no key-rotation route
-today — rotate by hand through the console if ever needed).
+writing database rows directly. Re-running it later without
+`STAGING_OPENROUTER_API_KEY` just re-triggers a catalog refresh. Re-running
+it *with* `STAGING_OPENROUTER_API_KEY` set (e.g. after rotating the key on
+OpenRouter's side) rotates the existing provider's credential in place via
+`POST /providers/{id}/rotate-credential` — the provider row/id and model
+catalog are untouched, and the next Test Connection / Agent run picks up
+the new key automatically (MA7.7C).
 
 ## Step 8 — Create the Evaluation Definition and flagship Workflow
 

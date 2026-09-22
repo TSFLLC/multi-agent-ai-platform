@@ -10,7 +10,11 @@ provisioned.
 What this script does:
   1. Confirms the instance is reachable and ready (GET /health, /ready).
   2. Ensures exactly one OpenRouter Provider row exists, creating it (with
-     the API key, if this is the first run) via POST /providers.
+     the API key, if this is the first run) via POST /providers. If the
+     provider already exists and STAGING_OPENROUTER_API_KEY is set, the
+     credential is rotated in place via
+     POST /providers/{id}/rotate-credential -- the provider row/id and
+     catalog are untouched (Section 20.1/20.2, app.services.secret_service).
   3. Refreshes that provider's model catalog via POST /models/refresh.
 
 What this script deliberately does NOT do (left as guided manual/API
@@ -25,12 +29,20 @@ Usage::
 
     STAGING_API_BASE_URL=https://<railway-url> \\
     MAP_AUTH_TOKEN=<the hosted bearer token> \\
-    STAGING_OPENROUTER_API_KEY=<an OpenRouter key, only on first run> \\
+    STAGING_OPENROUTER_API_KEY=<an OpenRouter key> \\
     python -m scripts.provision_staging
 
+STAGING_OPENROUTER_API_KEY may be set on any run, not just the first: on
+first run it seeds the new provider via POST /providers; on a later run
+against an already-provisioned instance it rotates that provider's
+credential via POST /providers/{id}/rotate-credential. Re-running with
+the same key is safe (idempotent) -- it simply re-affirms the same
+credential is current. Omitting it on a later run leaves the existing
+credential untouched.
+
 The OpenRouter key is read once from the environment and sent only in the
-POST /providers request body over HTTPS — never logged, never printed,
-never written to a file by this script.
+provider-creation or credential-rotation request body over HTTPS — never
+logged, never printed, never written to a file by this script.
 """
 
 import logging
@@ -89,6 +101,15 @@ def _create_openrouter_provider(client: httpx.Client, *, api_key: Optional[str])
     return resp.json()
 
 
+def _rotate_provider_credential(client: httpx.Client, *, provider_id: str, api_key: str) -> Dict[str, Any]:
+    resp = client.post(f"/providers/{provider_id}/rotate-credential", json={"api_key": api_key})
+    if resp.status_code != 200:
+        raise ProvisioningError(
+            f"POST /providers/{provider_id}/rotate-credential failed: {resp.status_code} {resp.text}"
+        )
+    return resp.json()
+
+
 def _refresh_catalog(client: httpx.Client, *, provider_id: str) -> Dict[str, Any]:
     resp = client.post("/models/refresh", params={"provider_id": provider_id})
     if resp.status_code != 202:
@@ -112,12 +133,10 @@ def provision(base_url: str, token: str, *, openrouter_api_key: Optional[str] = 
         else:
             logger.info("provider_already_exists id=%s -- skipping creation", provider["id"])
             if openrouter_api_key:
-                logger.warning(
-                    "openrouter_api_key_ignored provider_id=%s -- an OpenRouter provider already exists "
-                    "and this script has no rotate-key step (POST /providers only creates); "
-                    "rotate a key by hand via the application's provider management, not this script.",
-                    provider["id"],
+                provider = _rotate_provider_credential(
+                    client, provider_id=provider["id"], api_key=openrouter_api_key
                 )
+                logger.info("provider_credential_rotated id=%s", provider["id"])
 
         refresh = _refresh_catalog(client, provider_id=provider["id"])
         logger.info(

@@ -111,6 +111,24 @@ def test_api_key_never_logged(db, caplog):
         assert "sk-must-never-appear-in-any-log-line" not in record.getMessage()
 
 
+def test_rotated_provider_credential_never_logged(db, caplog):
+    project = make_project(db)
+    provider = make_provider(db)
+    svc = SecretService(db)
+    svc.store_secret(project_id=project.id, provider_id=provider.id, name="k", value="sk-original-value")
+
+    with caplog.at_level(logging.DEBUG):
+        svc.store_secret(
+            project_id=project.id,
+            provider_id=provider.id,
+            name="k",
+            value="sk-rotated-value-must-never-appear-in-logs",
+        )
+    for record in caplog.records:
+        assert "sk-rotated-value-must-never-appear-in-logs" not in record.getMessage()
+    assert svc.get_current_provider_api_key(provider.id) == "sk-rotated-value-must-never-appear-in-logs"
+
+
 def test_api_key_never_appears_in_flight_recorder_events(db):
     from app.services.flight_recorder import FlightRecorderService
     from tests.conftest import make_task, make_task_run
