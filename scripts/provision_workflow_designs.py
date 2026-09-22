@@ -167,9 +167,15 @@ def _agent_version_ids_by_role(client: httpx.Client) -> Dict[str, str]:
         versions_resp = client.get(f"/agents/{agent['id']}/versions")
         versions_resp.raise_for_status()
         versions: List[Dict[str, Any]] = versions_resp.json()
-        active = next((v for v in versions if v["status"] == "active"), None)
-        if active is not None:
-            result[agent["role"]] = active["id"]
+        # publish_agent_version (agent_registry_service.py) never
+        # deprecates the version it supersedes, so more than one version
+        # can be status=="active" at once -- the highest version number
+        # among them is the one currently in use, regardless of what
+        # order the API happens to return them in.
+        active_versions = [v for v in versions if v["status"] == "active"]
+        if active_versions:
+            latest = max(active_versions, key=lambda v: v["version"])
+            result[agent["role"]] = latest["id"]
     return result
 
 

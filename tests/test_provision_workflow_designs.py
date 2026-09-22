@@ -34,7 +34,9 @@ class FakeBackend:
 
     def __init__(self, *, existing_workflows=None):
         self.agents = [{"id": f"agent-{r}", "role": r, "name": r} for r in _ROLES]
-        self.agent_versions = {f"agent-{r}": [{"id": f"v1-{r}", "status": "active"}] for r in _ROLES}
+        self.agent_versions = {
+            f"agent-{r}": [{"id": f"v1-{r}", "version": 1, "status": "active"}] for r in _ROLES
+        }
         self.eval_definitions = []
         self.eval_versions = {}
         self.workflows = list(existing_workflows or [])
@@ -280,3 +282,110 @@ def test_provision_raises_when_required_agent_role_missing(monkeypatch):
 
     with pytest.raises(provision_mod.ProvisioningError):
         provision_mod.provision("https://instance.example", "token")
+
+
+def _client_from_backend(backend):
+    return _mock_client(backend.handler)
+
+
+def test_agent_version_selection_picks_latest_active_when_v1_and_v2_both_active(monkeypatch):
+    """publish_agent_version never deprecates the version it supersedes
+    (agent_registry_service.py), so v1 and v2 can both be status=="active"
+    at once -- selection must resolve to v2, the highest version number,
+    not whichever happens to come first in the API response."""
+    backend = FakeBackend()
+    backend.agent_versions["agent-planner"] = [
+        {"id": "v1-planner", "version": 1, "status": "active"},
+        {"id": "v2-planner", "version": 2, "status": "active"},
+    ]
+
+    with _client_from_backend(backend) as client:
+        ids = provision_mod._agent_version_ids_by_role(client)
+
+    assert ids["planner"] == "v2-planner"
+
+
+def test_agent_version_selection_does_not_depend_on_api_response_ordering(monkeypatch):
+    """Same v1/v2-both-active case as above, but with the API returning
+    the higher version first -- selection must still land on v2 by
+    version number, never by list position."""
+    backend = FakeBackend()
+    backend.agent_versions["agent-planner"] = [
+        {"id": "v2-planner", "version": 2, "status": "active"},
+        {"id": "v1-planner", "version": 1, "status": "active"},
+    ]
+
+    with _client_from_backend(backend) as client:
+        ids = provision_mod._agent_version_ids_by_role(client)
+
+    assert ids["planner"] == "v2-planner"
+
+
+def test_agent_version_selection_uses_v1_when_only_v1_exists(monkeypatch):
+    """final_reviewer's real-world case: no v2 has been published, so the
+    lone v1 is selected."""
+    backend = FakeBackend()
+    assert backend.agent_versions["agent-final_reviewer"] == [
+        {"id": "v1-final_reviewer", "version": 1, "status": "active"}
+    ]
+
+    with _client_from_backend(backend) as client:
+        ids = provision_mod._agent_version_ids_by_role(client)
+
+    assert ids["final_reviewer"] == "v1-final_reviewer"
+
+
+def test_provision_binds_workflow_nodes_to_latest_active_agent_version(monkeypatch):
+    """End-to-end through provision(): when a role has both v1 and v2
+    active, the AGENT/EVALUATION nodes built for both workflow designs
+    must reference v2, not v1."""
+    backend = FakeBackend()
+    for role in _ROLES:
+        if role == "final_reviewer":
+            continue
+        backend.agent_versions[f"agent-{role}"] = [
+            {"id": f"v1-{role}", "version": 1, "status": "active"},
+            {"id": f"v2-{role}", "version": 2, "status": "active"},
+        ]
+    monkeypatch.setattr(provision_mod, "_client", lambda base_url, token: _mock_client(backend.handler))
+
+    results = provision_mod.provision("https://instance.example", "token")
+
+    simple_id = results["simple_development"]["id"]
+    simple_by_key = {n["node_key"]: n for n in backend.nodes[simple_id].values()}
+    assert simple_by_key["planner"]["config"]["agent_version_id"] == "v2-planner"
+    assert simple_by_key["software_engineer"]["config"]["agent_version_id"] == "v2-software_engineer"
+    assert simple_by_key["final_reviewer"]["config"]["agent_version_id"] == "v1-final_reviewer"
+
+    full_id = results["full_software_development"]["id"]
+    full_by_key = {n["node_key"]: n for n in backend.nodes[full_id].values()}
+    assert full_by_key["test_engineer"]["config"]["agent_version_id"] == "v2-test_engineer"
+    assert full_by_key["security_reviewer"]["config"]["agent_version_id"] == "v2-security_reviewer"
+    assert full_by_key["code_reviewer"]["config"]["agent_version_id"] == "v2-code_reviewer"
+    assert full_by_key["eval_test"]["config"]["evaluator_agent_version_id"] == "v2-test_engineer"
+    assert full_by_key["eval_security"]["config"]["evaluator_agent_version_id"] == "v2-security_reviewer"
+    assert full_by_key["eval_code"]["config"]["evaluator_agent_version_id"] == "v2-code_reviewer"
+
+
+def test_provision_is_idempotent_when_workflows_already_exist_and_v2_is_active(monkeypatch):
+    """The fix must not disturb existing idempotent-skip behavior: an
+    already-existing workflow is still left untouched even when a role
+    now has an active v2 available."""
+    backend = FakeBackend(
+        existing_workflows=[
+            {"id": "existing-simple", "name": "Simple Development"},
+            {"id": "existing-full", "name": "Full Software Development"},
+        ]
+    )
+    backend.agent_versions["agent-planner"] = [
+        {"id": "v1-planner", "version": 1, "status": "active"},
+        {"id": "v2-planner", "version": 2, "status": "active"},
+    ]
+    monkeypatch.setattr(provision_mod, "_client", lambda base_url, token: _mock_client(backend.handler))
+
+    results = provision_mod.provision("https://instance.example", "token")
+
+    assert results["simple_development"] == {"id": "existing-simple", "skipped": True}
+    assert results["full_software_development"] == {"id": "existing-full", "skipped": True}
+    assert backend.nodes == {}
+    assert backend.eval_definitions == []
