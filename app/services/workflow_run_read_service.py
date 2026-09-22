@@ -23,6 +23,7 @@ from app.db.enums import (
     AgentRunStatus,
     ApprovalScope,
     WorkflowNodeRunStatus,
+    WorkflowRunStatus,
 )
 from app.models.agents import Agent, AgentVersion
 from app.models.evaluation_runs import EvaluationRun
@@ -250,6 +251,18 @@ def build_run_detail(db: Session, run: WorkflowRun) -> WorkflowRunDetailRead:
             if event.error and event.workflow_node_run_id:
                 node_event_error[event.workflow_node_run_id] = event.error
 
+    # MA7.8B: which explicit operator retry each failed step offers -- decided by the engine's own rules
+    # (never a UI guess), and none at all while the run could not be resumed afterwards.
+    retry_modes: Dict[str, Optional[str]] = {}
+    if run.status == WorkflowRunStatus.FAILED and failed_node_run_ids:
+        from app.services.workflow_execution_service import WorkflowExecutionService
+
+        engine = WorkflowExecutionService(db)
+        if not engine._fail_fast_cancellation_plan(run).blocking:
+            nodes_by_id = {node.id: node for node in nodes}
+            for failed in (nr for nr in latest.values() if nr.status == WorkflowNodeRunStatus.FAILED):
+                retry_modes[failed.id] = engine.retry_mode(failed, nodes_by_id.get(failed.workflow_node_id))[0]
+
     node_reads: List[RunNodeRead] = []
     for node in nodes:
         node_run = latest.get(node.id)
@@ -330,6 +343,7 @@ def build_run_detail(db: Session, run: WorkflowRun) -> WorkflowRunDetailRead:
                 approval_status=approval.status if approval else None,
                 usage=usage,
                 failure=failure,
+                retry_mode=retry_modes.get(node_run.id) if node_run else None,
             )
         )
 

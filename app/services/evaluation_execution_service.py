@@ -58,6 +58,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.db.enums import (
     AgentRunRole,
+    AgentRunStatus,
     EvaluationFinding,
     EvaluationMethod,
     EvaluationRunStatus,
@@ -98,6 +99,13 @@ logger = logging.getLogger("app.services.evaluation_execution_service")
 # criterion into this check; any other key falls through to
 # NOT_APPLICABLE below.
 NON_EMPTY_OUTPUT_CRITERION_KEY = "non_empty_output"
+
+# MA7.8B: evaluator Agent Run failure categories an operator may retry with the
+# node's unchanged evaluator configuration -- transient provider/infrastructure
+# failures only (see EvaluationExecutionService.recovery_eligibility).
+RECOVERABLE_EVALUATOR_FAILURE_CATEGORIES = frozenset(
+    {"worker_interrupted", "provider_connection_error", "provider_timeout", "provider_invalid_response"}
+)
 
 
 def _utcnow() -> datetime:
@@ -1004,6 +1012,70 @@ class EvaluationExecutionService(BaseService):
             artifact_refs=[output_artifact.id],
             decision_summary=f"{len(parsed.findings)} criteria evaluated",
         )
+
+    def recovery_eligibility(self, evaluator_agent_run_id: str) -> Tuple[bool, str]:
+        """MA7.8B: may a FAILED agent-evaluated EvaluationRun be retried by an
+        operator with its unchanged configuration? Derived from durable rows
+        only (``failure_reason`` is free text and never parsed):
+
+        * the evaluator Agent Run failed for a transient/infrastructure reason
+          (``RECOVERABLE_EVALUATOR_FAILURE_CATEGORIES``, its latest attempt's
+          recorded category); or
+        * the evaluator COMPLETED but its stored output violates the response
+          contract -- re-checked here with the same deterministic parser
+          against the same criteria -- while the bound subject artifact still
+          verifies (so it is not an integrity failure).
+
+        Everything else stays non-retryable: credentials, budget, model
+        resolution, context limits, integrity/binding failures, a cancelled
+        or completed evaluation. Findings (MET/PARTIAL/NOT_MET) are never a
+        failure at all. Returns (eligible, reason)."""
+        run = self.db.execute(
+            select(EvaluationRun)
+            .where(EvaluationRun.evaluator_agent_run_id == evaluator_agent_run_id)
+            .execution_options(populate_existing=True)
+        ).scalar_one_or_none()
+        agent_run = self.db.get(AgentRun, evaluator_agent_run_id)
+        if run is None or agent_run is None:
+            return False, "The evaluation has no evaluator run to retry."
+        if run.status != EvaluationRunStatus.FAILED:
+            return False, f"The evaluation is {run.status.value}, not failed."
+
+        if agent_run.status == AgentRunStatus.FAILED:
+            latest = self.db.execute(
+                select(AgentRunAttempt)
+                .where(AgentRunAttempt.agent_run_id == agent_run.id)
+                .order_by(AgentRunAttempt.attempt_number.desc())
+                .limit(1)
+            ).scalar_one_or_none()
+            category = (latest.error or {}).get("category") if latest is not None and latest.error else None
+            if category in RECOVERABLE_EVALUATOR_FAILURE_CATEGORIES:
+                return True, f"evaluator Agent Run failed ({category})"
+            return False, f"The evaluator failed for a non-recoverable reason ({category or 'unknown'})."
+
+        if agent_run.status != AgentRunStatus.COMPLETED:
+            return False, "The evaluator did not complete."
+        subject = self.db.get(Artifact, run.subject_artifact_id)
+        if subject is None or subject.agent_run_id != run.subject_agent_run_id:
+            return False, "The evaluated artifact is missing or no longer bound -- an integrity failure."
+        try:
+            verify_artifact_bytes(subject, run.subject_artifact_content_hash)
+        except (ConflictError, ArtifactHashMismatchError):
+            return False, "The evaluated artifact no longer verifies -- an integrity failure."
+        version = self.db.get(EvaluationDefinitionVersion, run.evaluation_definition_version_id)
+        output = (
+            self.db.execute(select(Artifact).where(Artifact.agent_run_id == agent_run.id)).scalars().first()
+        )
+        if version is None or output is None:
+            return False, "The evaluation definition or the evaluator's output is missing."
+        try:
+            raw_text = Path(output.storage_ref).read_text(encoding="utf-8")
+        except OSError:
+            return False, "The evaluator's output can no longer be read."
+        parsed = parse_evaluation_response(raw_text, expected_criterion_keys=[c.key for c in version.criteria])
+        if parsed.is_valid:
+            return False, "The evaluator's response was valid; the evaluation failed for another reason."
+        return True, "evaluator_response_invalid"
 
     def _describe_agent_run_failure(self, evaluator_agent_run: AgentRun) -> str:
         stmt = (

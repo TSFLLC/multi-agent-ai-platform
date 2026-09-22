@@ -104,6 +104,9 @@ class RunNodeRead(BaseModel):
     approval_status: Optional[ApprovalStatus] = None
     usage: Optional[RunUsageRead] = None
     failure: Optional[RunFailureRead] = None
+    # MA7.8B: the explicit retry this failed step offers -- "as_configured" (re-run with its own
+    # configuration), "replacement" (MA7.6B: choose a replacement model) or None.
+    retry_mode: Optional[str] = None
 
 
 class RunEdgeRead(BaseModel):

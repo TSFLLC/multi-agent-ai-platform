@@ -155,14 +155,20 @@ function buildFailure(ctx) {
 // -- failed-step recovery (MA7.6B) -------------------------------------------------------------------------
 
 // MA7.8: a step whose worker was interrupted (container restart) failed through no fault of its
-// model, so it can be retried as it was -- the one way an EVALUATION step can be retried.
+// model, so it can be retried as it was. MA7.8B: the server decides which retry a failed step offers
+// (node.retry_mode: "as_configured" | "replacement" | null) -- e.g. an EVALUATION step whose evaluator
+// broke the response contract is also retried as configured, while an integrity failure is not.
 export const WORKER_INTERRUPTED = "worker_interrupted";
 
-// "interrupted" | "replacement" | null -- which retry, if any, this step offers.
+// "as_configured" | "replacement" | null -- which retry, if any, this step offers.
 export function retryMode(node, detail) {
   if (!node || !detail || node.status !== "failed" || detail.status !== "failed") return null;
+  if (Object.prototype.hasOwnProperty.call(node, "retry_mode")) {
+    return node.retry_mode === "as_configured" || node.retry_mode === "replacement" ? node.retry_mode : null;
+  }
+  // Older payload without retry_mode: the MA7.8 rule.
   const interrupted = Boolean(node.failure && node.failure.category === WORKER_INTERRUPTED);
-  if (interrupted && (node.node_type === "agent" || node.node_type === "evaluation")) return "interrupted";
+  if (interrupted && (node.node_type === "agent" || node.node_type === "evaluation")) return "as_configured";
   return node.node_type === "agent" ? "replacement" : null;
 }
 
@@ -178,9 +184,11 @@ function buildInterruptedRetry(ctx) {
     el(
       "p",
       { class: "hint" },
-      "This step was interrupted by a worker restart before it could finish -- its model was not at fault. " +
-        "Retry it exactly as configured. Nothing already completed is re-run, and a call that may have reached " +
-        "the provider was never repeated automatically."
+      (node.failure && node.failure.category === WORKER_INTERRUPTED
+        ? "This step was interrupted by a worker restart before it could finish -- its model was not at fault. "
+        : "This step can be retried exactly as configured. ") +
+        "Nothing already completed is re-run, steps stopped only because of this failure run again, and a call " +
+        "that may have reached the provider was never repeated automatically."
     ),
     retry && retry.error ? el("div", { class: "error-banner", role: "alert" }, retry.error) : null,
     el(
@@ -244,7 +252,7 @@ function buildRetryPicker(ctx) {
 
 function buildRetry(ctx) {
   if (!retryEligible(ctx)) return null;
-  if (retryMode(ctx.node, ctx.detail) === "interrupted") return section("Retry this step", buildInterruptedRetry(ctx));
+  if (retryMode(ctx.node, ctx.detail) === "as_configured") return section("Retry this step", buildInterruptedRetry(ctx));
   return section("Retry this step", buildRetryPicker(ctx));
 }
 

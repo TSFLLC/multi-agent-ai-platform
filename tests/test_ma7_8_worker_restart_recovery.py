@@ -621,7 +621,18 @@ def test_interrupted_evaluator_fails_safely_and_can_be_retried(
 def test_a_genuinely_failed_evaluation_is_still_not_retryable(
     client, db, session_factory, auth_headers, bootstrap, monkeypatch
 ):
-    harness = build_parallel(db, bootstrap.project, monkeypatch, "evalbad", texts={"eval_code": "not json"})
+    """An evaluator that fails for a non-recoverable reason (here: the
+    provider rejected its credentials) stays non-retryable. (MA7.8B made an
+    evaluator response that broke the contract recoverable -- see
+    test_ma7_8b_failed_branch_resume.py.)"""
+    from app.providers.base import ProviderAuthenticationError
+
+    harness = build_parallel(db, bootstrap.project, monkeypatch, "evalbad")
+
+    def rejected(_request):
+        raise ProviderAuthenticationError("bad key")
+
+    harness.provider.hooks["eval_code"] = rejected
     go(db, harness)
     drain(new_worker(session_factory))
     assert node_run_row(session_factory, harness.run.id, "eval_code").status == WorkflowNodeRunStatus.FAILED
