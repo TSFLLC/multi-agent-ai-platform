@@ -11,6 +11,7 @@ from sqlalchemy import (
     Boolean,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     Numeric,
     String,
@@ -92,6 +93,11 @@ class ModelCall(UUIDPrimaryKeyMixin, Base):
     """
 
     __tablename__ = "model_calls"
+    # MA8.2: the routing-evidence query reads a bounded, recent window of a
+    # candidate set's calls (app.routing_evidence.load_evidence).
+    __table_args__ = (
+        Index("ix_model_calls_provider_model_id_started_at", "provider_model_id", "started_at"),
+    )
 
     agent_run_id: Mapped[str] = mapped_column(ForeignKey("agent_runs.id", ondelete="CASCADE"), nullable=False)
     agent_run_attempt_id: Mapped[Optional[str]] = mapped_column(

@@ -31,8 +31,10 @@ credential, base URL or secret reference.
 """
 
 import enum
+import logging
 from dataclasses import dataclass, field
 from decimal import Decimal
+from statistics import median
 from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy import select
@@ -48,10 +50,27 @@ from app.db.enums import (
 from app.domain.pricing import classify_pricing
 from app.models.execution import ModelRoutingDecision
 from app.models.providers import Model, Provider, ProviderModel, ProviderModelSnapshot
+from app.routing_evidence import (
+    EVIDENCE_STRATEGY_V1,
+    EvidenceProfile,
+    RoutingContext,
+    load_active_policy,
+    load_evidence,
+)
 
-# Recorded on every decision so a later strategy (MA8.2) can be told apart
-# from this one when reading history.
+logger = logging.getLogger("app.model_resolution")
+
+# Recorded on every decision so strategies can be told apart when reading
+# history: the MA8.1 order, or the MA8.2 evidence order layered on top of it
+# (app.routing_evidence.EVIDENCE_STRATEGY_V1).
 ROUTING_STRATEGY = "ma8.1-deterministic-v1"
+
+# decision.evidence["status"] values (MA8.2). Every status except APPLIED
+# means the MA8.1 order was used unchanged.
+EVIDENCE_APPLIED = "applied"  # evidence ordering was used
+EVIDENCE_INSUFFICIENT = "insufficient"  # no candidate met the minimum evidence
+EVIDENCE_UNAVAILABLE = "unavailable"  # evidence could not be loaded
+EVIDENCE_DISABLED = "disabled"  # no active router policy version
 
 # Human-readable statement of the tie-break, recorded with each decision.
 TIE_BREAK_RULE = (
@@ -169,6 +188,8 @@ class RoutingDecision:
     requested_provider_model_id: Optional[str] = None
     failure_code: Optional[ExclusionReason] = None
     strategy: str = ROUTING_STRATEGY
+    router_policy_version_id: Optional[str] = None
+    evidence: Optional[Dict[str, Any]] = None
 
     @property
     def fallback_used(self) -> Optional[bool]:
@@ -211,6 +232,7 @@ class RoutingDecision:
             "free_preference_satisfied": self.free_preference_satisfied,
             "fallback_used": self.fallback_used,
             "tie_break": TIE_BREAK_RULE if self.selection_mode == ModelSelectionMode.AUTO else None,
+            "evidence": self.evidence,
         }
 
 
@@ -292,14 +314,20 @@ def _tie_break_key(item: Tuple[ProviderModel, Model, Provider, PricingClassifica
 # -- routing ---------------------------------------------------------------------
 
 
-def route(db: Session, model_policy: Optional[Dict[str, Any]]) -> RoutingDecision:
+def route(
+    db: Session, model_policy: Optional[Dict[str, Any]], context: Optional[RoutingContext] = None
+) -> RoutingDecision:
     """Resolve a model policy (the ``agent_versions.model_policy`` /
     ``agent_runs.model_policy_override_json`` shape) to a provider model.
 
     Returns a ``RoutingDecision`` with ``selected`` set, or raises
     ``ModelUnavailableError`` / ``NoEligibleModelError`` whose ``decision``
     describes the failed attempt. An absent ``mode`` means manual — the
-    MA3 default."""
+    MA3 default.
+
+    ``context`` (MA8.2) scopes historical evidence for AUTO routing. Without
+    it, or without an active router policy version, AUTO routing is exactly
+    MA8.1. MANUAL never consults evidence."""
     policy = model_policy or {}
     mode = policy.get("mode", ModelSelectionMode.MANUAL.value)
 
@@ -334,7 +362,7 @@ def route(db: Session, model_policy: Optional[Dict[str, Any]]) -> RoutingDecisio
                 failure_code=ExclusionReason.POLICY_INVALID,
             )
             raise ModelUnavailableError(message, code=decision.failure_code, decision=decision)
-        return route_auto(db, free_policy)
+        return route_auto(db, free_policy, context=context)
 
     message = f"model_policy mode must be 'manual' or 'auto' (got {mode!r})."
     decision = RoutingDecision(
@@ -433,8 +461,11 @@ def _all_candidates(db: Session) -> List[Tuple[ProviderModel, Model, Provider, P
     ]
 
 
-def route_auto(db: Session, policy: RouterFreePolicy) -> RoutingDecision:
-    """Deterministic auto selection under a FREE_ONLY/PREFER_FREE/ANY policy."""
+def route_auto(
+    db: Session, policy: RouterFreePolicy, context: Optional[RoutingContext] = None
+) -> RoutingDecision:
+    """Deterministic auto selection under a FREE_ONLY/PREFER_FREE/ANY policy,
+    optionally reordered by MA8.2 evidence inside that policy's boundary."""
     eligible: List[Tuple[ProviderModel, Model, Provider, PricingClassification]] = []
     excluded: List[CandidateVerdict] = []
     catalog_eligible_count = 0
@@ -451,7 +482,6 @@ def route_auto(db: Session, policy: RouterFreePolicy) -> RoutingDecision:
 
     eligible.sort(key=_tie_break_key)
     excluded.sort(key=lambda v: (v.canonical_model_id or "", v.provider_name or "", v.provider_model_id))
-    eligible_verdicts = [_verdict(pm, m, p, c, []) for pm, m, p, c in eligible]
 
     if not eligible:
         if catalog_eligible_count == 0:
@@ -477,17 +507,32 @@ def route_auto(db: Session, policy: RouterFreePolicy) -> RoutingDecision:
         )
         raise NoEligibleModelError(message, code=decision.failure_code, decision=decision)
 
+    deterministic_pick = eligible[0]
+    evidence, active, profiles = _apply_evidence(db, policy, context, eligible)
+    eligible_verdicts = [_verdict(pm, m, p, c, []) for pm, m, p, c in eligible]
+    evidence_applied = evidence is not None and evidence["status"] == EVIDENCE_APPLIED
+
     provider_model, model, provider, classification = eligible[0]
     if policy == RouterFreePolicy.PREFER_FREE and classification != PricingClassification.FREE:
         policy_clause = "no eligible FREE model, so PREFER_FREE's explicit fallback to a PAID model was used"
     else:
         policy_clause = f"pricing {classification.value.upper()} is permitted by {policy.value.upper()}"
+    if evidence_applied:
+        ordering_clause = (
+            f"ordered by {EVIDENCE_STRATEGY_V1} (router policy v{active.version}) inside the policy "
+            f"boundary, ties by the {ROUTING_STRATEGY} tie-break ({TIE_BREAK_RULE})"
+        )
+    else:
+        ordering_clause = f"ranked first by the {ROUTING_STRATEGY} tie-break ({TIE_BREAK_RULE})"
     rationale = (
         f"auto policy={policy.value} selected={model.canonical_model_id!r} via {provider.name!r} "
         f"tier={classification.value} among {len(eligible)} eligible of {len(eligible) + len(excluded)} "
-        f"total candidates: model ACTIVE, provider and offering not DOWN, {policy_clause}; ranked first by "
-        f"the {ROUTING_STRATEGY} tie-break ({TIE_BREAK_RULE})"
+        f"total candidates: model ACTIVE, provider and offering not DOWN, {policy_clause}; {ordering_clause}"
     )
+    if evidence is not None and evidence["status"] != EVIDENCE_DISABLED:
+        evidence["deterministic_pick_provider_model_id"] = deterministic_pick[0].id
+        evidence["evidence_changed_selection"] = deterministic_pick[0].id != provider_model.id
+        rationale += ". " + _evidence_explanation(evidence, active, profiles, eligible[0], deterministic_pick)
     resolved = ResolvedModel(
         provider_model=provider_model,
         model=model,
@@ -503,7 +548,114 @@ def route_auto(db: Session, policy: RouterFreePolicy) -> RoutingDecision:
         selected=resolved,
         eligible=eligible_verdicts,
         excluded=excluded,
+        strategy=EVIDENCE_STRATEGY_V1 if evidence_applied else ROUTING_STRATEGY,
+        router_policy_version_id=active.router_policy_version_id if active is not None else None,
+        evidence=evidence,
     )
+
+
+# -- MA8.2 evidence ordering ---------------------------------------------------------
+
+
+def _evidence_key(policy: RouterFreePolicy, profile: EvidenceProfile, config, item):
+    """Evidence only moves a candidate inside its policy's boundary:
+    PREFER_FREE keeps every FREE candidate ahead of every PAID one, ANY keeps
+    UNKNOWN pricing as the last resort (MA3), FREE_ONLY holds only FREE
+    candidates. Remaining ties fall through to the MA8.1 key."""
+    classification = item[3]
+    if policy == RouterFreePolicy.PREFER_FREE:
+        boundary = (0 if classification == PricingClassification.FREE else 1,)
+    elif policy == RouterFreePolicy.ANY:
+        boundary = (1 if classification == PricingClassification.UNKNOWN else 0,)
+    else:
+        boundary = ()
+    return boundary + profile.sort_key(config) + _tie_break_key(item)
+
+
+def _apply_evidence(db: Session, policy: RouterFreePolicy, context: Optional[RoutingContext], eligible):
+    """Reorders ``eligible`` in place when evidence applies. Never raises:
+    any failure keeps the MA8.1 order and is recorded as ``unavailable``.
+    Returns (evidence record or None, active policy or None, profiles)."""
+    if context is None:
+        return None, None, {}
+    try:
+        active = load_active_policy(db)
+    except Exception as exc:  # noqa: BLE001 - learning data must never block execution
+        logger.warning("routing_evidence_policy_unavailable error=%s", type(exc).__name__)
+        return {"status": EVIDENCE_UNAVAILABLE, "error": type(exc).__name__}, None, {}
+    if active is None:
+        return {"status": EVIDENCE_DISABLED}, None, {}
+
+    config = active.config
+    record: Dict[str, Any] = {
+        "strategy": EVIDENCE_STRATEGY_V1,
+        "router_policy_version": active.version,
+        "config": config.to_json(),
+        "agent_role": context.agent_role,
+    }
+    try:
+        profiles = load_evidence(
+            db, context=context, provider_model_ids=[item[0].id for item in eligible], config=config
+        )
+    except Exception as exc:  # noqa: BLE001 - learning data must never block execution
+        logger.warning("routing_evidence_unavailable error=%s", type(exc).__name__)
+        return {**record, "status": EVIDENCE_UNAVAILABLE, "error": type(exc).__name__}, active, {}
+
+    record["profiles"] = [
+        profiles[item[0].id].to_json(config)
+        for item in eligible
+        if profiles[item[0].id].observations or profiles[item[0].id].evaluated_runs
+    ][:MAX_RECORDED_CANDIDATES]
+    if not any(profile.is_sufficient(config) for profile in profiles.values()):
+        record["status"] = EVIDENCE_INSUFFICIENT
+        return record, active, profiles
+
+    eligible.sort(key=lambda item: _evidence_key(policy, profiles[item[0].id], config, item))
+    record["status"] = EVIDENCE_APPLIED
+    return record, active, profiles
+
+
+def _describe_profile(profile: Optional[EvidenceProfile], config) -> str:
+    if profile is None or not (profile.observations or profile.evaluated_runs):
+        return "no relevant history"
+    parts = [
+        (
+            f"{profile.observations} observed call(s) ({profile.completed} completed, "
+            f"{profile.provider_failures} provider failure(s)), reliability {profile.reliability(config)}"
+        ),
+        (
+            f"{profile.evaluated_runs} evaluated run(s) (MET {profile.met}, PARTIAL {profile.partial}, "
+            f"NOT_MET {profile.not_met}; {profile.not_applicable} NOT_APPLICABLE not counted), "
+            f"quality {profile.quality(config)}"
+        ),
+    ]
+    if profile.latencies_ms:
+        parts.append(f"median latency {int(median(profile.latencies_ms))} ms")
+    return "; ".join(parts)
+
+
+def _evidence_explanation(evidence, active, profiles, selected, deterministic_pick) -> str:
+    if evidence["status"] == EVIDENCE_UNAVAILABLE:
+        return "Evidence routing: evidence could not be loaded, so the MA8.1 order was used"
+    config = active.config
+    scope = (
+        f"{EVIDENCE_STRATEGY_V1}, role={evidence['agent_role']!r}, last {config.history_window_days} "
+        f"day(s), minimum {config.min_observations} call(s) or {config.min_evaluated_runs} evaluated run(s)"
+    )
+    if evidence["status"] == EVIDENCE_INSUFFICIENT:
+        return (
+            f"Evidence routing ({scope}): no candidate has the minimum evidence, so the MA8.1 order was "
+            "used; selected model: " + _describe_profile(profiles.get(selected[0].id), config)
+        )
+    text = f"Evidence routing ({scope}); observed evidence for the selected model: " + _describe_profile(
+        profiles.get(selected[0].id), config
+    )
+    if deterministic_pick[0].id != selected[0].id:
+        text += (
+            f". The MA8.1 order alone would have selected {deterministic_pick[1].canonical_model_id!r}, which "
+            "remained eligible: " + _describe_profile(profiles.get(deterministic_pick[0].id), config)
+        )
+    return text
 
 
 def resolve_manual(db: Session, provider_model_id: str) -> ResolvedModel:
@@ -554,13 +706,15 @@ def record_routing_decision(
 ) -> ModelRoutingDecision:
     """Persist one routing decision (successful or failed) for an Agent Run
     attempt. Rows are append-only: a retry routes again and gets its own
-    row; earlier rows are never modified. ``router_policy_version_id`` stays
-    NULL — MA8.1 has no versioned scoring config; ``routing_strategy``
-    identifies the algorithm instead."""
+    row; earlier rows are never modified. ``router_policy_version_id`` is the
+    MA8.2 policy version consulted for evidence (NULL for MANUAL, or when none
+    is active); ``routing_strategy`` is the algorithm that ordered the
+    candidates."""
     details = decision.details_json()
     details["agent_run_attempt_id"] = agent_run_attempt_id
     row = ModelRoutingDecision(
         agent_run_id=agent_run_id,
+        router_policy_version_id=decision.router_policy_version_id,
         selection_mode=decision.selection_mode,
         requested_policy=decision.requested_policy.value if decision.requested_policy else None,
         routing_strategy=decision.strategy,

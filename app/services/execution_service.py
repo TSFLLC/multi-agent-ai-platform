@@ -67,6 +67,7 @@ from app.providers.base import (
 )
 from app.providers.factory import build_provider_adapter
 from app.review_contract import build_repair_extra_context, build_reviewer_extra_context
+from app.routing_evidence import RoutingContext
 from app.services.budget_service import BudgetExceededError, BudgetGovernor, estimate_cost
 from app.services.comparison_progress_service import notify_task_run_terminal
 from app.services.evaluation_progress_service import (
@@ -483,7 +484,10 @@ class AgentExecutionService:
         # an operator's failed-node replacement model (always MANUAL).
         # Absent an override (the MA3/MA4 default), behavior is unchanged.
         policy = ctx.agent_run.model_policy_override_json or ctx.agent_version.model_policy or {}
-        return route(self.db, policy)
+        # MA8.2: AUTO routing may consult this project's own history for this
+        # Agent role; MANUAL (including every replacement retry) never does.
+        context = RoutingContext(project_id=ctx.project.id, agent_role=ctx.agent_version.role)
+        return route(self.db, policy, context=context)
 
     # -- extra prompt context (MA4 reviewer/repair runs only) --------------
 

@@ -100,12 +100,12 @@ def _fk_violations(engine):
         return conn.execute(text("PRAGMA foreign_key_check")).fetchall()
 
 
-def test_revision_is_the_new_head_directly_after_ma7_5a():
+def test_revision_follows_ma7_5a_in_the_chain():
     from alembic.script import ScriptDirectory
 
     script = ScriptDirectory.from_config(_cfg())
     assert script.get_revision(REVISION).down_revision == PREVIOUS_HEAD
-    assert script.get_current_head() == REVISION
+    assert REVISION in {r.revision for r in script.walk_revisions()}
 
 
 def test_upgrade_adds_nullable_columns_and_keeps_existing_rows(disposable_db):
