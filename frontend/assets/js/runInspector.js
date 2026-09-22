@@ -116,6 +116,9 @@ function buildAgentAndModel(ctx) {
             kv("Model", model.canonical_model_id),
             kv("Provider", model.provider_name),
             kv("Pricing snapshot", shortId(model.provider_model_snapshot_id), { title: model.provider_model_snapshot_id }),
+            agent && agent.agent_run_id
+              ? el("a", { href: `#/model-intelligence/agent-runs/${encodeURIComponent(agent.agent_run_id)}` }, "Why this model?")
+              : null,
           ]
         : [el("p", { class: "hint" }, "No model has been resolved yet. It is chosen when the step starts.")],
       { hint: "The intelligence the Agent used. Chosen separately from the Agent.", cls: "studio-model-section" }
