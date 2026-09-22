@@ -46,6 +46,7 @@ from app.db.enums import (
     AgentRunStatus,
     ApprovalScope,
     ApprovalStatus,
+    ModelSelectionMode,
     TaskRunStatus,
     WorkflowRunStatus,
     WorkflowNodeRunStatus,
@@ -61,7 +62,9 @@ from app.errors import (
     FingerprintMismatchError,
     InvalidStateTransitionError,
     NotFoundError,
+    RetryNotAllowedError,
 )
+from app.model_resolution import ModelUnavailableError, resolve_manual
 from app.models.artifacts_eval import Artifact
 from app.models.evaluation_runs import EvaluationRun
 from app.models.execution import JobQueue
@@ -225,6 +228,21 @@ class WorkflowExecutionService(BaseService):
             .all()
         )
 
+    @staticmethod
+    def _latest_by_node(node_runs: List[WorkflowNodeRun]) -> Dict[str, WorkflowNodeRun]:
+        """One entry per ``workflow_node_id``: the row with the highest
+        ``iteration``. This is the node's CURRENT attempt -- an earlier,
+        superseded row (e.g. the original failure a retry replaced) is
+        immutable history, never re-consulted for "is this node currently
+        failed/ready/terminal" (MA7.6B failed-step recovery). Mirrors
+        ``workflow_run_read_service._latest_node_runs``."""
+        latest: Dict[str, WorkflowNodeRun] = {}
+        for node_run in node_runs:
+            current = latest.get(node_run.workflow_node_id)
+            if current is None or node_run.iteration > current.iteration:
+                latest[node_run.workflow_node_id] = node_run
+        return latest
+
     def _waiting_node_runs(self, workflow_run_id: str) -> List[WorkflowNodeRun]:
         return list(
             self.db.execute(
@@ -273,14 +291,20 @@ class WorkflowExecutionService(BaseService):
           wins it; and
         * its WorkflowRun is dispatchable (RUNNING / NODE_WAITING_FOR_APPROVAL
           -- never CANCELLING or terminal); and
-        * no node run of that run has FAILED -- the fail-fast barrier. It is
-          durable state, so it holds across processes and restarts and needs
-          no in-memory flag: a dispatcher that read "ready" before a sibling
-          failed cannot slip a node past the failure.
+        * no node of that run is CURRENTLY FAILED -- the fail-fast barrier. It
+          is durable state, so it holds across processes and restarts and
+          needs no in-memory flag: a dispatcher that read "ready" before a
+          sibling failed cannot slip a node past the failure. "Currently"
+          excludes a superseded row a retry has replaced (MA7.6B): a sibling
+          counts as failed only if no newer iteration of the SAME node
+          exists -- so a node's own original failure never blocks its own
+          retry, and the run's other nodes are unblocked once that retry
+          lands, while the original failed row remains untouched history.
 
         Returns True only if this call made the change. The caller owns the
         transaction (commit on True; rollback on False)."""
         sibling = aliased(WorkflowNodeRun)
+        newer = aliased(WorkflowNodeRun)
         conditions = [
             WorkflowNodeRun.id == node_run_id,
             WorkflowNodeRun.status == WorkflowNodeRunStatus.PENDING,
@@ -291,6 +315,11 @@ class WorkflowExecutionService(BaseService):
             ~exists().where(
                 sibling.workflow_run_id == WorkflowNodeRun.workflow_run_id,
                 sibling.status == WorkflowNodeRunStatus.FAILED,
+                ~exists().where(
+                    newer.workflow_run_id == sibling.workflow_run_id,
+                    newer.workflow_node_id == sibling.workflow_node_id,
+                    newer.iteration > sibling.iteration,
+                ),
             ),
         ]
         if unlinked:
@@ -334,21 +363,14 @@ class WorkflowExecutionService(BaseService):
     # -- failure barrier / derived run state (MA7.4b) -------------------------
 
     def _has_failed_node(self, workflow_run_id: str) -> bool:
-        """True once any node run of the run has FAILED: the run is "failing"
-        -- nothing more is dispatched and it can only end FAILED (or, if a
-        cancellation was already under way, FAILED still: failure outranks
-        cancellation). Read from current committed state."""
-        return (
-            self.db.execute(
-                select(WorkflowNodeRun.id)
-                .where(
-                    WorkflowNodeRun.workflow_run_id == workflow_run_id,
-                    WorkflowNodeRun.status == WorkflowNodeRunStatus.FAILED,
-                )
-                .limit(1)
-            ).first()
-            is not None
-        )
+        """True once any node's CURRENT attempt (latest iteration) is
+        FAILED: the run is "failing" -- nothing more is dispatched and it can
+        only end FAILED (or, if a cancellation was already under way, FAILED
+        still: failure outranks cancellation). A node's own superseded
+        failure, replaced by a successful retry (MA7.6B), is excluded. Read
+        from current committed state."""
+        latest = self._latest_by_node(self._fresh_node_runs(workflow_run_id))
+        return any(nr.status == WorkflowNodeRunStatus.FAILED for nr in latest.values())
 
     def _accepts_dispatch(self, workflow_run_id: str) -> bool:
         """Cheap pre-check before doing dispatch work (creating a TaskRun /
@@ -389,7 +411,7 @@ class WorkflowExecutionService(BaseService):
             self.db.commit()
 
     def _only_humans_left_to_act(self, workflow_run_id: str) -> bool:
-        statuses = [nr.status for nr in self._fresh_node_runs(workflow_run_id)]
+        statuses = [nr.status for nr in self._latest_by_node(self._fresh_node_runs(workflow_run_id)).values()]
         if WorkflowNodeRunStatus.WAITING_FOR_APPROVAL not in statuses:
             return False
         if WorkflowNodeRunStatus.RUNNING in statuses or WorkflowNodeRunStatus.FAILED in statuses:
@@ -1613,7 +1635,7 @@ class WorkflowExecutionService(BaseService):
             return []
 
         node_runs = self._fresh_node_runs(workflow_run_id)
-        status_by_node = {nr.workflow_node_id: nr.status for nr in node_runs}
+        status_by_node = {node_id: nr.status for node_id, nr in self._latest_by_node(node_runs).items()}
         keys: Dict[str, str] = {
             node_id: node_key
             for node_id, node_key in self.db.execute(
@@ -1798,6 +1820,189 @@ class WorkflowExecutionService(BaseService):
             agent_run_id=agent_run.id,
         )
 
+    def retry_failed_agent_node(
+        self,
+        node_run_id: str,
+        replacement_provider_model_id: str,
+        *,
+        actor_user_id: Optional[str] = None,
+    ) -> WorkflowNodeRun:
+        """MA7.6B: bounded failed-Agent-node recovery with model replacement.
+
+        Retries exactly one FAILED AGENT node run with an operator-selected
+        replacement model, as a run/attempt-level override only -- the
+        published WorkflowVersion, the original failed WorkflowNodeRun and
+        AgentRun (model/error), and every completed upstream/sibling node are
+        left untouched. A NEW WorkflowNodeRun (``iteration`` + 1) and a NEW
+        AgentRun carry the retry, reusing the same dispatch/claim/enqueue
+        mechanics as a normal AGENT node (Section 24.4 #10 attempt lineage,
+        never a mutation of a prior attempt).
+
+        The WorkflowRun itself is durably FAILED at this point (MA7.4b
+        fail-fast), so it is moved back to RUNNING here -- the one place
+        outside normal dispatch that does so -- which is what lets the
+        engine's own scheduler resume previously-blocked downstream
+        dependencies (never already-completed nodes: see
+        ``_has_failed_node``/``_claim_pending_node``, which now key off each
+        node's LATEST iteration, so the superseded failure no longer blocks
+        this node's own retry or the run's other nodes) once this attempt
+        completes. Raises ``RetryNotAllowedError`` (400) if the node/run
+        isn't eligible or the replacement model isn't currently valid/ACTIVE,
+        ``ConflictError`` (409) if a concurrent retry of the same node wins
+        the race, ``NotFoundError`` (404) if the ids don't resolve.
+        """
+        node_run = self._fresh_node_run(node_run_id)
+        if node_run is None:
+            raise NotFoundError("Workflow node run not found")
+
+        workflow_run = self._fresh_run(node_run.workflow_run_id)
+        if workflow_run is None:
+            raise NotFoundError("Workflow run not found")
+
+        node: Optional[WorkflowNode] = self.db.query(WorkflowNode).filter(
+            WorkflowNode.id == node_run.workflow_node_id
+        ).first()
+        if node is None:
+            raise NotFoundError("Workflow node not found")
+
+        if node.node_type != WorkflowNodeType.AGENT:
+            raise RetryNotAllowedError(
+                f"Only AGENT nodes can be retried (node {node.node_key!r} is {node.node_type.value})."
+            )
+
+        latest = self._latest_by_node(self._fresh_node_runs(workflow_run.id))
+        if latest.get(node.id, node_run).id != node_run.id:
+            raise RetryNotAllowedError(
+                "A newer attempt of this node already exists; retry that attempt instead."
+            )
+
+        if node_run.status != WorkflowNodeRunStatus.FAILED:
+            raise RetryNotAllowedError(
+                f"Node run is {node_run.status.value}, not FAILED -- nothing to retry."
+            )
+
+        if workflow_run.status != WorkflowRunStatus.FAILED:
+            raise RetryNotAllowedError(
+                f"Workflow run is {workflow_run.status.value}, not FAILED -- retry is only available "
+                "once the run has finished failing (it may already be retrying)."
+            )
+
+        if node_run.agent_run_id is None:
+            raise RetryNotAllowedError("Failed node run has no Agent Run to retry.")
+
+        failed_agent_run: Optional[AgentRun] = self.db.query(AgentRun).filter(
+            AgentRun.id == node_run.agent_run_id
+        ).first()
+        if failed_agent_run is None or failed_agent_run.status != AgentRunStatus.FAILED:
+            raise RetryNotAllowedError("The underlying Agent Run is not in a FAILED state.")
+
+        try:
+            resolve_manual(self.db, replacement_provider_model_id)
+        except ModelUnavailableError as exc:
+            raise RetryNotAllowedError(str(exc)) from exc
+
+        parent_task_run: Optional[TaskRun] = self.db.query(TaskRun).filter(
+            TaskRun.id == workflow_run.task_run_id
+        ).first()
+        if parent_task_run is None:
+            raise NotFoundError("Parent task run not found")
+
+        # The one place a FAILED run is moved back to active: the authority
+        # (not the advisory check above) for "was this run still eligible" --
+        # a concurrent retry, or any other finalization, loses this CAS.
+        # Left UNCOMMITTED here deliberately: it lands in the same
+        # transaction as the new node/task/agent run and their atomic claim
+        # below, so no other process ever observes a RUNNING run whose
+        # retried node is still (momentarily) the latest FAILED attempt --
+        # closing the window where a concurrent reconciliation sweep could
+        # see "RUNNING but a node is failed" and re-finalize the run FAILED
+        # out from under this retry.
+        if not self._cas_run(
+            workflow_run.id, WorkflowRunStatus.FAILED, status=WorkflowRunStatus.RUNNING, ended_at=None
+        ):
+            self.db.rollback()
+            raise ConflictError("Workflow run is no longer FAILED; it may already be retrying.")
+
+        new_iteration = node_run.iteration + 1
+        new_node_run = WorkflowNodeRun(
+            workflow_run_id=workflow_run.id,
+            workflow_node_id=node.id,
+            iteration=new_iteration,
+            status=WorkflowNodeRunStatus.PENDING,
+        )
+        self.db.add(new_node_run)
+        try:
+            self.db.flush()
+        except IntegrityError as exc:
+            self.db.rollback()
+            raise ConflictError("A retry of this node is already in progress.") from exc
+
+        node_task_run = TaskRun(
+            task_id=parent_task_run.task_id,
+            workflow_version_id=workflow_run.workflow_version_id,
+            status=TaskRunStatus.CREATED,
+            budget_id=parent_task_run.budget_id,
+            config_snapshot={
+                "node_key": node.node_key,
+                "node_type": node.node_type.value,
+                "iteration": new_iteration,
+                "retry_of_node_run_id": node_run.id,
+            },
+            created_at=datetime.now(timezone.utc),
+        )
+        self.db.add(node_task_run)
+        self.db.flush()
+
+        new_agent_run = AgentRun(
+            task_run_id=node_task_run.id,
+            agent_version_id=failed_agent_run.agent_version_id,
+            status=AgentRunStatus.CREATED,
+            created_at=datetime.now(timezone.utc),
+            # A run/attempt-level override only -- never written back to the
+            # (immutable, published) WorkflowNode.config that every iteration
+            # of this node shares.
+            model_policy_override_json={
+                "mode": ModelSelectionMode.MANUAL.value,
+                "manual_provider_model_id": replacement_provider_model_id,
+            },
+        )
+        sources = self._upstream_sources(new_node_run)
+        upstream_evidence = self._upstream_evidence(sources)
+        if upstream_evidence or sources:
+            new_agent_run.input_context_json = {
+                "kind": "workflow_upstream",
+                "upstream_artifact_ids": [entry["artifact_id"] for entry in upstream_evidence],
+                "upstream_node_run_ids": [nr.id for _key, nr in sources],
+                "upstream": upstream_evidence,
+            }
+        self.db.add(new_agent_run)
+        self.db.flush()
+
+        if not self._atomically_claim_node_for_execution(new_node_run.id, new_agent_run.id):
+            raise ConflictError("A retry of this node is already in progress.")
+
+        try:
+            self.job_queue_repo.enqueue(
+                self.db, job_type=JobType.AGENT_RUN, payload_ref=new_agent_run.id
+            )
+        except IntegrityError:
+            self.db.rollback()
+
+        self._emit_event(
+            workflow_run.task_run_id,
+            "workflow.node.retried",
+            workflow_run_id=workflow_run.id,
+            workflow_node_run_id=new_node_run.id,
+            agent_run_id=new_agent_run.id,
+            actor_user_id=actor_user_id,
+            decision_summary=(
+                f"retry of node run {node_run.id} (attempt {node_run.iteration}, "
+                f"agent run {failed_agent_run.id}) with replacement model {replacement_provider_model_id}"
+            ),
+        )
+        self._sync_run_state(workflow_run.id)
+        return self._fresh_node_run(new_node_run.id) or new_node_run
+
     def _dispatch_evaluation(self, node_run: WorkflowNodeRun, node: WorkflowNode, workflow_run: WorkflowRun) -> None:
         """Dispatches an EVALUATION node: exactly one MA6 EvaluationRun over
         the single output artifact of its single upstream AGENT node.
@@ -1850,14 +2055,18 @@ class WorkflowExecutionService(BaseService):
                 node_run, workflow_run, "EVALUATION node must have exactly one incoming edge from an AGENT node"
             )
             return
+        # The parent's CURRENT attempt (MA7.6B: latest iteration) -- a
+        # superseded failure a retry replaced is never "the" upstream run.
         parent_run: Optional[WorkflowNodeRun] = self.db.execute(
             select(WorkflowNodeRun)
             .where(
                 WorkflowNodeRun.workflow_run_id == node_run.workflow_run_id,
                 WorkflowNodeRun.workflow_node_id == parent_node.id,
             )
+            .order_by(WorkflowNodeRun.iteration.desc())
+            .limit(1)
             .execution_options(populate_existing=True)
-        ).scalar_one_or_none()
+        ).scalars().first()
         if parent_run is None or parent_run.status != WorkflowNodeRunStatus.COMPLETED:
             return  # not ready (the scheduler only dispatches ready nodes; nothing to do)
         if not parent_run.agent_run_id or not parent_run.output_snapshot_ref:
@@ -2043,7 +2252,7 @@ class WorkflowExecutionService(BaseService):
         if observed not in (*_DISPATCHABLE_RUN_STATUSES, WorkflowRunStatus.CANCELLING):
             return  # not active, or already terminal
 
-        statuses = [nr.status for nr in self._fresh_node_runs(workflow_run_id)]
+        statuses = [nr.status for nr in self._latest_by_node(self._fresh_node_runs(workflow_run_id)).values()]
         if any(status in _ACTIVE_NODE_STATUSES for status in statuses):
             return  # something is still in flight
 
@@ -2065,17 +2274,20 @@ class WorkflowExecutionService(BaseService):
             self._emit_event(workflow_run.task_run_id, event, workflow_run_id=workflow_run_id, **extra)
 
     def _failure_summary(self, workflow_run_id: str) -> str:
-        """What kind of node failed first (node_key order) -- for the
-        ``workflow.failed`` evidence only."""
-        rows = self.db.execute(
-            select(WorkflowNode.node_key, WorkflowNode.node_type)
-            .join(WorkflowNodeRun, WorkflowNodeRun.workflow_node_id == WorkflowNode.id)
-            .where(
-                WorkflowNodeRun.workflow_run_id == workflow_run_id,
-                WorkflowNodeRun.status == WorkflowNodeRunStatus.FAILED,
-            )
-            .order_by(WorkflowNode.node_key)
-        ).all()
+        """What kind of node is CURRENTLY failed first (node_key order) --
+        for the ``workflow.failed`` evidence only. A node a retry superseded
+        with a successful attempt is never the reason the run failed."""
+        latest = self._latest_by_node(self._fresh_node_runs(workflow_run_id))
+        failed_node_ids = [node_id for node_id, nr in latest.items() if nr.status == WorkflowNodeRunStatus.FAILED]
+        rows = (
+            self.db.execute(
+                select(WorkflowNode.node_key, WorkflowNode.node_type)
+                .where(WorkflowNode.id.in_(failed_node_ids))
+                .order_by(WorkflowNode.node_key)
+            ).all()
+            if failed_node_ids
+            else []
+        )
         node_type = rows[0][1] if rows else None
         if node_type == WorkflowNodeType.HUMAN_APPROVAL:
             return "Human approval rejected"

@@ -26,6 +26,9 @@ import { computeLayout } from "../dagLayout.js";
 import { createDagCanvas } from "../dagCanvas.js";
 import { buildEdgeInspector, buildInspector } from "../nodeInspector.js";
 import { writeStoredProjectId } from "../projectSelection.js";
+import { formatDateTime } from "../format.js";
+import { buildVoiceControl } from "../voiceControl.js";
+import { runStatusInfo, shortId, usageLine } from "../runState.js";
 import {
   PALETTE,
   applyPositionOverrides,
@@ -92,6 +95,7 @@ function newState(workflowId) {
     errorIssues: [],
     confirm: null, // { kind: "publish" }
     busy: null,
+    history: { open: false, loaded: false, loading: false, error: null, runs: [] },
     ui: { picker: {}, promptCache: new Map(), modelMode: {}, confirmDeleteNodeId: null },
   };
 }
@@ -266,6 +270,7 @@ function draw(root, s) {
       el("aside", { class: "studio-inspector", "aria-label": "Inspector" }, buildInspectorPanel(root, s)),
     ]),
     buildValidationPanel(root, s),
+    buildHistoryPanel(root, s),
   ]);
   mount(root, shell);
   if (scroll) {
@@ -482,6 +487,68 @@ function buildValidationPanel(root, s) {
 }
 
 // ---------------------------------------------------------------------------------------------------
+// run history (MA7.6B)
+// ---------------------------------------------------------------------------------------------------
+
+async function loadHistory(root, s) {
+  s.history.loading = true;
+  s.history.error = null;
+  draw(root, s);
+  try {
+    s.history.runs = await workflowApi.listWorkflowRuns(s.workflowId);
+    s.history.loaded = true;
+  } catch (err) {
+    s.history.error = normalizeApiError(err).message;
+  }
+  s.history.loading = false;
+  draw(root, s);
+}
+
+// Every run of this workflow, across all of its versions -- facts only (status, timing,
+// the version each run is bound to, usage and cost when recorded). No ranking, no scores.
+function buildHistoryPanel(root, s) {
+  const history = s.history;
+  const rows = history.runs.map((run) => {
+    const info = runStatusInfo(run.status);
+    return el("tr", {}, [
+      el("td", {}, [
+        el("code", { title: run.id }, shortId(run.id)),
+        run.assignment_title ? el("div", { class: "hint run-history-title" }, run.assignment_title) : null,
+      ]),
+      el("td", {}, `v${run.workflow_version}`),
+      el("td", {}, el("span", { class: `badge run-tone-${info.tone}` }, info.label)),
+      el("td", {}, run.started_at ? formatDateTime(run.started_at) : "—"),
+      el("td", {}, run.ended_at ? formatDateTime(run.ended_at) : "—"),
+      el("td", {}, usageLine(run.usage)),
+      el("td", {}, el("a", { class: "studio-open-link", href: `#/workflow-runs/${encodeURIComponent(run.id)}` }, "Open")),
+    ]);
+  });
+  const details = el("details", { class: "card studio-history" }, [
+    el("summary", {}, "Run history"),
+    el("div", { class: "row" }, [
+      el("button", { type: "button", class: "small", disabled: history.loading, onclick: () => loadHistory(root, s) }, history.loaded ? "Refresh" : "Load"),
+      el("span", { class: "hint" }, "Every run of this workflow, across all versions. Select one to open its Control Room."),
+    ]),
+    history.loading ? el("p", { class: "hint" }, [el("span", { class: "spinner" }), " Loading runs…"]) : null,
+    history.error ? el("div", { class: "error-banner" }, history.error) : null,
+    history.loaded && !history.runs.length && !history.loading ? el("p", { class: "hint" }, "This workflow has not been run yet.") : null,
+    history.runs.length
+      ? el("table", {}, [
+          el("thead", {}, el("tr", {}, ["Run", "Version", "Status", "Started", "Ended", "Usage and cost", ""].map((label) => el("th", {}, label)))),
+          el("tbody", {}, rows),
+        ])
+      : null,
+  ]);
+  if (history.open) details.setAttribute("open", "");
+  details.addEventListener("toggle", () => {
+    if (details.open === history.open) return; // ignore the toggle caused by our own redraw
+    history.open = details.open;
+    if (details.open && !history.loaded && !history.loading) loadHistory(root, s);
+  });
+  return details;
+}
+
+// ---------------------------------------------------------------------------------------------------
 // actions
 // ---------------------------------------------------------------------------------------------------
 
@@ -629,29 +696,74 @@ function insertExample(root, s) {
 // ---------------------------------------------------------------------------------------------------
 
 function openRunDialog(s) {
-  const dialog = { title: "", description: "", taskId: null, key: newIdempotencyKey(), busy: false, error: null, result: null };
+  const dialog = { title: "", description: "", taskId: null, key: newIdempotencyKey(), busy: false, error: null, result: null, mics: null };
   const content = el("div", { class: "studio-run-dialog" });
   const versionNumber = s.version.version;
+
+  const startEnabled = () => !dialog.busy && Boolean(dialog.title.trim());
+  const syncStart = () => {
+    const button = content.querySelector(".studio-start-btn");
+    if (button) button.disabled = !startEnabled();
+  };
+  // Dictation writes into the (still editable) fields and never submits anything.
+  const putText = (field, selector) => (text) => {
+    dialog[field] = text;
+    const input = content.querySelector(selector);
+    if (input) input.value = text;
+    syncStart();
+  };
+  const stopMics = () => {
+    if (dialog.mics) for (const mic of Object.values(dialog.mics)) mic.abort();
+  };
+  function micsOnce() {
+    if (!dialog.mics) {
+      dialog.mics = {
+        title: buildVoiceControl({ label: "the assignment title", getValue: () => dialog.title, setValue: putText("title", "input[aria-label='Assignment title']") }),
+        description: buildVoiceControl({ label: "the assignment details", getValue: () => dialog.description, setValue: putText("description", "textarea[aria-label='Assignment description']") }),
+      };
+    }
+    return dialog.mics;
+  }
+  const close = () => {
+    stopMics();
+    closeModal();
+  };
 
   function paint() {
     clear(content);
     content.appendChild(
       el("div", { class: "modal-header" }, [
         el("div", {}, [el("h2", {}, dialog.result ? "Workflow started" : `Run “${s.workflow.name}”`), el("div", { class: "modal-subtitle" }, `Version v${versionNumber} (${statusLabel(s.version.status)})`)]),
-        el("button", { type: "button", class: "modal-close-btn", "aria-label": "Close", onclick: closeModal }, "✕"),
+        el("button", { type: "button", class: "modal-close-btn", "aria-label": "Close", onclick: close }, "✕"),
       ])
     );
     if (dialog.result) {
+      stopMics();
+      const runId = dialog.result.id;
       content.appendChild(
         el("div", { class: "stack" }, [
           el("p", {}, "The team has been assigned the work."),
           el("div", { class: "studio-run-facts" }, [
-            el("div", {}, [el("span", { class: "hint" }, "Run ID"), el("code", { class: "studio-run-id" }, dialog.result.id)]),
+            el("div", {}, [el("span", { class: "hint" }, "Run ID"), el("code", { class: "studio-run-id" }, runId)]),
             el("div", {}, [el("span", { class: "hint" }, "Current status"), el("strong", {}, String(dialog.result.status))]),
             el("div", {}, [el("span", { class: "hint" }, "Workflow version"), el("strong", {}, `v${versionNumber}`)]),
           ]),
-          el("p", { class: "hint studio-note" }, "Live monitoring of this run is coming in a later release. This is where the run monitor will open."),
-          el("div", { class: "row" }, [el("button", { type: "button", class: "primary", onclick: closeModal }, "Close")]),
+          el("p", { class: "hint studio-note" }, "Watch the team work, inspect any step, and make the Human Approval decision in the Control Room."),
+          el("div", { class: "row" }, [
+            el(
+              "button",
+              {
+                type: "button",
+                class: "primary studio-open-run",
+                onclick: () => {
+                  close();
+                  navigate(`#/workflow-runs/${encodeURIComponent(runId)}`);
+                },
+              },
+              "Open live run"
+            ),
+            el("button", { type: "button", onclick: close }, "Close"),
+          ]),
         ])
       );
       return;
@@ -666,7 +778,7 @@ function openRunDialog(s) {
       "aria-label": "Assignment title",
       oninput: (event) => {
         dialog.title = event.target.value;
-        startButton.disabled = dialog.busy || !dialog.title.trim();
+        syncStart();
       },
     });
     const descriptionInput = el("textarea", {
@@ -679,14 +791,16 @@ function openRunDialog(s) {
       },
     });
     descriptionInput.value = dialog.description;
+    const mics = locked ? null : micsOnce();
     const startButton = el(
       "button",
       {
         type: "button",
-        class: "primary",
-        disabled: dialog.busy || !dialog.title.trim(),
+        class: "primary studio-start-btn",
+        disabled: !startEnabled(),
         onclick: async () => {
-          if (dialog.busy || !dialog.title.trim()) return;
+          if (!startEnabled()) return;
+          stopMics(); // the microphone is never left running once the person submits
           dialog.busy = true;
           dialog.error = null;
           paint();
@@ -707,12 +821,12 @@ function openRunDialog(s) {
     );
     content.appendChild(
       el("div", { class: "stack" }, [
-        el("p", { class: "hint" }, "Every Agent in this workflow receives this assignment, along with the output of the steps before it."),
-        el("div", {}, [el("label", {}, "Assignment title"), titleInput]),
-        el("div", {}, [el("label", {}, "Description (optional)"), descriptionInput]),
+        el("p", { class: "hint" }, "Every Agent in this workflow receives this assignment, along with the output of the steps before it. Type it, or dictate it and edit the text before you start."),
+        el("div", {}, [el("label", {}, "Assignment title"), titleInput, mics ? mics.title.element : null]),
+        el("div", {}, [el("label", {}, "Description (optional)"), descriptionInput, mics ? mics.description.element : null]),
         locked ? el("p", { class: "hint" }, "The assignment is saved. Retrying starts it without creating another.") : null,
         dialog.error ? el("div", { class: "error-banner", role: "alert" }, dialog.error) : null,
-        el("div", { class: "row" }, [startButton, el("button", { type: "button", onclick: closeModal }, "Cancel")]),
+        el("div", { class: "row" }, [startButton, el("button", { type: "button", onclick: close }, "Cancel")]),
       ])
     );
   }

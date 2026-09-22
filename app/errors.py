@@ -101,6 +101,16 @@ class ArtifactHashMismatchError(AppError):
     code = "artifact_hash_mismatch"
 
 
+class RetryNotAllowedError(AppError):
+    """MA7.6B: a failed-step retry was requested for a node/run that is not
+    eligible -- wrong node type, the node run is not FAILED, it is not the
+    node's latest attempt, the workflow run itself is not FAILED, or the
+    operator's replacement model is not currently valid/ACTIVE."""
+
+    status_code = status.HTTP_400_BAD_REQUEST
+    code = "retry_not_allowed"
+
+
 class FingerprintMismatchError(AppError):
     """MA7.3a: the caller's echoed ``action_fingerprint`` for
     ``POST /approvals/{id}/resolve`` does not match the Approval's stored

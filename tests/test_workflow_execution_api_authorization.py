@@ -106,7 +106,10 @@ def test_authorized_read_and_modify_operations(client, db, auth_headers, bootstr
 
     assert client.get(f"/workflow-runs/{run.id}", headers=auth_headers).status_code == 200
     assert client.get(f"/workflow-runs/{run.id}/nodes", headers=auth_headers).status_code == 200
-    assert client.get(f"/workflow-runs/{run.id}/nodes/x/attempts", headers=auth_headers).status_code == 501
+    # MA7.6B: the attempts endpoint is implemented now -- an authorized caller
+    # asking about a node that does not exist in this run's version gets 404,
+    # never the old MA7.2 501 placeholder.
+    assert client.get(f"/workflow-runs/{run.id}/nodes/x/attempts", headers=auth_headers).status_code == 404
 
     # The bootstrap owner has MODIFY access and can start another same-project run.
     second_task = make_task(db, bootstrap.project, execution_mode=ExecutionMode.SINGLE_AGENT)

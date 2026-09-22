@@ -83,14 +83,24 @@ def test_workflow_node_attempts_placeholder_contract_is_preserved():
     assert resp.status_code == 401
 
 
-def test_workflow_node_attempts_placeholder_contract_is_preserved_when_authorized(
-    client, db, auth_headers, bootstrap
-):
+def test_workflow_node_attempts_is_implemented_when_authorized(client, db, auth_headers, bootstrap):
+    """MA7.6B: the MA7.2 placeholder is now real -- an unknown node 404s
+    (never the old 501), and a real node returns its (single, so far)
+    attempt."""
+    from app.models.workflow import WorkflowNode
     from tests.test_workflow_execution_api_authorization import _started_run
 
-    _, _, _, run = _started_run(db, bootstrap.project, "contract")
-    resp = client.get(f"/workflow-runs/{run.id}/nodes/test-node/attempts", headers=auth_headers)
-    assert resp.status_code == 501
+    _, version, _, run = _started_run(db, bootstrap.project, "contract")
+    unknown = client.get(f"/workflow-runs/{run.id}/nodes/test-node/attempts", headers=auth_headers)
+    assert unknown.status_code == 404
+
+    node = db.query(WorkflowNode).filter(
+        WorkflowNode.workflow_version_id == version.id, WorkflowNode.node_key == "planner"
+    ).one()
+    resp = client.get(f"/workflow-runs/{run.id}/nodes/{node.id}/attempts", headers=auth_headers)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body) == 1 and body[0]["iteration"] == 0
 
 
 def test_approval_resolve_declares_409_fingerprint_mismatch_response():

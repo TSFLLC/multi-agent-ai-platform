@@ -20,10 +20,11 @@ from app.models.evaluation_runs import EvaluationRun
 from app.models.governance import Approval
 from app.models.identity import User
 from app.models.tasks import Task
-from app.models.workflow import Workflow, WorkflowNodeRun, WorkflowRun, WorkflowVersion
+from app.models.workflow import Workflow, WorkflowNode, WorkflowNodeRun, WorkflowRun, WorkflowVersion
 from app.schemas.workflow import (
     WorkflowCreate,
     WorkflowNodeCreate,
+    WorkflowNodeRetryRequest,
     WorkflowNodeRunRead,
     WorkflowNodeUpdate,
     WorkflowRead,
@@ -32,9 +33,11 @@ from app.schemas.workflow import (
     WorkflowValidationRead,
     WorkflowVersionRead,
 )
+from app.schemas.workflow_runs import WorkflowRunDetailRead, WorkflowRunSummaryRead
 from app.services.approval_service import WORKFLOW_HUMAN_APPROVAL_OPERATION
 from app.services.idempotency_service import BeginOutcome, IdempotencyService
 from app.services.workflow_definition_service import WorkflowDefinitionService
+from app.services.workflow_run_read_service import build_run_detail, list_runs_for_workflow
 from app.services.workflow_validation_service import DAGValidationError
 
 router = APIRouter(tags=["workflows"])
@@ -504,6 +507,19 @@ def start_workflow_run(
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@router.get("/workflows/{workflow_id}/runs", response_model=List[WorkflowRunSummaryRead])
+def list_runs_of_workflow(
+    workflow_id: str,
+    limit: int = 50,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """A workflow's run history across ALL of its versions, newest first, with
+    factual fields only (MA7.6B). ``limit`` is clamped to 1..200."""
+    _require_workflow_access(db, user, workflow_id, ProjectAction.READ)
+    return list_runs_for_workflow(db, workflow_id, limit)
+
+
 @router.get("/workflows/{workflow_id}/versions/{version}/runs", response_model=List[WorkflowRunRead])
 def list_workflow_runs(
     workflow_id: str,
@@ -554,6 +570,21 @@ def get_workflow_run(
         task_run_id=run.task_run_id,
         status=run.status,
     )
+
+
+@router.get("/workflow-runs/{workflow_run_id}/detail", response_model=WorkflowRunDetailRead)
+def get_workflow_run_detail(
+    workflow_run_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """One consistent snapshot of a run for the Control Room (MA7.6B): the exact
+    bound version's graph plus every node's runtime state, its Agent and Model
+    (kept separate), usage/cost summed from ``model_calls``, and any recorded
+    failure. Read-only; project READ."""
+    run = _get_workflow_run_or_404(db, workflow_run_id)
+    _require_workflow_run_access(db, user, run, ProjectAction.READ)
+    return build_run_detail(db, run)
 
 
 @router.get("/workflow-runs/{workflow_run_id}/nodes", response_model=List[WorkflowNodeRunRead])
@@ -619,14 +650,115 @@ def get_workflow_node_run_attempts(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """Get per-iteration node runs for a repair-loop node.
+    """Every attempt (iteration) of one workflow node, oldest first.
 
-    MA7.2 preserves the MA7.1 contract placeholder; repair-loop execution
-    remains outside this phase.
+    MA7.6B: a failed AGENT node retried with a replacement model produces a
+    NEW WorkflowNodeRun (``iteration`` + 1) -- never a mutation of the failed
+    one. This is the full lineage the Control Room shows for that node,
+    original failed attempt included; each attempt's own model/error is read
+    through its ``agent_run_id`` (``GET /agent-runs/{id}``).
     """
     workflow_run = _get_workflow_run_or_404(db, workflow_run_id)
     _require_workflow_run_access(db, user, workflow_run, ProjectAction.READ)
-    raise HTTPException(status_code=501, detail="Workflow execution (MA7.2+)")
+
+    node = db.get(WorkflowNode, node_id)
+    if node is None or node.workflow_version_id != workflow_run.workflow_version_id:
+        raise NotFoundError("Workflow node not found in this run")
+
+    node_runs = (
+        db.query(WorkflowNodeRun)
+        .filter(
+            WorkflowNodeRun.workflow_run_id == workflow_run_id,
+            WorkflowNodeRun.workflow_node_id == node_id,
+        )
+        .order_by(WorkflowNodeRun.iteration)
+        .all()
+    )
+
+    approval_ids: Dict[str, str] = (
+        {
+            scope_ref_id: approval_id
+            for scope_ref_id, approval_id in db.execute(
+                select(Approval.scope_ref_id, Approval.id).where(
+                    Approval.scope == ApprovalScope.WORKFLOW_NODE_RUN,
+                    Approval.operation_type == WORKFLOW_HUMAN_APPROVAL_OPERATION,
+                    Approval.scope_ref_id.in_([nr.id for nr in node_runs]),
+                )
+            ).all()
+        }
+        if node_runs
+        else {}
+    )
+
+    agent_run_ids = [nr.agent_run_id for nr in node_runs if nr.agent_run_id]
+    evaluation_run_ids: Dict[str, str] = (
+        {
+            evaluator_agent_run_id: evaluation_run_id
+            for evaluator_agent_run_id, evaluation_run_id in db.execute(
+                select(EvaluationRun.evaluator_agent_run_id, EvaluationRun.id).where(
+                    EvaluationRun.evaluator_agent_run_id.in_(agent_run_ids)
+                )
+            ).all()
+        }
+        if agent_run_ids
+        else {}
+    )
+
+    return [
+        WorkflowNodeRunRead(
+            id=nr.id,
+            workflow_run_id=nr.workflow_run_id,
+            workflow_node_id=nr.workflow_node_id,
+            iteration=nr.iteration,
+            status=nr.status,
+            agent_run_id=nr.agent_run_id,
+            approval_id=approval_ids.get(nr.id),
+            evaluation_run_id=evaluation_run_ids.get(nr.agent_run_id) if nr.agent_run_id else None,
+        )
+        for nr in node_runs
+    ]
+
+
+@router.post("/workflow-runs/{workflow_run_id}/nodes/{node_run_id}/retry", response_model=WorkflowNodeRunRead)
+def retry_workflow_node_run(
+    workflow_run_id: str,
+    node_run_id: str,
+    body: WorkflowNodeRetryRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """MA7.6B: retry a FAILED AGENT node run with a replacement model.
+
+    A run/attempt-level override only -- the published WorkflowVersion is
+    never modified. The original failed WorkflowNodeRun/AgentRun (model,
+    error) is preserved as immutable history; a new attempt is created and,
+    on success, the engine automatically resumes only the dependencies that
+    were blocked by the original failure (see
+    ``WorkflowExecutionService.retry_failed_agent_node``).
+    """
+    from app.services.workflow_execution_service import WorkflowExecutionService
+
+    workflow_run = _get_workflow_run_or_404(db, workflow_run_id)
+    _require_workflow_run_access(db, user, workflow_run, ProjectAction.MODIFY)
+
+    node_run = db.get(WorkflowNodeRun, node_run_id)
+    if node_run is None or node_run.workflow_run_id != workflow_run_id:
+        raise NotFoundError("Workflow node run not found in this run")
+
+    service = WorkflowExecutionService(db)
+    retried = service.retry_failed_agent_node(
+        node_run_id, body.replacement_provider_model_id, actor_user_id=user.id
+    )
+    return WorkflowNodeRunRead(
+        id=retried.id,
+        workflow_run_id=retried.workflow_run_id,
+        workflow_node_id=retried.workflow_node_id,
+        iteration=retried.iteration,
+        status=retried.status,
+        agent_run_id=retried.agent_run_id,
+        approval_id=None,
+        evaluation_run_id=None,
+    )
 
 
 @router.post("/workflow-runs/{workflow_run_id}/cancel")

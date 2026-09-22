@@ -7,6 +7,7 @@ import { renderModels } from "./pages/models.js";
 import { renderActivity } from "./pages/activity.js";
 import { renderWorkflows } from "./pages/workflows.js";
 import { renderWorkflowStudio } from "./pages/workflowStudio.js";
+import { renderWorkflowRun } from "./pages/workflowRun.js";
 
 registerRoute("/ask", renderAsk);
 registerRoute("/comparisons", renderComparisons);
@@ -16,5 +17,6 @@ registerRoute("/models", renderModels);
 registerRoute("/activity", renderActivity);
 registerRoute("/workflows", renderWorkflows);
 registerRoute("/workflows/:id", renderWorkflowStudio);
+registerRoute("/workflow-runs/:id", renderWorkflowRun);
 
 startRouter(document.getElementById("app-root"), document.getElementById("app-nav"), "#/ask");

@@ -72,5 +72,36 @@ export const workflowApi = {
     ),
   getRun: (runId) => api.get(`/workflow-runs/${enc(runId)}`),
 
+  // -- Control Room (MA7.6B) -----------------------------------------------------------------
+  // One consistent snapshot: the bound version's graph + every node's runtime state,
+  // Agent and Model (separate), usage/cost from model_calls, and any recorded failure.
+  getRunDetail: (runId) => api.get(`/workflow-runs/${enc(runId)}/detail`),
+  listWorkflowRuns: (workflowId, limit = 50) => api.get(`/workflows/${enc(workflowId)}/runs?limit=${enc(limit)}`),
+  cancelRun: (runId) => api.post(`/workflow-runs/${enc(runId)}/cancel`),
+  getEvaluationRun: (evaluationRunId) => api.get(`/evaluation-runs/${enc(evaluationRunId)}`),
+  getApproval: (approvalId) => api.get(`/approvals/${enc(approvalId)}`),
+  getApprovalEvidence: (approvalId) => api.get(`/approvals/${enc(approvalId)}/evidence`),
+  // The approver echoes the fingerprint it displayed; the server refuses (409) if the evidence changed.
+  resolveApproval: (approvalId, { approve, actionFingerprint, notes }) =>
+    api.post(`/approvals/${enc(approvalId)}/resolve`, {
+      approve: Boolean(approve),
+      action_fingerprint: actionFingerprint,
+      notes: notes && notes.trim() ? notes.trim() : null,
+    }),
+  getArtifactText: (artifactId) => api.getText(`/artifacts/${enc(artifactId)}/content`),
+
   getPromptVersions: (agentId) => api.get(`/agents/${enc(agentId)}/prompt-versions`),
+
+  // -- Failed-step recovery (MA7.6B) -----------------------------------------------------------
+  // A run/attempt-level model override only -- never a WorkflowVersion edit. The original
+  // failed WorkflowNodeRun/AgentRun (model, error) is kept as immutable history; retry creates
+  // a NEW attempt (iteration + 1) with the replacement model.
+  listModels: () => api.get("/models"),
+  getNodeAttempts: (runId, nodeId) => api.get(`/workflow-runs/${enc(runId)}/nodes/${enc(nodeId)}/attempts`),
+  retryNode: (runId, nodeRunId, replacementProviderModelId) =>
+    api.post(`/workflow-runs/${enc(runId)}/nodes/${enc(nodeRunId)}/retry`, {
+      replacement_provider_model_id: replacementProviderModelId,
+    }),
+  getAgentRun: (agentRunId) => api.get(`/agent-runs/${enc(agentRunId)}`),
+  getAgentRunAttempts: (agentRunId) => api.get(`/agent-runs/${enc(agentRunId)}/attempts`),
 };

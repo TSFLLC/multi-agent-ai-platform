@@ -78,3 +78,10 @@ class WorkflowNodeRunRead(BaseModel):
     # the EvaluationRun whose UNIQUE evaluator_agent_run_id is this node run's
     # agent_run_id. Read the findings via GET /evaluation-runs/{id}.
     evaluation_run_id: Optional[str] = None
+
+
+class WorkflowNodeRetryRequest(BaseModel):
+    """MA7.6B: POST /workflow-runs/{run_id}/nodes/{node_run_id}/retry body --
+    a run/attempt-level model override only, never a WorkflowVersion edit."""
+
+    replacement_provider_model_id: str

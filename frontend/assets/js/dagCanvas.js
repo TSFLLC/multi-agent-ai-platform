@@ -7,7 +7,9 @@
 //
 // View model given to render():
 //   {
-//     nodes:     [{ id, type, title, tag, lines: [..], unsupported, hint }],
+//     nodes:     [{ id, type, title, tag, lines: [..], unsupported, hint, status? }],
+//                status (execution view only): { key, label } -- shown as a pill on the card
+//     edges (each): { id, from, to, label, done? }   done = its source step has completed
 //     edges:     [{ id, from, to, label }],
 //     positions: { [nodeId]: { x, y } },
 //     selectedNodeId, selectedEdgeId, connectFromId, flaggedIds: Set, editable
@@ -29,7 +31,9 @@ function svgEl(tag, attrs = {}) {
   return node;
 }
 
-export function createDagCanvas(handlers = {}) {
+// options.draggable: false for the execution view (a fixed layout, nothing to rearrange).
+export function createDagCanvas(handlers = {}, options = {}) {
+  const draggable = options.draggable !== false;
   const wrapper = el("div", { class: "studio-canvas", tabindex: "0", role: "group", "aria-label": "Workflow diagram" });
   const inner = el("div", { class: "studio-canvas-inner" });
   const edgeLayer = svgEl("svg", { class: "studio-edges", "aria-hidden": "true" });
@@ -93,7 +97,7 @@ export function createDagCanvas(handlers = {}) {
       group.appendChild(
         svgEl("path", {
           d: geometry.d,
-          class: `studio-edge${selected ? " selected" : ""}${flagged ? " flagged" : ""}`,
+          class: `studio-edge${selected ? " selected" : ""}${flagged ? " flagged" : ""}${edge.done ? " done" : ""}`,
           "marker-end": `url(#${marker})`,
           fill: "none",
         })
@@ -146,6 +150,8 @@ export function createDagCanvas(handlers = {}) {
     const isConnectSource = model.connectFromId === node.id;
     const isConnectTarget = Boolean(model.connectFromId) && !isConnectSource;
     const classes = ["studio-node", `studio-node-${node.type}`];
+    if (node.status) classes.push(`run-state-${node.status.key}`);
+    if (!draggable) classes.push("fixed");
     if (node.unsupported) classes.push("unsupported");
     if (isSelected) classes.push("selected");
     if (isFlagged) classes.push("flagged");
@@ -154,6 +160,7 @@ export function createDagCanvas(handlers = {}) {
     if (isConnectTarget) classes.push("connect-target");
 
     const children = [
+      node.status ? el("span", { class: `run-pill run-pill-${node.status.key}` }, node.status.label) : null,
       el("span", { class: "studio-node-tag" }, node.tag),
       el("span", { class: "studio-node-title" }, node.title),
       ...node.lines.map((line) => el("span", { class: "studio-node-line" }, line)),
@@ -167,7 +174,7 @@ export function createDagCanvas(handlers = {}) {
         class: classes.join(" "),
         "data-node-id": node.id,
         "aria-pressed": isSelected ? "true" : "false",
-        "aria-label": `${node.tag} ${node.title}${node.hint ? `. ${node.hint}` : ""}`,
+        "aria-label": `${node.tag} ${node.title}${node.status ? `, ${node.status.label}` : ""}${node.hint ? `. ${node.hint}` : ""}`,
         style: `width:${LAYOUT.nodeWidth}px;height:${LAYOUT.nodeHeight}px`,
         onclick: (event) => {
           event.stopPropagation();
@@ -181,7 +188,7 @@ export function createDagCanvas(handlers = {}) {
       },
       children
     );
-    button.addEventListener("pointerdown", (event) => startDrag(event, node.id));
+    if (draggable) button.addEventListener("pointerdown", (event) => startDrag(event, node.id));
     nodeElements.set(node.id, button);
     return button;
   }

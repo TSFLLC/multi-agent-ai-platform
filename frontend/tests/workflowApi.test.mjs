@@ -17,7 +17,8 @@ beforeEach(() => {
   calls = [];
   nextResponse = { status: 200, body: {} };
   globalThis.fetch = async (path, init) => {
-    calls.push({ path, method: init.method, body: init.body, headers: Object.fromEntries(init.headers.entries()) });
+    const headers = init.headers && typeof init.headers.entries === "function" ? Object.fromEntries(init.headers.entries()) : { ...(init.headers || {}) };
+    calls.push({ path, method: init.method, body: init.body, headers });
     const { status, body } = nextResponse;
     return { ok: status < 400, status, statusText: "x", text: async () => (body === undefined ? "" : JSON.stringify(body)) };
   };
@@ -120,6 +121,84 @@ test("idempotency keys are non-empty and distinct", () => {
   const keys = new Set(Array.from({ length: 50 }, () => newIdempotencyKey()));
   assert.equal(keys.size, 50);
   for (const key of keys) assert.ok(key.length >= 8);
+});
+
+// -- Control Room (MA7.6B) -------------------------------------------------------------------------------
+
+test("the Control Room reads one snapshot of a run and a workflow's run history", async () => {
+  await workflowApi.getRunDetail("run 1");
+  await workflowApi.listWorkflowRuns("wf1");
+  await workflowApi.listWorkflowRuns("wf1", 10);
+  assert.deepEqual(calls.map((c) => [c.method || "GET", c.path]), [
+    ["GET", "/workflow-runs/run%201/detail"],
+    ["GET", "/workflows/wf1/runs?limit=50"],
+    ["GET", "/workflows/wf1/runs?limit=10"],
+  ]);
+});
+
+test("cancelling a run is a POST to the existing cancel route", async () => {
+  await workflowApi.cancelRun("run1");
+  assert.equal(calls[0].method, "POST");
+  assert.equal(calls[0].path, "/workflow-runs/run1/cancel");
+});
+
+test("evaluation, approval and evidence reads use the existing routes", async () => {
+  await workflowApi.getEvaluationRun("ev1");
+  await workflowApi.getApproval("ap1");
+  await workflowApi.getApprovalEvidence("ap1");
+  assert.deepEqual(calls.map((c) => c.path), ["/evaluation-runs/ev1", "/approvals/ap1", "/approvals/ap1/evidence"]);
+});
+
+test("an approval decision echoes the fingerprint the person saw and trims the note", async () => {
+  await workflowApi.resolveApproval("ap1", { approve: true, actionFingerprint: "fp-123", notes: "  ship it  " });
+  assert.equal(calls[0].path, "/approvals/ap1/resolve");
+  assert.equal(calls[0].method, "POST");
+  assert.deepEqual(JSON.parse(calls[0].body), { approve: true, action_fingerprint: "fp-123", notes: "ship it" });
+  await workflowApi.resolveApproval("ap1", { approve: false, actionFingerprint: "fp-123", notes: "   " });
+  assert.deepEqual(JSON.parse(calls[1].body), { approve: false, action_fingerprint: "fp-123", notes: null });
+  await workflowApi.resolveApproval("ap1", { approve: 1, actionFingerprint: "fp" });
+  assert.equal(JSON.parse(calls[2].body).approve, true); // always a real boolean
+});
+
+test("a decision failure reaches the caller with its status and code (403, 409 conflict, fingerprint mismatch)", async () => {
+  for (const [status, code] of [[403, "forbidden"], [409, "invalid_state_transition"], [409, "fingerprint_mismatch"]]) {
+    nextResponse = { status, body: { error: { code, message: code } } };
+    await assert.rejects(workflowApi.resolveApproval("ap1", { approve: true, actionFingerprint: "x" }), (err) => err.status === status && err.code === code);
+  }
+});
+
+test("artifact output is fetched as text with the Bearer token", async () => {
+  nextResponse = { status: 200, body: undefined };
+  await workflowApi.getArtifactText("art/1");
+  assert.equal(calls[0].path, "/artifacts/art%2F1/content");
+  assert.ok("Authorization" in calls[0].headers);
+});
+
+// -- failed-step recovery (MA7.6B) -----------------------------------------------------------------------
+
+test("retrying a node posts only the replacement provider model id", async () => {
+  await workflowApi.retryNode("run 1", "nr/1", "pm-9");
+  assert.equal(calls[0].method, "POST");
+  assert.equal(calls[0].path, "/workflow-runs/run%201/nodes/nr%2F1/retry");
+  assert.deepEqual(JSON.parse(calls[0].body), { replacement_provider_model_id: "pm-9" });
+});
+
+test("node attempt history, the model catalog and an agent run's own attempts use the existing/new read routes", async () => {
+  await workflowApi.getNodeAttempts("run1", "node1");
+  await workflowApi.listModels();
+  await workflowApi.getAgentRun("ar1");
+  await workflowApi.getAgentRunAttempts("ar1");
+  assert.deepEqual(calls.map((c) => [c.method || "GET", c.path]), [
+    ["GET", "/workflow-runs/run1/nodes/node1/attempts"],
+    ["GET", "/models"],
+    ["GET", "/agent-runs/ar1"],
+    ["GET", "/agent-runs/ar1/attempts"],
+  ]);
+});
+
+test("a retry rejected as ineligible reaches the caller with its 400 retry_not_allowed code", async () => {
+  nextResponse = { status: 400, body: { error: { code: "retry_not_allowed", message: "Node run is completed, not FAILED -- nothing to retry." } } };
+  await assert.rejects(workflowApi.retryNode("run1", "nr1", "pm-9"), (err) => err.status === 400 && err.code === "retry_not_allowed");
 });
 
 // -- project selection ----------------------------------------------------------------------------------
