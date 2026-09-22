@@ -37,20 +37,18 @@ from app.db.enums import (
     ArtifactType,
     ExecutionMode,
     ModelCallStatus,
-    ModelSelectionMode,
     PricingClassification,
-    RouterFreePolicy,
     TaskRunStatus,
     UsageSourceType,
 )
 from app.evaluation_contract import build_evaluator_extra_context
 from app.model_resolution import (
-    ModelUnavailableError,
-    NoEligibleModelError,
     ResolvedModel,
+    RoutingDecision,
+    RoutingError,
     freeze_snapshot,
-    resolve_auto,
-    resolve_manual,
+    record_routing_decision,
+    route,
 )
 from app.models.agents import AgentVersion, PromptVersion
 from app.models.artifacts_eval import Artifact
@@ -223,10 +221,18 @@ class AgentExecutionService:
 
         # 1. Resolve model ------------------------------------------------
         try:
-            resolved = self._resolve_model(ctx)
-        except (ModelUnavailableError, NoEligibleModelError) as exc:
+            decision = self._route_model(ctx)
+        except RoutingError as exc:
+            # MA8.1: a failed routing decision is audited too, so "why did
+            # this run get no model" is answerable from durable state.
+            if exc.decision is not None:
+                record_routing_decision(
+                    self.db, agent_run_id=agent_run.id, decision=exc.decision, agent_run_attempt_id=attempt.id
+                )
+                self.db.commit()
             self._finalize_failed(ctx, category="model_resolution_error", message=str(exc), attempt=attempt)
             raise ExecutionAborted(str(exc)) from exc
+        resolved = decision.selected
 
         self._event(
             ctx,
@@ -237,6 +243,13 @@ class AgentExecutionService:
         )
 
         snapshot = freeze_snapshot(self.db, resolved)
+        routing_record = record_routing_decision(
+            self.db,
+            agent_run_id=agent_run.id,
+            decision=decision,
+            snapshot=snapshot,
+            agent_run_attempt_id=attempt.id,
+        )
         agent_run.model_id = resolved.model.id
         agent_run.provider_id = resolved.provider.id
         agent_run.provider_model_snapshot_id = snapshot.id
@@ -336,6 +349,7 @@ class AgentExecutionService:
             provider_id=resolved.provider.id,
             provider_model_id=resolved.provider_model.id,
             provider_model_snapshot_id=snapshot.id,
+            model_routing_decision_id=routing_record.id,
             status=ModelCallStatus.RUNNING,
             started_at=_utcnow(),
         )
@@ -459,26 +473,17 @@ class AgentExecutionService:
 
     # -- model resolution --------------------------------------------------
 
-    def _resolve_model(self, ctx: _Context) -> ResolvedModel:
+    def _route_model(self, ctx: _Context) -> RoutingDecision:
         # MA5: a comparison candidate may override its Agent Version's own
         # (immutable, shared, published) model_policy to resolve a
         # *different* concrete model without needing a second Agent
         # Version just to vary the model ("same Agent, different models").
+        # The same run-level override carries a workflow node's
+        # model_policy_override, an EVALUATION node's evaluator override and
+        # an operator's failed-node replacement model (always MANUAL).
         # Absent an override (the MA3/MA4 default), behavior is unchanged.
         policy = ctx.agent_run.model_policy_override_json or ctx.agent_version.model_policy or {}
-        mode = policy.get("mode", ModelSelectionMode.MANUAL.value)
-        if mode == ModelSelectionMode.MANUAL.value:
-            provider_model_id = policy.get("manual_provider_model_id")
-            if not provider_model_id:
-                raise ModelUnavailableError(
-                    "Agent Version model_policy is manual but has no manual_provider_model_id."
-                )
-            return resolve_manual(self.db, provider_model_id)
-
-        auto_policy_value = policy.get("auto_policy")
-        if not auto_policy_value:
-            raise ModelUnavailableError("Agent Version model_policy is auto but has no auto_policy.")
-        return resolve_auto(self.db, RouterFreePolicy(auto_policy_value))
+        return route(self.db, policy)
 
     # -- extra prompt context (MA4 reviewer/repair runs only) --------------
 
