@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 from app.db.enums import (
     AgentRunStatus,
     ApprovalScope,
+    ModelCallStatus,
     WorkflowNodeRunStatus,
 )
 from app.models.agents import Agent, AgentVersion
@@ -45,6 +46,7 @@ from app.schemas.workflow_runs import (
     RunFailureRead,
     RunModelRead,
     RunNodeRead,
+    RunProgressRead,
     RunUsageRead,
     WorkflowRunDetailRead,
     WorkflowRunSummaryRead,
@@ -108,10 +110,98 @@ def _calls_by_agent_run(db: Session, agent_run_ids: Sequence[str]) -> Dict[str, 
     grouped: Dict[str, List[ModelCall]] = defaultdict(list)
     if agent_run_ids:
         for call in db.execute(
-            select(ModelCall).where(ModelCall.agent_run_id.in_(list(agent_run_ids)))
+            select(ModelCall)
+            .where(ModelCall.agent_run_id.in_(list(agent_run_ids)))
+            .order_by(ModelCall.started_at, ModelCall.id)
         ).scalars():
             grouped[call.agent_run_id].append(call)
     return grouped
+
+
+def _progress_by_agent_run(
+    db: Session, agent_run_ids: Sequence[str], calls: Dict[str, List[ModelCall]]
+) -> Dict[str, RunProgressRead]:
+    """Translate existing Flight Recorder/model-call rows into operator text.
+
+    This deliberately has no percentage or inferred provider progress. The
+    latest event is authoritative for the coarse stage, while a RUNNING call
+    is explicitly presented as waiting for the provider response.
+    """
+    if not agent_run_ids:
+        return {}
+    agent_rows = {
+        agent.id: agent
+        for agent in db.execute(select(AgentRun).where(AgentRun.id.in_(list(agent_run_ids)))).scalars()
+    }
+    attempts: Dict[str, List[AgentRunAttempt]] = defaultdict(list)
+    for attempt in db.execute(
+        select(AgentRunAttempt)
+        .where(AgentRunAttempt.agent_run_id.in_(list(agent_run_ids)))
+        .order_by(AgentRunAttempt.agent_run_id, AgentRunAttempt.attempt_number)
+    ).scalars():
+        attempts[attempt.agent_run_id].append(attempt)
+    events: Dict[str, List[ExecutionEvent]] = defaultdict(list)
+    for event in db.execute(
+        select(ExecutionEvent)
+        .where(ExecutionEvent.agent_run_id.in_(list(agent_run_ids)))
+        .order_by(ExecutionEvent.sequence_number)
+    ).scalars():
+        events[event.agent_run_id].append(event)
+
+    result: Dict[str, RunProgressRead] = {}
+    labels = {
+        "workflow.node.scheduled": "Task dispatched",
+        "agent_run_attempt.started": "Task dispatched",
+        "agent_run.model_selected": "Model resolved",
+        "agent_run.provider_model_snapshot_selected": "Model resolved",
+        "model_call.started": "Waiting for model response",
+        "model_call.completed": "Response received",
+        "artifact.created": "Artifact persistence",
+        "agent_run.completed": "Step completion",
+        "agent_run.failed": "Execution failed",
+        "agent_run.stopped": "Execution stopped",
+        "workflow.node.completed": "Step completion",
+        "workflow.node.failed": "Execution failed",
+        "workflow.node.cancelled": "Execution stopped",
+    }
+    for agent_id in agent_run_ids:
+        agent_attempts = attempts.get(agent_id, [])
+        current_attempt = agent_attempts[-1] if agent_attempts else None
+        agent_events = events.get(agent_id, [])
+        latest_event = agent_events[-1] if agent_events else None
+        agent_calls = calls.get(agent_id, [])
+        latest_call = agent_calls[-1] if agent_calls else None
+        if latest_call is not None and latest_call.status == ModelCallStatus.RUNNING:
+            stage = "Waiting for model response"
+        elif latest_event is not None:
+            stage = labels.get(latest_event.event_type, "Processing")
+        elif current_attempt is not None:
+            stage = "Task dispatched"
+        else:
+            stage = "Task dispatched"
+        activity = [
+            event.occurred_at for event in agent_events if event.occurred_at is not None
+        ]
+        if latest_call is not None and latest_call.started_at is not None:
+            activity.append(latest_call.completed_at or latest_call.started_at)
+        if current_attempt is not None and current_attempt.started_at is not None:
+            activity.append(current_attempt.started_at)
+        agent_row = agent_rows.get(agent_id)
+        if agent_row is not None and agent_row.heartbeat_at is not None:
+            activity.append(agent_row.heartbeat_at)
+        tokens_in = latest_call.tokens_in if latest_call is not None else None
+        tokens_out = latest_call.tokens_out if latest_call is not None else None
+        result[agent_id] = RunProgressRead(
+            stage=stage,
+            attempt_number=current_attempt.attempt_number if current_attempt else None,
+            last_activity_at=max(activity) if activity else None,
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+            cost_amount=latest_call.cost_amount if latest_call else None,
+            cost_currency=latest_call.cost_currency if latest_call else None,
+            cost_is_estimated=latest_call.cost_is_estimated if latest_call else None,
+        )
+    return result
 
 
 def build_run_detail(db: Session, run: WorkflowRun) -> WorkflowRunDetailRead:
@@ -224,6 +314,7 @@ def build_run_detail(db: Session, run: WorkflowRun) -> WorkflowRunDetailRead:
         else {}
     )
     calls = _calls_by_agent_run(db, agent_run_ids)
+    progress = _progress_by_agent_run(db, agent_run_ids, calls)
 
     # The recorded error of each failed Agent Run's latest attempt, and dispatch-time node failures.
     failed_agent_ids = [i for i in agent_run_ids if agent_runs[i].status == AgentRunStatus.FAILED]
@@ -283,6 +374,7 @@ def build_run_detail(db: Session, run: WorkflowRun) -> WorkflowRunDetailRead:
                     if agent_run.model_id or agent_run.provider_id
                     else None
                 ),
+                progress=progress.get(agent_run.id),
                 started_at=agent_run.started_at,
                 ended_at=agent_run.ended_at,
             )

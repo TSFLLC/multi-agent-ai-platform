@@ -60,6 +60,19 @@ class RunModelRead(BaseModel):
     provider_model_snapshot_id: Optional[str] = None
 
 
+class RunProgressRead(BaseModel):
+    """Truthful, coarse live progress derived from existing execution rows."""
+
+    stage: str
+    attempt_number: Optional[int] = None
+    last_activity_at: Optional[datetime] = None
+    tokens_in: Optional[int] = None
+    tokens_out: Optional[int] = None
+    cost_amount: Optional[Decimal] = None
+    cost_currency: Optional[str] = None
+    cost_is_estimated: Optional[bool] = None
+
+
 class RunAgentRead(BaseModel):
     agent_run_id: str
     status: AgentRunStatus
@@ -71,6 +84,7 @@ class RunAgentRead(BaseModel):
     agent_version: Optional[int] = None
     role: Optional[str] = None
     model: Optional[RunModelRead] = None
+    progress: Optional[RunProgressRead] = None
     started_at: Optional[datetime] = None
     ended_at: Optional[datetime] = None
 

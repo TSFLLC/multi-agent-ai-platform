@@ -96,6 +96,7 @@ function buildAgentAndModel(ctx) {
   const { node } = ctx;
   const agent = node.agent;
   const model = agent && agent.model;
+  const progress = agent && agent.progress;
   return [
     section(
       "Agent",
@@ -105,6 +106,9 @@ function buildAgentAndModel(ctx) {
             kv("Version", agent.agent_version != null ? `v${agent.agent_version}` : "—"),
             kv("Role", agent.role),
             kv("Agent run", `${shortId(agent.agent_run_id)} · ${agent.status}`, { title: agent.agent_run_id }),
+            progress ? kv("Stage", progress.stage) : null,
+            progress && progress.attempt_number != null ? kv("Attempt", progress.attempt_number) : null,
+            progress && progress.last_activity_at ? kv("Last activity", formatDateTime(progress.last_activity_at)) : null,
           ]
         : [el("p", { class: "hint" }, "No Agent has been assigned to this step yet.")],
       { hint: "Who did (or will do) this step." }
@@ -120,6 +124,13 @@ function buildAgentAndModel(ctx) {
         : [el("p", { class: "hint" }, "No model has been resolved yet. It is chosen when the step starts.")],
       { hint: "The intelligence the Agent used. Chosen separately from the Agent.", cls: "studio-model-section" }
     ),
+    progress && (progress.tokens_in != null || progress.tokens_out != null || progress.cost_amount != null)
+      ? section("Live usage", [
+          progress.tokens_in != null ? kv("Tokens in", formatTokenCount(progress.tokens_in)) : null,
+          progress.tokens_out != null ? kv("Tokens out", formatTokenCount(progress.tokens_out)) : null,
+          progress.cost_amount != null ? kv("Cost", `${progress.cost_amount} ${progress.cost_currency || ""}`.trim()) : null,
+        ], { hint: "Only usage reported so far by the provider is shown." })
+      : null,
   ];
 }
 

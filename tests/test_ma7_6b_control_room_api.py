@@ -162,6 +162,10 @@ def test_a_run_that_just_started_shows_pending_nodes_and_no_usage_at_all(
 
     nodes = by_key(body)
     assert nodes["planner"]["status"] == "running" and nodes["planner"]["agent"]["status"] == "created"  # queued
+    progress = nodes["planner"]["agent"]["progress"]
+    assert progress["stage"] == "Task dispatched"
+    assert progress["attempt_number"] is None
+    assert progress["last_activity_at"] is not None
     assert {nodes[key]["status"] for key in NODE_KEYS if key != "planner"} == {"pending"}
     assert body["usage"] is None and all(node["usage"] is None for node in body["nodes"])  # never zeros
 
