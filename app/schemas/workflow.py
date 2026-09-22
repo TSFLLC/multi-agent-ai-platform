@@ -82,6 +82,9 @@ class WorkflowNodeRunRead(BaseModel):
 
 class WorkflowNodeRetryRequest(BaseModel):
     """MA7.6B: POST /workflow-runs/{run_id}/nodes/{node_run_id}/retry body --
-    a run/attempt-level model override only, never a WorkflowVersion edit."""
+    a run/attempt-level model override only, never a WorkflowVersion edit.
 
-    replacement_provider_model_id: str
+    MA7.8: may be omitted only to retry a node interrupted by a worker
+    restart (re-run with its original configuration); required otherwise."""
+
+    replacement_provider_model_id: Optional[str] = None

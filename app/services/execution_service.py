@@ -17,6 +17,27 @@ after a provider call already completed, whatever real cost/artifact it
 produced is still recorded (it happened and cost real money/tokens) but
 the run's terminal state is CANCELLED, not COMPLETED, and no further step
 is taken.
+
+Worker-restart recovery (MA7.8): a job whose worker died is reclaimed once
+its lease expires, so ``execute`` may be handed an Agent Run that already
+has durable history. Before any provider work it inspects that history
+(``_recover_before_execution``):
+
+* Agent Run already terminal -> nothing is executed (the caller propagates).
+* no attempt yet -> normal execution from attempt 1.
+* an attempt was interrupted BEFORE any provider call -> that attempt is kept
+  as FAILED ``worker_interrupted`` and execution continues with the next
+  attempt number, within ``max_agent_run_attempts``.
+* a provider call was started (or already succeeded) but the run was never
+  finalized -> the outcome/cost is ambiguous, so the provider is NEVER called
+  again automatically: the open call, attempt, Agent Run and Task Run are
+  finalized FAILED ``worker_interrupted`` (``finalize_interrupted``) and an
+  operator may retry explicitly.
+
+Every terminal write is a compare-and-swap on the row's still-open status,
+so a late ("zombie") writer from a worker that lost its lease cannot turn an
+interrupted run back into a completed one, and two recoveries racing finalize
+it exactly once.
 """
 
 import hashlib
@@ -26,8 +47,11 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Optional, Type
+from typing import Optional, Type, cast
 
+from sqlalchemy import select, update
+from sqlalchemy.engine import CursorResult
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -35,6 +59,7 @@ from app.db.enums import (
     AgentRunAttemptStatus,
     AgentRunStatus,
     ArtifactType,
+    BudgetReservationStatus,
     ExecutionMode,
     ModelCallStatus,
     PricingClassification,
@@ -54,6 +79,7 @@ from app.models.agents import AgentVersion, PromptVersion
 from app.models.artifacts_eval import Artifact
 from app.models.evaluation_definitions import EvaluationDefinitionVersion
 from app.models.execution import ModelCall
+from app.models.governance import BudgetReservation
 from app.models.identity import Project
 from app.models.tasks import AgentRun, AgentRunAttempt, Task, TaskRun
 from app.prompt_builder import build_prompt, build_workflow_upstream_extra_context
@@ -79,6 +105,20 @@ from app.services.review_orchestration_service import ReviewOrchestrationService
 logger = logging.getLogger("app.services.execution_service")
 
 _RETRYABLE_ERROR_CATEGORIES = {"provider_connection_error", "provider_timeout"}
+
+# MA7.8: the worker executing this run stopped (container restart, crash)
+# before the run was finalized. Infrastructure evidence only -- deliberately
+# NOT one of app.routing_evidence.PROVIDER_FAILURE_CATEGORIES, so it never
+# counts against the model/provider (MA8) and is never quality evidence.
+WORKER_INTERRUPTED = "worker_interrupted"
+
+_TERMINAL_AGENT_RUN_STATUSES = (AgentRunStatus.COMPLETED, AgentRunStatus.FAILED, AgentRunStatus.STOPPED)
+
+# A ModelCall in one of these states crossed (or may have crossed) the
+# irreversible provider boundary without a failure being recorded: its
+# outcome/cost is unknown or already real, so it is never replayed.
+_UNRESOLVED_OR_SUCCEEDED_CALL_STATUSES = (ModelCallStatus.PENDING, ModelCallStatus.RUNNING, ModelCallStatus.SUCCESS)
+_OPEN_CALL_STATUSES = (ModelCallStatus.PENDING, ModelCallStatus.RUNNING)
 
 # Pessimistic characters-per-token used ONLY to compare a character count with
 # a model's known context window (in tokens). Real text is usually 3-4; using 2
@@ -117,7 +157,11 @@ class AgentExecutionService:
     def execute(self, agent_run_id: str, *, worker_id: str) -> None:
         ctx = self._load_context(agent_run_id)
 
-        for attempt_number in range(1, settings.max_agent_run_attempts + 1):
+        first_attempt = self._recover_before_execution(ctx)
+        if first_attempt is None:
+            return  # terminal already, or finalized as interrupted: no provider work
+
+        for attempt_number in range(first_attempt, settings.max_agent_run_attempts + 1):
             try:
                 self._run_one_attempt(ctx, attempt_number=attempt_number, worker_id=worker_id)
                 return  # success or a non-retryable terminal state was reached
@@ -143,6 +187,10 @@ class AgentExecutionService:
                 logger.exception(
                     "agent_run_unexpected_error agent_run_id=%s attempt=%s", ctx.agent_run.id, attempt_number
                 )
+                # A failed flush leaves the session unusable until rolled
+                # back; without this the finalization below would itself
+                # raise and leave the run RUNNING (the MA7.8 incident).
+                self.db.rollback()
                 self._fail_dangling_attempt(ctx, message=str(exc))
                 self._finalize_failed(ctx, category="internal_error", message=str(exc))
                 return
@@ -179,6 +227,187 @@ class AgentExecutionService:
             project=project,
         )
 
+    # -- worker-restart recovery (MA7.8) ------------------------------------
+
+    def _recover_before_execution(self, ctx: _Context) -> Optional[int]:
+        """Decides, from durable state only, what this (possibly reclaimed)
+        execution may do. Returns the attempt number to start from, or None
+        when nothing may be executed. See the module docstring for the cases;
+        the rule that matters is that a provider call which was started, or
+        whose success was never finalized, is never replayed automatically."""
+        agent_run = ctx.agent_run
+        self.db.refresh(agent_run)
+        if agent_run.status in _TERMINAL_AGENT_RUN_STATUSES:
+            logger.info(
+                "agent_run_already_terminal_on_claim agent_run_id=%s status=%s", agent_run.id, agent_run.status.value
+            )
+            return None
+
+        attempts = list(
+            self.db.execute(
+                select(AgentRunAttempt)
+                .where(AgentRunAttempt.agent_run_id == agent_run.id)
+                .order_by(AgentRunAttempt.attempt_number)
+                .execution_options(populate_existing=True)
+            )
+            .scalars()
+            .all()
+        )
+        if not attempts:
+            return 1
+
+        crossed_provider_boundary = any(a.status == AgentRunAttemptStatus.COMPLETED for a in attempts) or (
+            self.db.execute(
+                select(ModelCall.id)
+                .where(
+                    ModelCall.agent_run_id == agent_run.id,
+                    ModelCall.status.in_(_UNRESOLVED_OR_SUCCEEDED_CALL_STATUSES),
+                )
+                .limit(1)
+            ).first()
+            is not None
+        )
+        if crossed_provider_boundary:
+            self._finalize_interrupted(
+                ctx,
+                reason=(
+                    "Interrupted by worker restart after the provider call started; its outcome and cost are "
+                    "unknown, so it was not repeated automatically."
+                ),
+            )
+            return None
+
+        # Interrupted before any provider call: nothing irreversible happened.
+        interrupted = [a for a in attempts if a.status == AgentRunAttemptStatus.RUNNING]
+        for attempt in interrupted:
+            if self._cas_attempt(
+                attempt,
+                status=AgentRunAttemptStatus.FAILED,
+                ended_at=_utcnow(),
+                error={
+                    "category": WORKER_INTERRUPTED,
+                    "message": "Interrupted by worker restart before any provider call.",
+                },
+            ):
+                self._event(
+                    ctx,
+                    "agent_run_attempt.interrupted",
+                    decision_summary=f"attempt {attempt.attempt_number} interrupted before any provider call",
+                    error={"category": WORKER_INTERRUPTED},
+                )
+        if interrupted:
+            self._release_active_reservations(agent_run.id)
+
+        next_attempt = max(a.attempt_number for a in attempts) + 1
+        if next_attempt > settings.max_agent_run_attempts:
+            self._finalize_interrupted(
+                ctx, reason="Interrupted by worker restart; the attempt limit is exhausted, so it was not retried."
+            )
+            return None
+        return next_attempt
+
+    def finalize_interrupted(self, agent_run_id: str, *, reason: str) -> bool:
+        """Shared interrupted-finalization (MA7.8), for reconciliation: an
+        Agent Run whose executing worker is known to be gone. Never calls a
+        provider. True only for the caller that made the transition."""
+        try:
+            ctx = self._load_context(agent_run_id)
+        except ExecutionAborted:
+            return False
+        return self._finalize_interrupted(ctx, reason=reason)
+
+    def _finalize_interrupted(self, ctx: _Context, *, reason: str) -> bool:
+        """Open ModelCalls -> ERROR (cost left unknown), running attempts ->
+        FAILED, then the ordinary FAILED finalization of Agent Run and Task
+        Run, all with category ``worker_interrupted``. A ModelCall that
+        already SUCCEEDED is left exactly as recorded -- it is real provider
+        evidence. Budget reservations of an ambiguous call are left held
+        (conservative: the spend may have happened)."""
+        self.db.refresh(ctx.agent_run)
+        if ctx.agent_run.status in _TERMINAL_AGENT_RUN_STATUSES:
+            return False
+        now = _utcnow()
+        error = {"category": WORKER_INTERRUPTED, "message": reason}
+        self.db.execute(
+            update(ModelCall)
+            .where(ModelCall.agent_run_id == ctx.agent_run.id, ModelCall.status.in_(_OPEN_CALL_STATUSES))
+            .values(status=ModelCallStatus.ERROR, completed_at=now, error=error)
+            .execution_options(synchronize_session=False)
+        )
+        self.db.execute(
+            update(AgentRunAttempt)
+            .where(
+                AgentRunAttempt.agent_run_id == ctx.agent_run.id,
+                AgentRunAttempt.status == AgentRunAttemptStatus.RUNNING,
+            )
+            .values(status=AgentRunAttemptStatus.FAILED, ended_at=now, error=error)
+            .execution_options(synchronize_session=False)
+        )
+        self.db.commit()
+        return self._finalize_failed(ctx, category=WORKER_INTERRUPTED, message=reason)
+
+    def _release_active_reservations(self, agent_run_id: str) -> None:
+        """Only for an attempt interrupted BEFORE its provider call: the
+        estimated spend never happened (same rule as ``BudgetGovernor.release``)."""
+        self.db.execute(
+            update(BudgetReservation)
+            .where(
+                BudgetReservation.agent_run_id == agent_run_id,
+                BudgetReservation.status == BudgetReservationStatus.ACTIVE,
+            )
+            .values(status=BudgetReservationStatus.RELEASED)
+            .execution_options(synchronize_session=False)
+        )
+        self.db.commit()
+
+    # -- compare-and-swap guards (MA7.8) ----------------------------------------
+
+    def _cas_attempt(self, attempt: AgentRunAttempt, **values) -> bool:
+        """``attempt`` RUNNING -> ``values``; False if it is no longer RUNNING
+        (e.g. recovery already marked it interrupted)."""
+        result = self.db.execute(
+            update(AgentRunAttempt)
+            .where(AgentRunAttempt.id == attempt.id, AgentRunAttempt.status == AgentRunAttemptStatus.RUNNING)
+            .values(**values)
+            .execution_options(synchronize_session=False)
+        )
+        self.db.commit()
+        self.db.refresh(attempt)
+        return cast(CursorResult, result).rowcount == 1
+
+    def _cas_model_call(self, model_call: ModelCall, **values) -> bool:
+        result = self.db.execute(
+            update(ModelCall)
+            .where(ModelCall.id == model_call.id, ModelCall.status.in_(_OPEN_CALL_STATUSES))
+            .values(**values)
+            .execution_options(synchronize_session=False)
+        )
+        self.db.commit()
+        self.db.refresh(model_call)
+        return cast(CursorResult, result).rowcount == 1
+
+    def _claim_agent_run_terminal(self, ctx: _Context, status: AgentRunStatus) -> bool:
+        """The single authority for an Agent Run's terminal transition: only
+        the caller that moves it out of a non-terminal status wins."""
+        result = self.db.execute(
+            update(AgentRun)
+            .where(AgentRun.id == ctx.agent_run.id, AgentRun.status.notin_(_TERMINAL_AGENT_RUN_STATUSES))
+            .values(status=status, ended_at=_utcnow())
+            .execution_options(synchronize_session=False)
+        )
+        self.db.commit()
+        self.db.refresh(ctx.agent_run)
+        return cast(CursorResult, result).rowcount == 1
+
+    def _superseded(self, ctx: _Context, what: str) -> ExecutionAborted:
+        logger.warning(
+            "agent_run_execution_superseded agent_run_id=%s at=%s -- the run was finalized elsewhere "
+            "(e.g. as interrupted); this execution stops without writing a result",
+            ctx.agent_run.id,
+            what,
+        )
+        return ExecutionAborted(f"execution superseded at {what}")
+
     def _is_cancelled(self, ctx: _Context) -> bool:
         """Cooperative cancellation request, from EITHER level: the Task Run
         (MA3 -- ``TaskService.cancel_task_run``) or this Agent Run itself
@@ -206,7 +435,17 @@ class AgentExecutionService:
             worker_id=worker_id,
         )
         self.db.add(attempt)
-        self.db.commit()
+        try:
+            self.db.commit()
+        except IntegrityError as exc:
+            # (agent_run_id, attempt_number) is unique: another executor
+            # already owns this attempt. Never fight it -- and never leave
+            # this session broken (MA7.8).
+            self.db.rollback()
+            logger.warning(
+                "agent_run_attempt_already_exists agent_run_id=%s attempt=%s", agent_run.id, attempt_number
+            )
+            raise ExecutionAborted(f"attempt {attempt_number} already exists") from exc
         self.db.refresh(attempt)
 
         if agent_run.status != AgentRunStatus.RUNNING:
@@ -342,6 +581,15 @@ class AgentExecutionService:
             self._finalize_cancelled(ctx, attempt)
             raise ExecutionAborted("cancelled before provider invocation")
 
+        # MA7.8: last check before the irreversible step -- a worker that lost
+        # its lease (its attempt already recovered as interrupted) must not
+        # start a provider call.
+        self.db.refresh(attempt)
+        self.db.refresh(agent_run)
+        if attempt.status != AgentRunAttemptStatus.RUNNING or agent_run.status in _TERMINAL_AGENT_RUN_STATUSES:
+            self.governor.release(reservation)
+            raise self._superseded(ctx, "provider invocation")
+
         # 4. Provider invocation ----------------------------------------------
         model_call = ModelCall(
             agent_run_id=agent_run.id,
@@ -375,12 +623,13 @@ class AgentExecutionService:
         try:
             response = self._invoke(adapter, request)
         except _CategorizedProviderError as exc:
-            model_call.status = (
-                ModelCallStatus.ERROR if exc.category != "provider_timeout" else ModelCallStatus.TIMEOUT
-            )
-            model_call.error = {"category": exc.category, "message": exc.message}
-            model_call.completed_at = _utcnow()
-            self.db.commit()
+            if not self._cas_model_call(
+                model_call,
+                status=ModelCallStatus.ERROR if exc.category != "provider_timeout" else ModelCallStatus.TIMEOUT,
+                error={"category": exc.category, "message": exc.message},
+                completed_at=_utcnow(),
+            ):
+                raise self._superseded(ctx, "provider failure") from exc
             self._event(
                 ctx,
                 "model_call.failed",
@@ -390,10 +639,13 @@ class AgentExecutionService:
             self.governor.release(reservation)
 
             if exc.category in _RETRYABLE_ERROR_CATEGORIES:
-                attempt.status = AgentRunAttemptStatus.FAILED
-                attempt.ended_at = _utcnow()
-                attempt.error = {"category": exc.category, "message": exc.message}
-                self.db.commit()
+                if not self._cas_attempt(
+                    attempt,
+                    status=AgentRunAttemptStatus.FAILED,
+                    ended_at=_utcnow(),
+                    error={"category": exc.category, "message": exc.message},
+                ):
+                    raise self._superseded(ctx, "retryable failure") from exc
                 raise _RetryableFailure(exc.category, exc.message) from exc
 
             self._finalize_failed(ctx, category=exc.category, message=exc.message, attempt=attempt)
@@ -401,15 +653,22 @@ class AgentExecutionService:
 
         # 5. Success: record usage/cost, artifact, finalize ---------------------
         actual_cost = self._actual_cost(resolved, response)
-        model_call.tokens_in = response.tokens_in
-        model_call.tokens_out = response.tokens_out
-        model_call.cost_amount = actual_cost.amount
-        model_call.cost_is_estimated = actual_cost.is_estimated
-        model_call.latency_ms = response.latency_ms
-        model_call.provider_request_id = response.provider_request_id
-        model_call.status = ModelCallStatus.SUCCESS
-        model_call.completed_at = _utcnow()
-        self.db.commit()
+        if not self._cas_model_call(
+            model_call,
+            tokens_in=response.tokens_in,
+            tokens_out=response.tokens_out,
+            cost_amount=actual_cost.amount,
+            cost_is_estimated=actual_cost.is_estimated,
+            latency_ms=response.latency_ms,
+            provider_request_id=response.provider_request_id,
+            status=ModelCallStatus.SUCCESS,
+            completed_at=_utcnow(),
+        ):
+            # Recovery already recorded this call as interrupted: that
+            # verdict stands; the late response is not turned into output.
+            # Its real spend is known here, so the held reservation is settled.
+            self.governor.settle(reservation, actual_amount=actual_cost.amount)
+            raise self._superseded(ctx, "provider response")
 
         self._event(
             ctx,
@@ -440,17 +699,15 @@ class AgentExecutionService:
             decision_summary=f"artifact {artifact.id} ({artifact.size_bytes} bytes)",
         )
 
-        attempt.status = AgentRunAttemptStatus.COMPLETED
-        attempt.ended_at = _utcnow()
-        self.db.commit()
+        if not self._cas_attempt(attempt, status=AgentRunAttemptStatus.COMPLETED, ended_at=_utcnow()):
+            raise self._superseded(ctx, "attempt completion")
 
         if self._is_cancelled(ctx):
             self._finalize_cancelled(ctx, attempt, already_produced=True)
             return
 
-        agent_run.status = AgentRunStatus.COMPLETED
-        agent_run.ended_at = _utcnow()
-        self.db.commit()
+        if not self._claim_agent_run_terminal(ctx, AgentRunStatus.COMPLETED):
+            raise self._superseded(ctx, "agent run completion")
         self._event(ctx, "agent_run.completed", decision_summary="agent run completed successfully")
 
         if self._is_build_review(ctx):
@@ -804,14 +1061,24 @@ class AgentExecutionService:
 
     def _finalize_failed(
         self, ctx: _Context, *, category: str, message: str, attempt: Optional[AgentRunAttempt] = None
-    ) -> None:
-        if attempt is not None and attempt.status == AgentRunAttemptStatus.RUNNING:
-            attempt.status = AgentRunAttemptStatus.FAILED
-            attempt.ended_at = _utcnow()
-            attempt.error = {"category": category, "message": message}
-        ctx.agent_run.status = AgentRunStatus.FAILED
-        ctx.agent_run.ended_at = _utcnow()
-        self.db.commit()
+    ) -> bool:
+        """Returns False (and writes nothing more) when the Agent Run was
+        already terminal -- finalized elsewhere, e.g. recovered as interrupted
+        (MA7.8): exactly one finalizer records the outcome."""
+        if attempt is not None:
+            self._cas_attempt(
+                attempt,
+                status=AgentRunAttemptStatus.FAILED,
+                ended_at=_utcnow(),
+                error={"category": category, "message": message},
+            )
+        if not self._claim_agent_run_terminal(ctx, AgentRunStatus.FAILED):
+            logger.warning("agent_run_already_terminal_on_failure agent_run_id=%s", ctx.agent_run.id)
+            return False
+        if category == WORKER_INTERRUPTED:
+            self._event(
+                ctx, "agent_run.interrupted", decision_summary=message, error={"category": WORKER_INTERRUPTED}
+            )
         self._event(
             ctx,
             "agent_run.failed",
@@ -827,15 +1094,17 @@ class AgentExecutionService:
         )
         notify_task_run_terminal(self.db, ctx.task_run)
         notify_evaluation_run_terminal(self.db, ctx.task_run)
+        return True
 
     def _finalize_cancelled(
         self, ctx: _Context, attempt: AgentRunAttempt, *, already_produced: bool = False
     ) -> None:
+        if not self._claim_agent_run_terminal(ctx, AgentRunStatus.STOPPED):
+            logger.warning("agent_run_already_terminal_on_cancel agent_run_id=%s", ctx.agent_run.id)
+            return
         attempt.status = AgentRunAttemptStatus.FAILED
         attempt.ended_at = _utcnow()
         attempt.error = {"category": "cancelled", "message": "cancellation requested"}
-        ctx.agent_run.status = AgentRunStatus.STOPPED
-        ctx.agent_run.ended_at = _utcnow()
         self.db.commit()
         self._event(
             ctx,
@@ -881,6 +1150,20 @@ class AgentExecutionService:
             event_type=event_type,
             **fields,
         )
+
+
+def agent_run_was_interrupted(db: Session, agent_run_id: str) -> bool:
+    """True when this Agent Run FAILED because its worker was interrupted
+    (MA7.8) -- its latest attempt carries ``worker_interrupted``."""
+    latest = db.execute(
+        select(AgentRunAttempt)
+        .where(AgentRunAttempt.agent_run_id == agent_run_id)
+        .order_by(AgentRunAttempt.attempt_number.desc())
+        .limit(1)
+        .execution_options(populate_existing=True)
+    ).scalar_one_or_none()
+    error = latest.error if latest is not None else None
+    return isinstance(error, dict) and error.get("category") == WORKER_INTERRUPTED
 
 
 @dataclass

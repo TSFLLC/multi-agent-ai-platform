@@ -1540,7 +1540,15 @@ class WorkflowExecutionService(BaseService):
         AgentRun finished but the node run never recorded it (replayed
         through ``on_agent_run_complete``), or the node was claimed and its
         AgentRun created but the queue job never enqueued (enqueued now --
-        the unique (job_type, payload_ref) constraint keeps it single)."""
+        the unique (job_type, payload_ref) constraint keeps it single).
+
+        MA7.8: or the AgentRun is still in flight but nothing can ever finish
+        it -- its job is terminal (DONE/FAILED) or missing. It is finalized
+        through the shared interrupted routine (never re-executed) and the
+        failure propagates normally. A job that is PENDING or LEASED is left
+        to the queue: an unexpired lease may belong to a live worker, and an
+        expired one is reclaimed by the normal claim path, whose own recovery
+        decides what may safely run."""
         for node_run in node_runs:
             if not (node_run.agent_run_id and node_run.status == WorkflowNodeRunStatus.RUNNING):
                 continue
@@ -1551,8 +1559,35 @@ class WorkflowExecutionService(BaseService):
                 continue
             if agent_run.status in (AgentRunStatus.COMPLETED, AgentRunStatus.FAILED, AgentRunStatus.STOPPED):
                 self.on_agent_run_complete(agent_run.id)
-            elif agent_run.status == AgentRunStatus.CREATED:
+                continue
+            job_status = self._agent_job_status(agent_run.id)
+            if agent_run.status == AgentRunStatus.CREATED and job_status is None:
                 self._ensure_agent_job_enqueued(agent_run.id)
+            elif job_status is None or job_status in (JobQueueStatus.DONE, JobQueueStatus.FAILED):
+                # Started without a job (every execution starts from one, so it
+                # was lost), or its job can never run again.
+                self._finalize_orphaned_agent_run(agent_run.id)
+
+    def _agent_job_status(self, agent_run_id: str) -> Optional[JobQueueStatus]:
+        return self.db.execute(
+            select(JobQueue.status)
+            .where(JobQueue.job_type == JobType.AGENT_RUN, JobQueue.payload_ref == agent_run_id)
+            .execution_options(populate_existing=True)
+        ).scalar_one_or_none()
+
+    def _finalize_orphaned_agent_run(self, agent_run_id: str) -> None:
+        from app.services.execution_service import AgentExecutionService
+
+        finalized = AgentExecutionService(self.db).finalize_interrupted(
+            agent_run_id,
+            reason=(
+                "Interrupted by worker restart: the worker executing this Agent Run stopped before recording "
+                "a result, and its job can no longer run. Any provider call it had started was not repeated."
+            ),
+        )
+        if finalized:
+            logger.warning("orphaned_agent_run_finalized_interrupted agent_run_id=%s", agent_run_id)
+        self.on_agent_run_complete(agent_run_id)
 
     def _ensure_agent_job_enqueued(self, agent_run_id: str) -> None:
         already = self.db.query(JobQueue).filter(
@@ -1823,7 +1858,7 @@ class WorkflowExecutionService(BaseService):
     def retry_failed_agent_node(
         self,
         node_run_id: str,
-        replacement_provider_model_id: str,
+        replacement_provider_model_id: Optional[str],
         *,
         actor_user_id: Optional[str] = None,
     ) -> WorkflowNodeRun:
@@ -1850,6 +1885,13 @@ class WorkflowExecutionService(BaseService):
         isn't eligible or the replacement model isn't currently valid/ACTIVE,
         ``ConflictError`` (409) if a concurrent retry of the same node wins
         the race, ``NotFoundError`` (404) if the ids don't resolve.
+
+        MA7.8: a node whose Agent Run failed ONLY because its worker was
+        interrupted (``worker_interrupted``) may also be retried WITHOUT a
+        replacement model -- the model was never at fault -- and that is the
+        one way an EVALUATION node can be retried (its evaluator is re-run
+        from the node's own configuration; no replacement is accepted). See
+        ``_retry_interrupted_node``.
         """
         node_run = self._fresh_node_run(node_run_id)
         if node_run is None:
@@ -1865,7 +1907,7 @@ class WorkflowExecutionService(BaseService):
         if node is None:
             raise NotFoundError("Workflow node not found")
 
-        if node.node_type != WorkflowNodeType.AGENT:
+        if node.node_type not in (WorkflowNodeType.AGENT, WorkflowNodeType.EVALUATION):
             raise RetryNotAllowedError(
                 f"Only AGENT nodes can be retried (node {node.node_key!r} is {node.node_type.value})."
             )
@@ -1895,6 +1937,25 @@ class WorkflowExecutionService(BaseService):
         ).first()
         if failed_agent_run is None or failed_agent_run.status != AgentRunStatus.FAILED:
             raise RetryNotAllowedError("The underlying Agent Run is not in a FAILED state.")
+
+        from app.services.execution_service import agent_run_was_interrupted
+
+        interrupted = agent_run_was_interrupted(self.db, failed_agent_run.id)
+        if node.node_type == WorkflowNodeType.EVALUATION:
+            if not interrupted:
+                raise RetryNotAllowedError(
+                    f"Only AGENT nodes can be retried (node {node.node_key!r} is evaluation); an EVALUATION node "
+                    "can be retried only when its evaluator was interrupted by a worker restart."
+                )
+            if replacement_provider_model_id:
+                raise RetryNotAllowedError(
+                    "An EVALUATION node is retried with its own evaluator configuration; a replacement model "
+                    "is not accepted."
+                )
+        if not replacement_provider_model_id:
+            if not interrupted:
+                raise RetryNotAllowedError("A replacement model is required to retry this node.")
+            return self._retry_interrupted_node(node_run, node, workflow_run, actor_user_id=actor_user_id)
 
         try:
             resolve_manual(self.db, replacement_provider_model_id)
@@ -2000,7 +2061,70 @@ class WorkflowExecutionService(BaseService):
                 f"agent run {failed_agent_run.id}) with replacement model {replacement_provider_model_id}"
             ),
         )
-        self._sync_run_state(workflow_run.id)
+        # MA7.8: also dispatches any interrupted sibling already queued for
+        # retry (``_retry_interrupted_node``); otherwise just re-derives state.
+        self._advance_run(workflow_run.id)
+        return self._fresh_node_run(new_node_run.id) or new_node_run
+
+    def _retry_interrupted_node(
+        self,
+        node_run: WorkflowNodeRun,
+        node: WorkflowNode,
+        workflow_run: WorkflowRun,
+        *,
+        actor_user_id: Optional[str],
+    ) -> WorkflowNodeRun:
+        """MA7.8: retry of an AGENT or EVALUATION node whose Agent Run was
+        ``worker_interrupted``. The model was never at fault, so the node is
+        simply dispatched again exactly as its first attempt was -- a NEW
+        WorkflowNodeRun (``iteration`` + 1) left PENDING for the ordinary
+        scheduler, which builds a fresh AgentRun (AGENT: the node's own model
+        policy) or a fresh evaluator AgentRun + EvaluationRun (EVALUATION:
+        ``_dispatch_evaluation`` over the parent's current output). The
+        interrupted rows stay untouched as history; completed nodes are never
+        re-run.
+
+        A restart typically interrupts several parallel siblings at once, and
+        the fail-fast barrier blocks every dispatch while ANY node is
+        currently FAILED. So a retry is first only QUEUED (the run stays
+        FAILED); the run is resumed -- FAILED -> RUNNING, then every queued
+        node dispatched together -- once no node remains currently FAILED
+        (by this call, a later interrupted retry, or a replacement-model
+        retry of a genuinely failed sibling). Checked after the queued row is
+        committed, and applied as a compare-and-swap, so of any number of
+        concurrent retries exactly one resumes the run and none is lost."""
+        new_node_run = WorkflowNodeRun(
+            workflow_run_id=workflow_run.id,
+            workflow_node_id=node.id,
+            iteration=node_run.iteration + 1,
+            status=WorkflowNodeRunStatus.PENDING,
+        )
+        self.db.add(new_node_run)
+        try:
+            self.db.commit()
+        except IntegrityError as exc:
+            self.db.rollback()
+            raise ConflictError("A retry of this node is already in progress.") from exc
+
+        resumed = not self._has_failed_node(workflow_run.id) and self._cas_run(
+            workflow_run.id, WorkflowRunStatus.FAILED, status=WorkflowRunStatus.RUNNING, ended_at=None
+        )
+        self.db.commit()
+
+        self._emit_event(
+            workflow_run.task_run_id,
+            "workflow.node.retried" if resumed else "workflow.node.retry_queued",
+            workflow_run_id=workflow_run.id,
+            workflow_node_run_id=new_node_run.id,
+            actor_user_id=actor_user_id,
+            decision_summary=(
+                f"retry of node run {node_run.id} (attempt {node_run.iteration}) interrupted by a worker restart, "
+                "with its original configuration"
+                + ("" if resumed else "; queued until no other node of the run is failed")
+            ),
+        )
+        if resumed:
+            self._advance_run(workflow_run.id)
         return self._fresh_node_run(new_node_run.id) or new_node_run
 
     def _dispatch_evaluation(self, node_run: WorkflowNodeRun, node: WorkflowNode, workflow_run: WorkflowRun) -> None:

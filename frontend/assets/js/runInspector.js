@@ -23,6 +23,7 @@
 //   actions: {
 //     startDecision(approvalId, kind, fingerprint), cancelDecision(), setNote(text), confirmDecision(),
 //     startRetry(nodeRunId), setRetryModel(providerModelId), cancelRetry(), confirmRetry(),
+//     retryInterrupted(nodeRunId),
 //   }
 // }
 
@@ -153,9 +154,41 @@ function buildFailure(ctx) {
 
 // -- failed-step recovery (MA7.6B) -------------------------------------------------------------------------
 
+// MA7.8: a step whose worker was interrupted (container restart) failed through no fault of its
+// model, so it can be retried as it was -- the one way an EVALUATION step can be retried.
+export const WORKER_INTERRUPTED = "worker_interrupted";
+
+// "interrupted" | "replacement" | null -- which retry, if any, this step offers.
+export function retryMode(node, detail) {
+  if (!node || !detail || node.status !== "failed" || detail.status !== "failed") return null;
+  const interrupted = Boolean(node.failure && node.failure.category === WORKER_INTERRUPTED);
+  if (interrupted && (node.node_type === "agent" || node.node_type === "evaluation")) return "interrupted";
+  return node.node_type === "agent" ? "replacement" : null;
+}
+
 function retryEligible(ctx) {
-  const { node, detail } = ctx;
-  return node.node_type === "agent" && node.status === "failed" && detail.status === "failed";
+  return retryMode(ctx.node, ctx.detail) !== null;
+}
+
+function buildInterruptedRetry(ctx) {
+  const { ui, node, actions } = ctx;
+  const retry = ui.retry && ui.retry.nodeRunId === node.node_run_id ? ui.retry : null;
+  const busy = Boolean(retry && retry.busy);
+  return [
+    el(
+      "p",
+      { class: "hint" },
+      "This step was interrupted by a worker restart before it could finish -- its model was not at fault. " +
+        "Retry it exactly as configured. Nothing already completed is re-run, and a call that may have reached " +
+        "the provider was never repeated automatically."
+    ),
+    retry && retry.error ? el("div", { class: "error-banner", role: "alert" }, retry.error) : null,
+    el(
+      "button",
+      { type: "button", class: "primary", disabled: busy, onclick: () => actions.retryInterrupted(node.node_run_id) },
+      busy ? "Retrying…" : "Retry this step"
+    ),
+  ];
 }
 
 function modelLabel(model) {
@@ -211,6 +244,7 @@ function buildRetryPicker(ctx) {
 
 function buildRetry(ctx) {
   if (!retryEligible(ctx)) return null;
+  if (retryMode(ctx.node, ctx.detail) === "interrupted") return section("Retry this step", buildInterruptedRetry(ctx));
   return section("Retry this step", buildRetryPicker(ctx));
 }
 

@@ -735,6 +735,11 @@ def retry_workflow_node_run(
     on success, the engine automatically resumes only the dependencies that
     were blocked by the original failure (see
     ``WorkflowExecutionService.retry_failed_agent_node``).
+
+    MA7.8: a node (AGENT or EVALUATION) whose Agent Run was interrupted by a
+    worker restart may be retried without a replacement model. With several
+    interrupted siblings each retry is queued, and the run resumes once no
+    node is still failed.
     """
     from app.services.workflow_execution_service import WorkflowExecutionService
 

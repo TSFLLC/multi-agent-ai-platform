@@ -226,6 +226,27 @@ function retryActions(root, s, poller) {
         redraw();
       }
     },
+    // MA7.8: a step interrupted by a worker restart is retried with its original configuration.
+    async retryInterrupted(nodeRunId) {
+      if (s.ui.retry && s.ui.retry.busy) return; // one submission at a time
+      const retry = { nodeRunId, providerModelId: "", busy: true, error: null };
+      s.ui.retry = retry;
+      redraw();
+      try {
+        const queued = await workflowApi.retryNode(s.runId, nodeRunId, null);
+        s.notice =
+          queued && queued.status === "pending" && s.detail && s.detail.status === "failed"
+            ? "Retry queued. The workflow resumes once every other failed step has been retried."
+            : "Retry started. If it succeeds, the workflow continues automatically.";
+        s.ui.retry = null;
+        invalidateCaches(s);
+        await poller.refresh();
+      } catch (err) {
+        retry.busy = false;
+        retry.error = retryErrorMessage(err);
+        redraw();
+      }
+    },
   };
 }
 
