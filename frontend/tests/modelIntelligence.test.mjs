@@ -46,12 +46,14 @@ test("policy OFF shows the settings and offers an explicit enable action", () =>
   assert.equal(view.actionLabel, "Enable evidence routing");
   assert.match(view.summary, /History is still recorded/);
   assert.deepEqual(view.facts, [
+    ["Scope", "Platform-wide — applies to AUTO routing in every project"],
     ["Strategy", "Evidence routing v1 (policy v1)"],
     ["History window", "30 days"],
     ["Reliability minimum", "5 observed calls"],
     ["Quality minimum", "3 evaluated runs"],
   ]);
   assert.match(view.confirmText, /MANUAL choices are never changed/);
+  assert.match(view.confirmText, /platform-wide/);
 });
 
 test("policy ACTIVE offers disable and promises history is kept", () => {

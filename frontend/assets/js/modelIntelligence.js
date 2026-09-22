@@ -204,6 +204,7 @@ export function policyView(status) {
     };
   }
   const facts = [
+    ["Scope", "Platform-wide — applies to AUTO routing in every project"],
     ["Strategy", `${strategyLabel(s.strategy)} (policy v${s.version})`],
     ["History window", `${s.history_window_days} days`],
     ["Reliability minimum", `${s.min_observations} observed calls`],
@@ -229,7 +230,7 @@ export function policyView(status) {
     summary: "AUTO routing uses the deterministic rules. History is still recorded and shown below.",
     confirmTitle: "Enable evidence routing?",
     confirmText:
-      "AUTO routing will use this project's recorded reliability and evaluation evidence to reorder the models its policy already allows (FREE ONLY / PREFER FREE stay respected). MANUAL choices are never changed.",
+      "This switch is platform-wide: it applies to AUTO routing in every project. AUTO routing will use this project's recorded reliability and evaluation evidence to reorder the models its policy already allows (FREE ONLY / PREFER FREE stay respected). MANUAL choices are never changed.",
     facts,
   };
 }
