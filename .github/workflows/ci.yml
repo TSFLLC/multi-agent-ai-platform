@@ -1,0 +1,78 @@
+name: CI
+
+# MA7.7B: this repo had no CI workflow before this slice. Deliberately
+# scoped to what MA7.7B needs proven -- the pytest and frontend node:test
+# suites, on both the repo's local-dev Python baseline (3.8) and the
+# hosted deployment's Docker image Python (3.11, see Dockerfile) -- not a
+# full lint/format enforcement pass. ruff/black already report pre-existing
+# issues unrelated to this change (see the `lint` job below, non-blocking)
+# that are out of this slice's bounded scope to fix.
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  backend:
+    name: backend (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.8: this repo's local-dev/Dockerfile-independent baseline
+        # (pyproject.toml's mypy target-version, requirements.txt's own
+        # compatibility floor). 3.11: the Dockerfile's hosted deployment
+        # image (MA7.7B) -- both must pass for a change to be safe to ship
+        # both locally and hosted.
+        python-version: ["3.8", "3.11"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+      - name: Run pytest
+        run: python -m pytest -q
+
+  frontend:
+    name: frontend (node:test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      # No package.json / bundler by design (frontend/README-equivalent
+      # module docstrings) -- the test runner is Node's own built-in
+      # `node:test`, nothing to install.
+      - name: Run frontend tests
+        run: node --test frontend/tests/*.test.mjs
+
+  lint:
+    name: lint (non-blocking)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+      - name: ruff
+        run: python -m ruff check .
+      - name: black --check
+        run: python -m black --check .
+
+  docker-build:
+    name: docker build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the hosted deployment image
+        run: docker build -t multi-agent-ai-platform:ci .

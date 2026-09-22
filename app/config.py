@@ -6,6 +6,7 @@ reads cloud credentials or remote connection strings.
 """
 
 from pathlib import Path
+from typing import Optional
 
 from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -46,6 +47,49 @@ class Settings(BaseSettings):
     # is this local install's own front-door key, analogous to Jupyter's
     # local token auth.
     auth_token_path: Path = DATA_DIR / "local_auth_token"
+    # MA7.7B: the encrypted-file secret store's data file (used only when
+    # hosted_mode=True — see app.secrets_store.EncryptedFileSecretStore).
+    secrets_file_path: Path = DATA_DIR / "secrets.enc.json"
+
+    # MA7.7B: hosted (Railway/container) deployment mode — explicit
+    # opt-in, same pattern as allow_remote_bind below, never inferred from
+    # `environment`. Local development is completely unaffected when this
+    # is left at its default False (Owner instruction: preserve local
+    # Windows dev behavior unchanged).
+    #
+    # True changes three things, each resolving one MA7.7A blocker/gap:
+    #  1. app.auth.ensure_local_auth_token() requires `auth_token` below
+    #     (an externally-supplied secret) instead of generating/printing/
+    #     persisting a token file — there is no interactive console to
+    #     read a first-run token off of in a hosted container, and
+    #     printing a secret to stdout would land it in Railway's log
+    #     aggregator.
+    #  2. app.web.serve_console() stops injecting the real token into the
+    #     otherwise-unauthenticated "/" HTML response (MA7.7A blocker:
+    #     any public URL would otherwise grant full owner access).
+    #  3. app.secrets_store.get_secret_store() returns an
+    #     EncryptedFileSecretStore instead of the OS-keychain-backed
+    #     KeyringSecretStore — a container has no OS keychain.
+    hosted_mode: bool = False
+    # The hosted front-door token (replaces the locally-generated file).
+    # Required, and validated to be at least as strong as a generated
+    # token, when hosted_mode=True.
+    auth_token: Optional[str] = None
+    # The Fernet key EncryptedFileSecretStore encrypts provider credentials
+    # with. Never derived from auth_token (a compromised front-door token
+    # must not also unlock stored provider API keys) and never persisted
+    # by this application — it must come from Railway's own secret store,
+    # the same "reference, never the value, lives with us" posture
+    # secret_references already uses one layer up (Section 20.1/20.2).
+    secret_encryption_key: Optional[str] = None
+
+    # MA7.7B: a single override that rebases every data_dir-derived path
+    # above onto a mounted persistent volume (e.g. MAP_DATA_ROOT=/data),
+    # instead of requiring six separate MAP_*_DIR/PATH env vars to all be
+    # set consistently by hand. Only rebases a path still at its
+    # PROJECT_ROOT-relative default — an operator who explicitly sets one
+    # of the individual path settings keeps that override.
+    data_root: Optional[Path] = None
 
     # Pre-MA3 checkpoint (Owner requirement): a WAL-safe local backup
     # (app.backup, VACUUM INTO) taken automatically at startup, bounded by
@@ -189,6 +233,72 @@ class Settings(BaseSettings):
                 "127.0.0.1 requires setting MAP_ALLOW_REMOTE_BIND=true explicitly, "
                 "which this configuration does not do."
             )
+        return self
+
+    @model_validator(mode="after")
+    def _rebase_data_paths(self) -> "Settings":
+        """MA7.7B: MAP_DATA_ROOT=/some/volume/path rebases every data_dir-
+        derived path onto that root in one step, for a hosted deployment's
+        single mounted volume. A path field left at its PROJECT_ROOT-
+        relative default is rebased; a field the operator set explicitly
+        (to a different value than the default) is left alone — this is
+        additive convenience, never a silent override of an explicit
+        per-field setting."""
+        if self.data_root is None:
+            return self
+        defaults = {
+            "database_path": DATA_DIR / "multi_agent_platform.db",
+            "artifacts_dir": DATA_DIR / "artifacts",
+            "logs_dir": DATA_DIR / "logs",
+            "workspaces_dir": DATA_DIR / "workspaces",
+            "backups_dir": DATA_DIR / "backups",
+            "auth_token_path": DATA_DIR / "local_auth_token",
+            "secrets_file_path": DATA_DIR / "secrets.enc.json",
+        }
+        for field_name, default in defaults.items():
+            if getattr(self, field_name) == default:
+                setattr(self, field_name, self.data_root / default.relative_to(DATA_DIR))
+        return self
+
+    @model_validator(mode="after")
+    def _require_hosted_secrets(self) -> "Settings":
+        """MA7.7B: a hosted deployment must not silently fall back to the
+        local-only mechanisms (a generated/printed token file, an OS
+        keychain) those two settings replace — fail loudly at startup
+        (same "explicit opt-in, fail clearly" posture as
+        _reject_unexplained_remote_bind) rather than booting into a
+        broken or, worse, insecure state."""
+        if not self.hosted_mode:
+            return self
+
+        missing = []
+        if not self.auth_token:
+            missing.append("MAP_AUTH_TOKEN")
+        if not self.secret_encryption_key:
+            missing.append("MAP_SECRET_ENCRYPTION_KEY")
+        if missing:
+            raise ValueError(
+                "MAP_HOSTED_MODE=true requires " + ", ".join(missing) + " to be set — "
+                "a hosted deployment has no local token file/console to fall back to and "
+                "no OS keychain for provider secrets."
+            )
+
+        # Same floor as a generated local token (secrets.token_urlsafe(32)
+        # renders as 43 base64url characters) — a short/guessable value
+        # here is compared with secrets.compare_digest just like the local
+        # token, but is only as strong as whatever an operator typed in.
+        if len(self.auth_token) < 32:
+            raise ValueError("MAP_AUTH_TOKEN must be at least 32 characters.")
+
+        try:
+            from cryptography.fernet import Fernet
+
+            Fernet(self.secret_encryption_key.encode("utf-8"))
+        except Exception as exc:  # noqa: BLE001 — Fernet() raises several distinct exception types
+            # for a malformed key; the exact type never matters here, only
+            # that it becomes one consistent, actionable ValueError.
+            raise ValueError(f"MAP_SECRET_ENCRYPTION_KEY is not a valid Fernet key: {exc}") from None
+
         return self
 
     @property

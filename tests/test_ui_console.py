@@ -109,3 +109,75 @@ def test_the_old_pages_do_not_depend_on_the_studio_modules(client, bootstrap):
             assert asset not in code, (page, asset)
     state = client.get("/assets/js/state.js").text
     assert "projects[0]" in state  # the shared getProjectId is untouched; only the Workflow pages select explicitly
+
+
+# --- MA7.6B: Live Control Room --------------------------------------------------------------
+
+CONTROL_ROOM_ASSETS = (
+    "js/runState.js",
+    "js/runPolling.js",
+    "js/voiceInput.js",
+    "js/voiceControl.js",
+    "js/runInspector.js",
+    "js/pages/workflowRun.js",
+)
+
+
+def _code(client, asset):
+    """The asset's source without comment lines."""
+    text = client.get(f"/assets/{asset}").text
+    return "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("//"))
+
+
+def test_control_room_assets_are_served_and_the_route_is_registered(client, bootstrap):
+    for asset in CONTROL_ROOM_ASSETS:
+        response = client.get(f"/assets/{asset}")
+        assert response.status_code == 200, asset
+        assert "javascript" in response.headers["content-type"], asset
+        assert "export " in response.text, asset
+    main = client.get("/assets/js/main.js").text
+    assert 'registerRoute("/workflow-runs/:id", renderWorkflowRun)' in main
+    assert 'import { renderWorkflowRun } from "./pages/workflowRun.js"' in main
+    for route in ("/workflows", "/workflows/:id") + EXISTING_ROUTES:  # nothing that existed was displaced
+        assert f'registerRoute("{route}"' in main, route
+
+
+def test_control_room_scripts_never_inject_html(client, bootstrap):
+    """Artifact text, findings, rationales, notes, names and titles are untrusted: text nodes only."""
+    for asset in CONTROL_ROOM_ASSETS + ("js/dagCanvas.js",):
+        code = _code(client, asset)
+        assert "innerHTML" not in code and "outerHTML" not in code and "insertAdjacentHTML" not in code, asset
+        assert "html:" not in code and "document.write" not in code and "eval(" not in code, asset
+
+
+def test_the_control_room_is_an_execution_view_it_cannot_edit_a_workflow(client, bootstrap):
+    for asset in ("js/pages/workflowRun.js", "js/runInspector.js"):
+        code = _code(client, asset)
+        for forbidden in ("addNode", "patchNode", "deleteNode", "addEdge", "deleteEdge", "publish(", "cloneVersion", "workflowApi.validate", "createTask", "startRun"):
+            assert forbidden not in code, (asset, forbidden)
+
+
+def test_only_the_control_room_page_can_record_an_approval_decision(client, bootstrap):
+    """An approval is only ever resolved by an explicit person action in the Control Room: no other
+    script (the inspector, voice input, polling, the Studio) can call the resolve route."""
+    users = []
+    for asset in CONTROL_ROOM_ASSETS + STUDIO_ASSETS + ("js/dagCanvas.js",):
+        if "resolveApproval" in _code(client, asset):
+            users.append(asset)
+    assert sorted(users) == ["js/pages/workflowRun.js", "js/workflowApi.js"]
+
+
+def test_voice_input_can_only_produce_text(client, bootstrap):
+    """Voice never submits, starts a workflow, or decides an approval: it has no access to the API layer."""
+    for asset in ("js/voiceInput.js", "js/voiceControl.js"):
+        code = _code(client, asset)
+        for forbidden in ("fetch(", "workflowApi", "api.js", "resolveApproval", "startRun", "cancelRun", ".submit(", "requestSubmit", "navigate", ".click("):
+            assert forbidden not in code, (asset, forbidden)
+    assert "continuous = true" in _code(client, "js/voiceInput.js") and "maxListenMs" in _code(client, "js/voiceInput.js")
+
+
+def test_the_older_pages_do_not_depend_on_the_control_room_modules(client, bootstrap):
+    for page in ("ask", "comparisons", "comparisonDetail", "agents", "models", "activity"):
+        code = client.get(f"/assets/js/pages/{page}.js").text
+        for module in ("runState", "runPolling", "voiceInput", "voiceControl", "runInspector"):
+            assert module not in code, (page, module)
