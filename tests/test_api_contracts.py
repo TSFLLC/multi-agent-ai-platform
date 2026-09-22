@@ -31,10 +31,12 @@ EXPECTED_PATHS = [
     "/agent-runs/{agent_run_id}/attempts",
     "/workflows",
     "/workflow-runs/{workflow_run_id}",
+    "/workflow-runs/{workflow_run_id}/nodes/{node_id}/attempts",
     "/comparisons",
     "/comparisons/{comparison_id}/select-winner",
     "/evaluations",
     "/approvals",
+    "/approvals/{approval_id}",
     "/approvals/{approval_id}/resolve",
     "/audit-events",
     "/usage",
@@ -68,6 +70,37 @@ def test_stub_endpoints_return_not_implemented_not_a_crash():
     body = resp.json()
     assert body["error"]["code"] == "not_implemented"
     assert "message" in body["error"]
+
+
+def test_workflow_node_attempts_placeholder_contract_is_preserved():
+    """MA7.2 added authentication/authorization to this route: an
+    unauthenticated or unauthorized caller now gets 401/403 before ever
+    reaching the placeholder, so the still-501 contract only applies once
+    the caller is authenticated and holds project access — see
+    tests/test_workflow_execution_api_authorization.py for the auth-layer
+    coverage this split preserves."""
+    resp = client.get("/workflow-runs/test-run/nodes/test-node/attempts")
+    assert resp.status_code == 401
+
+
+def test_workflow_node_attempts_is_implemented_when_authorized(client, db, auth_headers, bootstrap):
+    """MA7.6B: the MA7.2 placeholder is now real -- an unknown node 404s
+    (never the old 501), and a real node returns its (single, so far)
+    attempt."""
+    from app.models.workflow import WorkflowNode
+    from tests.test_workflow_execution_api_authorization import _started_run
+
+    _, version, _, run = _started_run(db, bootstrap.project, "contract")
+    unknown = client.get(f"/workflow-runs/{run.id}/nodes/test-node/attempts", headers=auth_headers)
+    assert unknown.status_code == 404
+
+    node = db.query(WorkflowNode).filter(
+        WorkflowNode.workflow_version_id == version.id, WorkflowNode.node_key == "planner"
+    ).one()
+    resp = client.get(f"/workflow-runs/{run.id}/nodes/{node.id}/attempts", headers=auth_headers)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body) == 1 and body[0]["iteration"] == 0
 
 
 def test_approval_resolve_declares_409_fingerprint_mismatch_response():

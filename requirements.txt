@@ -7,3 +7,8 @@ pydantic-settings>=2.1,<3
 httpx>=0.26,<0.28
 python-dateutil>=2.8,<3
 keyring>=24,<26
+# MA7.7B: EncryptedFileSecretStore (app.secrets_store) — the hosted-mode
+# replacement for the OS-keychain-backed KeyringSecretStore, which has no
+# equivalent inside a Railway container. Only imported when hosted_mode is
+# actually in use.
+cryptography>=41,<43

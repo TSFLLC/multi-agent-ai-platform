@@ -1,6 +1,7 @@
+from datetime import datetime
 from typing import List, Optional
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 from app.db.enums import (
     DefaultModelStrategy,
@@ -72,7 +73,31 @@ class AgentVersionCreate(BaseModel):
     timeout_seconds: Optional[int] = None
 
 
+class ToolGrantCreate(BaseModel):
+    tool_id: str
+    grant_type: ToolGrantType
+
+
+class ToolGrantRead(ORMModel):
+    """Read-only view of a granted/denied tool on one Agent Version --
+    Section 24.4 #5. Empty for every starter Agent today (no tool grants
+    are seeded); present so the Agent Detail view (MA7.7D) can show
+    "Not configured" rather than silently omitting the section."""
+
+    id: str
+    tool_id: str
+    grant_type: ToolGrantType
+
+
 class AgentVersionRead(ORMModel):
+    """Section 12.2/12.3. Deliberately exposes every configurable field
+    on an Agent Version (MA7.7D's Agent Detail view needs to render each
+    as either its value or "Not configured") -- never a secret: nothing
+    here is a credential (those live only behind SecretService, Section
+    20.1/20.2), just policy/config JSON and the prompt content already
+    readable via GET /agents/{id}/prompt-versions.
+    """
+
     id: str
     agent_id: str
     version: int
@@ -80,14 +105,19 @@ class AgentVersionRead(ORMModel):
     role: str
     description: Optional[str] = None
     prompt_version_id: Optional[str] = None
+    capabilities: Optional[List[str]] = None
     model_policy: Optional[dict] = None
     default_model_strategy: DefaultModelStrategy
+    context_policy: Optional[dict] = None
+    memory_policy: Optional[dict] = None
+    budget_policy: Optional[dict] = None
+    timeout_seconds: Optional[int] = None
+    retry_policy: Optional[dict] = None
+    approval_requirements: Optional[dict] = None
     status: VersionStatus
-
-
-class ToolGrantCreate(BaseModel):
-    tool_id: str
-    grant_type: ToolGrantType
+    created_at: datetime
+    published_at: Optional[datetime] = None
+    tool_grants: List[ToolGrantRead] = Field(default_factory=list)
 
 
 class ToolRead(ORMModel):

@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import List, Optional
 
 from pydantic import BaseModel
 
@@ -24,6 +24,31 @@ class WorkflowNodeCreate(BaseModel):
     max_iterations: Optional[int] = None
 
 
+class WorkflowNodeUpdate(BaseModel):
+    """PATCH body for a node of a DRAFT version. Only ``config`` is updatable:
+    the domain service exposes nothing else (a node's key and type are fixed
+    once created)."""
+
+    config: Optional[dict] = None
+
+
+class WorkflowValidationRead(BaseModel):
+    """Dry-run validation result. ``issues`` are the validator's own messages,
+    one per problem, in its order -- textual, so a client must not assume they
+    map to exactly one node."""
+
+    valid: bool
+    issues: List[str] = []
+
+
+class WorkflowRunStart(BaseModel):
+    """Start body: exactly one of ``task_run_id`` (an existing parent TaskRun)
+    or ``task_id`` (the run's parent TaskRun is created with the run)."""
+
+    task_run_id: Optional[str] = None
+    task_id: Optional[str] = None
+
+
 class WorkflowVersionRead(BaseModel):
     id: str
     workflow_id: str
@@ -45,3 +70,21 @@ class WorkflowNodeRunRead(BaseModel):
     iteration: int
     status: WorkflowNodeRunStatus
     agent_run_id: Optional[str] = None
+    # MA7.3b: the Approval a HUMAN_APPROVAL node run is waiting on / was
+    # resolved by (None for every other node run).
+    approval_id: Optional[str] = None
+    # MA7.5A: the MA6 EvaluationRun an EVALUATION node run executes (None for
+    # every other node run). Derived -- never stored on the node run: it is
+    # the EvaluationRun whose UNIQUE evaluator_agent_run_id is this node run's
+    # agent_run_id. Read the findings via GET /evaluation-runs/{id}.
+    evaluation_run_id: Optional[str] = None
+
+
+class WorkflowNodeRetryRequest(BaseModel):
+    """MA7.6B: POST /workflow-runs/{run_id}/nodes/{node_run_id}/retry body --
+    a run/attempt-level model override only, never a WorkflowVersion edit.
+
+    MA7.8: may be omitted only to retry a node interrupted by a worker
+    restart (re-run with its original configuration); required otherwise."""
+
+    replacement_provider_model_id: Optional[str] = None

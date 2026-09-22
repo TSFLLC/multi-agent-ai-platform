@@ -20,7 +20,7 @@ from app.models.evaluation_definitions import EvaluationDefinition, EvaluationDe
 from app.models.workflow import Workflow, WorkflowVersion, WorkflowNode, WorkflowEdge
 from app.services.workflow_definition_service import WorkflowDefinitionService
 from app.services.workflow_validation_service import DAGValidationError, WorkflowValidator
-from tests.conftest import make_project, make_agent, make_agent_version
+from tests.conftest import make_project, make_agent, make_runnable_agent_version
 
 
 class TestWorkflowCRUD:
@@ -424,7 +424,7 @@ class TestReferencedEntityValidation:
         proj2 = make_project(db, name="proj2")
 
         agent = make_agent(db, project=proj2, name="agent")
-        version = make_agent_version(db, agent=agent, status=VersionStatus.ACTIVE)
+        version = make_runnable_agent_version(db, agent=agent)
 
         workflow = service.create_workflow(proj1.id, "Test")
         latest = service.get_latest_version(workflow.id)
@@ -554,6 +554,6 @@ def agent_version_id(db, project_id: str) -> str:
     from app.models.identity import Project
     project = db.query(Project).filter(Project.id == project_id).first()
     agent = make_agent(db, project=project)
-    version = make_agent_version(db, agent=agent, status=VersionStatus.ACTIVE)
+    version = make_runnable_agent_version(db, agent=agent)
     db.commit()
     return version.id

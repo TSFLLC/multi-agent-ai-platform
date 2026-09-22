@@ -110,6 +110,69 @@ def test_test_connection_never_returns_api_key(client, db, auth_headers, bootstr
     assert "sk-" not in resp.text
 
 
+def test_rotate_credential_preserves_provider_id_and_reports_success(client, db, auth_headers, bootstrap):
+    provider = make_provider(db)
+    db.commit()
+
+    resp = client.post(
+        f"/providers/{provider.id}/rotate-credential",
+        headers=auth_headers,
+        json={"api_key": "sk-new-rotated-key"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["id"] == provider.id
+
+
+def test_rotate_credential_never_exposes_key_in_response(client, db, auth_headers, bootstrap):
+    provider = make_provider(db)
+    db.commit()
+
+    resp = client.post(
+        f"/providers/{provider.id}/rotate-credential",
+        headers=auth_headers,
+        json={"api_key": "sk-must-not-be-echoed-back"},
+    )
+    assert resp.status_code == 200
+    assert "sk-must-not-be-echoed-back" not in resp.text
+    assert "api_key" not in resp.json()
+
+
+def test_rotate_credential_takes_effect_for_next_lookup(client, db, auth_headers, bootstrap):
+    """The rotated key is what the next real call actually uses --
+    build_provider_adapter always resolves the current (most recent)
+    secret_references row, never a cached one."""
+    from app.services.secret_service import SecretService
+
+    provider = make_provider(db)
+    db.commit()
+    SecretService(db).store_secret(
+        project_id=bootstrap.project.id,
+        provider_id=provider.id,
+        name="openrouter_api_key",
+        value="sk-original-key",
+    )
+    db.commit()
+
+    resp = client.post(
+        f"/providers/{provider.id}/rotate-credential",
+        headers=auth_headers,
+        json={"api_key": "sk-rotated-key"},
+    )
+    assert resp.status_code == 200
+
+    assert SecretService(db).get_current_provider_api_key(provider.id) == "sk-rotated-key"
+
+
+def test_rotate_credential_not_found(client, auth_headers, bootstrap):
+    resp = client.post(
+        "/providers/00000000-0000-0000-0000-000000000999/rotate-credential",
+        headers=auth_headers,
+        json={"api_key": "sk-does-not-matter"},
+    )
+    assert resp.status_code == 404
+
+
 def test_list_provider_refreshes(client, db, auth_headers, bootstrap, monkeypatch):
     provider = make_provider(db)
     db.commit()

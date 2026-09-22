@@ -11,6 +11,7 @@ from sqlalchemy import (
     Boolean,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     Numeric,
     String,
@@ -51,7 +52,15 @@ class RouterPolicyVersion(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
 
 
 class ModelRoutingDecision(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
-    """Routing reproducibility — Section 24.4 #14."""
+    """Routing reproducibility — Section 24.4 #14.
+
+    MA8.1: written by ``app.model_resolution.record_routing_decision`` once
+    per Agent Run attempt, for successful and failed routing alike (a failed
+    decision has no ``selected_provider_model_snapshot_id``). Append-only.
+    ``eligible_candidates`` holds the eligible candidates in tie-break order
+    (first = selected); ``details`` holds the outcome, exclusions and
+    PREFER_FREE fallback flags. Neither ever carries a credential.
+    """
 
     __tablename__ = "model_routing_decisions"
 
@@ -65,6 +74,11 @@ class ModelRoutingDecision(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
         ForeignKey("provider_model_snapshots.id"), nullable=True
     )
     rationale: Mapped[Optional[str]] = mapped_column(String(2000), nullable=True)
+    # MA8.1 additions (nullable; NULL on any pre-MA8.1 row, of which there
+    # are none — nothing wrote this table before MA8.1).
+    requested_policy: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    routing_strategy: Mapped[Optional[str]] = mapped_column(String(60), nullable=True)
+    details: Mapped[Optional[dict]] = mapped_column("decision_json", nullable=True)
 
 
 class ModelCall(UUIDPrimaryKeyMixin, Base):
@@ -79,6 +93,11 @@ class ModelCall(UUIDPrimaryKeyMixin, Base):
     """
 
     __tablename__ = "model_calls"
+    # MA8.2: the routing-evidence query reads a bounded, recent window of a
+    # candidate set's calls (app.routing_evidence.load_evidence).
+    __table_args__ = (
+        Index("ix_model_calls_provider_model_id_started_at", "provider_model_id", "started_at"),
+    )
 
     agent_run_id: Mapped[str] = mapped_column(ForeignKey("agent_runs.id", ondelete="CASCADE"), nullable=False)
     agent_run_attempt_id: Mapped[Optional[str]] = mapped_column(

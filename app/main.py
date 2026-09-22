@@ -13,6 +13,7 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api.routers import (
@@ -24,6 +25,7 @@ from app.api.routers import (
     evaluations,
     events,
     internal,
+    model_intelligence,
     models,
     projects,
     tasks,
@@ -99,6 +101,22 @@ async def lifespan(app: FastAPI):
         finally:
             db.close()
 
+        # MA7.3: idempotent recovery sweep over non-terminal Workflow Runs
+        # (a durably waiting approval must survive a restart; a run stopped
+        # mid-transition is healed). Only against an up-to-date schema, and a
+        # failure here never blocks startup. The Worker runs the same sweep
+        # at its own startup; both are safe together (CAS/unique guarded).
+        db = SessionLocal()
+        try:
+            from app.services.workflow_execution_service import WorkflowExecutionService
+
+            reconciled = WorkflowExecutionService(db).reconcile_active_runs()
+            logger.info("workflow_reconciliation_at_startup runs=%s", reconciled)
+        except Exception:
+            logger.exception("workflow_reconciliation_failed_at_startup")
+        finally:
+            db.close()
+
     ensure_local_auth_token()
 
     yield
@@ -108,9 +126,28 @@ async def lifespan(app: FastAPI):
     logger.info("app_stopped")
 
 
+def hosted_docs_urls(hosted_mode: bool):
+    """MA7.7B: FastAPI's built-in /docs, /redoc and /openapi.json are
+    unauthenticated by construction (there is no Depends() to attach a
+    doc-serving route to) — fine on a loopback-only local install, but in
+    hosted mode they would hand the platform's whole API surface
+    (including request/response shapes for provider-secret and approval
+    endpoints) to anyone with the URL. A plain function (not inlined into
+    the FastAPI(...) call below) so this decision is unit-testable on its
+    own, independent of the app singleton's own one-time construction."""
+    if hosted_mode:
+        return None, None, None
+    return "/docs", "/redoc", "/openapi.json"
+
+
+_docs_url, _redoc_url, _openapi_url = hosted_docs_urls(settings.hosted_mode)
+
 app = FastAPI(
     title="Multi-Agent AI Platform / Agent Control Plane",
     version="0.1.0-ma5",
+    docs_url=_docs_url,
+    redoc_url=_redoc_url,
+    openapi_url=_openapi_url,
     description=(
         "Local-first Agent Control Plane. MA5: Parallel Comparison — one "
         "Task executed independently by 2+ Agent/model candidates (same "
@@ -134,6 +171,7 @@ for router in (
     projects.router,
     agents.router,
     models.router,
+    model_intelligence.router,
     tasks.router,
     workflows.router,
     comparisons.router,
@@ -161,10 +199,16 @@ def health() -> dict:
 
 
 @app.get("/ready", tags=["health"])
-def ready() -> dict:
+def ready() -> JSONResponse:
     """Readiness: is the local SQLite database reachable and migrated to
     head? A local operator (or the worker) can poll this before assuming
-    the platform is usable."""
+    the platform is usable.
+
+    MA7.7B: returns HTTP 503 (not 200) when not ready — a hosted
+    deployment's own healthcheck/orchestration reads the status code, not
+    just the JSON body, to decide whether to route traffic or restart a
+    still-migrating instance. The JSON body's shape is unchanged either
+    way, so an existing caller reading the ``ready`` field keeps working."""
     try:
         with engine.connect():
             db_reachable = True
@@ -173,10 +217,12 @@ def ready() -> dict:
         db_reachable = False
 
     schema_ready = db_reachable and is_schema_up_to_date(engine)
-    return {
-        "ready": db_reachable and schema_ready,
+    is_ready = db_reachable and schema_ready
+    payload = {
+        "ready": is_ready,
         "database_reachable": db_reachable,
         "schema_up_to_date": schema_ready,
         "current_revision": get_current_revision(engine) if db_reachable else None,
         "head_revision": get_head_revision(),
     }
+    return JSONResponse(content=payload, status_code=200 if is_ready else 503)

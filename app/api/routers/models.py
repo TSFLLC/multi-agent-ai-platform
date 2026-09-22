@@ -28,6 +28,7 @@ from app.schemas.providers import (
     ModelCatalogEntryRead,
     ModelRead,
     ProviderCreate,
+    ProviderCredentialRotate,
     ProviderModelRead,
     ProviderRead,
     RouterSimulateResponse,
@@ -118,6 +119,36 @@ def create_provider(
 
     db.commit()
     db.refresh(provider)
+    return provider
+
+
+@router.post("/providers/{provider_id}/rotate-credential", response_model=ProviderRead)
+def rotate_provider_credential(
+    provider_id: str,
+    body: ProviderCredentialRotate,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_platform_admin),
+):
+    """Narrowly scoped credential replacement for an existing Provider —
+    never a general provider-mutation endpoint. The Provider row/id and
+    its model catalog are untouched; the new value is written to the
+    secret store under a fresh secret_references row (never overwriting
+    history in place — see app.models.providers.Provider's docstring),
+    so SecretService.get_current_provider_api_key's "most recent row
+    wins" lookup picks it up on the very next call
+    (build_provider_adapter never caches). Never returns/logs the raw
+    key — ProviderRead has no credential field."""
+    provider = db.get(Provider, provider_id)
+    if provider is None:
+        raise NotFoundError(f"Provider {provider_id} not found.")
+
+    SecretService(db).store_secret(
+        project_id=LOCAL_PROJECT_ID,
+        provider_id=provider.id,
+        name=f"{provider.type.value}_api_key",
+        value=body.api_key,
+        created_by=admin.id,
+    )
     return provider
 
 

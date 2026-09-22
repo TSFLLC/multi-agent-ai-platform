@@ -31,7 +31,7 @@ prior Evaluation Run's criterion results.
 from datetime import datetime
 from typing import List, Optional
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -49,6 +49,8 @@ class EvaluationRun(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     """
 
     __tablename__ = "evaluation_runs"
+    # MA8.2: routing evidence joins a subject Agent Run to its evaluations.
+    __table_args__ = (Index("ix_evaluation_runs_subject_agent_run_id", "subject_agent_run_id"),)
 
     subject_agent_run_id: Mapped[str] = mapped_column(
         ForeignKey("agent_runs.id", ondelete="CASCADE"), nullable=False

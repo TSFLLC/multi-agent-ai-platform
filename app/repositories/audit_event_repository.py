@@ -19,7 +19,11 @@ class AuditEventRepository:
         actor_user_id: Optional[str] = None,
         target_ref: Optional[str] = None,
         detail: Optional[Dict[str, Any]] = None,
+        commit: bool = True,
     ) -> AuditEvent:
+        """``commit=False`` only flushes, so a caller can make the audit row
+        part of its own single transaction (e.g. an Approval decision and
+        its audit event commit -- or roll back -- together)."""
         event = AuditEvent(
             org_id=org_id,
             event_type=event_type,
@@ -28,8 +32,11 @@ class AuditEventRepository:
             detail=detail,
         )
         db.add(event)
-        db.commit()
-        db.refresh(event)
+        if commit:
+            db.commit()
+            db.refresh(event)
+        else:
+            db.flush()
         return event
 
     def list_for_org(self, db: Session, *, org_id: str, limit: int = 100) -> List[AuditEvent]:

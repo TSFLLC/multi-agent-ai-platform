@@ -5,16 +5,19 @@ Enforces lifecycle (DRAFT → PUBLISHED → immutable).
 Validates DAG structure and configuration at publish time.
 """
 
-from typing import List, Optional
+import copy
+from typing import Dict, List, Optional
 from sqlalchemy import and_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.db.enums import VersionStatus, WorkflowNodeType
+from app.errors import ConflictError
 from app.models.agents import AgentVersion
 from app.models.evaluation_definitions import EvaluationDefinitionVersion
 from app.models.workflow import Workflow, WorkflowVersion, WorkflowNode, WorkflowEdge
 from app.services.base import BaseService
-from app.services.workflow_validation_service import WorkflowValidator
+from app.services.workflow_validation_service import DAGValidationError, WorkflowValidator
 
 
 class WorkflowDefinitionService(BaseService):
@@ -300,6 +303,87 @@ class WorkflowDefinitionService(BaseService):
         self.db.commit()
 
         return wv
+
+    def validate_version(self, workflow_id: str, version: int) -> List[str]:
+        """Dry-run of the publish-time validation (MA7.6A): runs the SAME
+        ``WorkflowValidator`` publish uses and returns its issues (empty when
+        the DRAFT version is valid). Changes nothing -- never publishes.
+
+        Raises ValueError if the version does not exist or is not DRAFT."""
+        wv = self.get_workflow_version(workflow_id, version)
+        if not wv:
+            raise ValueError(f"Workflow version {workflow_id}:{version} not found")
+        if wv.status != VersionStatus.DRAFT:
+            raise ValueError(f"Only DRAFT versions can be validated; {workflow_id}:{version} is {wv.status.value}")
+        workflow = self.get_workflow(workflow_id)
+        if not workflow:
+            raise ValueError(f"Workflow {workflow_id} not found")
+        try:
+            WorkflowValidator(self.db).validate(wv, workflow.project_id)
+        except DAGValidationError as exc:
+            return list(exc.issues)
+        return []
+
+    def clone_version(self, workflow_id: str, source_version: int) -> WorkflowVersion:
+        """Creates a new DRAFT version of the same Workflow from an existing
+        version (MA7.6A "edit as new version"). Atomic: the new version, every
+        node copy and every edge copy commit together or not at all.
+
+        * The version number is the next one after the highest existing.
+        * Node definitions (key, type, config, max_iterations, timeout) are
+          copied; edges are copied with their endpoints remapped to the new
+          node ids, so the graph is structurally identical.
+        * The source version is never modified (an ACTIVE version stays
+          immutable) and no WorkflowRun is re-bound.
+
+        Raises ValueError if the source version does not exist and
+        ConflictError if a concurrent clone claimed the same version number."""
+        source = self.get_workflow_version(workflow_id, source_version)
+        if not source:
+            raise ValueError(f"Workflow version {workflow_id}:{source_version} not found")
+        latest = self.get_latest_version(workflow_id)
+        next_version = (latest.version + 1) if latest else 1
+        try:
+            new_version = WorkflowVersion(workflow_id=workflow_id, version=next_version, status=VersionStatus.DRAFT)
+            self.db.add(new_version)
+            self.db.flush()
+
+            id_map: Dict[str, str] = {}
+            for node in sorted(source.nodes, key=lambda n: n.node_key):
+                node_copy = WorkflowNode(
+                    workflow_version_id=new_version.id,
+                    node_key=node.node_key,
+                    node_type=node.node_type,
+                    config=copy.deepcopy(node.config),
+                    max_iterations=node.max_iterations,
+                    timeout_seconds=node.timeout_seconds,
+                )
+                self.db.add(node_copy)
+                self.db.flush()
+                id_map[node.id] = node_copy.id
+
+            for edge in sorted(source.edges, key=lambda e: (id_map.get(e.from_node_id, ""), id_map.get(e.to_node_id, ""))):
+                if edge.from_node_id not in id_map or edge.to_node_id not in id_map:
+                    raise ValueError(f"Edge {edge.id} references a node outside version {source_version}")
+                self.db.add(
+                    WorkflowEdge(
+                        workflow_version_id=new_version.id,
+                        from_node_id=id_map[edge.from_node_id],
+                        to_node_id=id_map[edge.to_node_id],
+                        condition=copy.deepcopy(edge.condition),
+                    )
+                )
+            self.db.flush()
+            self.db.commit()
+        except IntegrityError as exc:
+            self.db.rollback()
+            raise ConflictError(
+                f"Version {next_version} of workflow {workflow_id} was created concurrently; retry the copy."
+            ) from exc
+        except Exception:
+            self.db.rollback()
+            raise
+        return new_version
 
     def deprecate_version(self, workflow_id: str, version: int) -> WorkflowVersion:
         """Deprecate an ACTIVE version (ACTIVE → DEPRECATED).

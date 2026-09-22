@@ -58,6 +58,15 @@ class ConflictError(AppError):
     code = "conflict"
 
 
+class WorkflowValidationFailedError(AppError):
+    """A workflow version failed publish-time validation (MA7.6A). ``detail``
+    carries ``{"issues": [...]}`` -- one entry per problem -- so a client can
+    show each issue individually instead of parsing a stringified message."""
+
+    status_code = status.HTTP_400_BAD_REQUEST
+    code = "workflow_validation_failed"
+
+
 class InvalidStateTransitionError(AppError):
     status_code = status.HTTP_409_CONFLICT
     code = "invalid_state_transition"
@@ -90,6 +99,26 @@ class ArtifactHashMismatchError(AppError):
 
     status_code = status.HTTP_409_CONFLICT
     code = "artifact_hash_mismatch"
+
+
+class RetryNotAllowedError(AppError):
+    """MA7.6B: a failed-step retry was requested for a node/run that is not
+    eligible -- wrong node type, the node run is not FAILED, it is not the
+    node's latest attempt, the workflow run itself is not FAILED, or the
+    operator's replacement model is not currently valid/ACTIVE."""
+
+    status_code = status.HTTP_400_BAD_REQUEST
+    code = "retry_not_allowed"
+
+
+class FingerprintMismatchError(AppError):
+    """MA7.3a: the caller's echoed ``action_fingerprint`` for
+    ``POST /approvals/{id}/resolve`` does not match the Approval's stored
+    ``action_fingerprint`` (Section 24.4 #15, 25.5). The decision is refused
+    rather than applied to an action the approver never saw."""
+
+    status_code = status.HTTP_409_CONFLICT
+    code = "fingerprint_mismatch"
 
 
 def _error_response(status_code: int, code: str, message: str, detail: Any = None) -> JSONResponse:

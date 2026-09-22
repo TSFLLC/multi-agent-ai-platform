@@ -1,9 +1,13 @@
 // Thin fetch wrapper — every call is same-origin (Section 1: reuse the
-// existing API, never a frontend-only fake). The local MA1B token is read
-// once from the page-scoped global app.web injected server-side (PV-01) —
-// never persisted to localStorage/sessionStorage, never displayed.
+// existing API, never a frontend-only fake). Locally, the MA1B token is
+// read from the page-scoped global app.web injects server-side (PV-01) —
+// never persisted to localStorage/sessionStorage, never displayed. In
+// hosted mode (MA7.7B) that global is empty and the token instead comes
+// from tokenGate.js's ensureToken() prompt, read here fresh on every
+// request (never cached at module load) so a token entered after this
+// module first loaded is picked up immediately.
 
-const TOKEN = typeof window !== "undefined" ? window.__MAP_LOCAL_TOKEN__ : null;
+import { currentToken } from "./tokenGate.js";
 
 export class ApiError extends Error {
   constructor(message, { status, code, detail } = {}) {
@@ -16,7 +20,7 @@ export class ApiError extends Error {
 
 async function request(path, { method = "GET", body, headers } = {}) {
   const reqHeaders = new Headers(headers || {});
-  reqHeaders.set("Authorization", `Bearer ${TOKEN}`);
+  reqHeaders.set("Authorization", `Bearer ${currentToken() || ""}`);
   let payload;
   if (body !== undefined) {
     reqHeaders.set("Content-Type", "application/json");
@@ -56,7 +60,7 @@ export const api = {
   post: (path, body, opts = {}) => request(path, { method: "POST", body: body ?? {}, ...opts }),
   raw: request,
   getText: async (path) => {
-    const response = await fetch(path, { headers: { Authorization: `Bearer ${TOKEN}` } });
+    const response = await fetch(path, { headers: { Authorization: `Bearer ${currentToken() || ""}` } });
     if (!response.ok) {
       throw new ApiError(`Failed to load ${path} (${response.status}).`, { status: response.status });
     }

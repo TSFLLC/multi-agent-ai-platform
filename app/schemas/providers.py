@@ -2,7 +2,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import List, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.db.enums import (
     CatalogRefreshStatus,
@@ -22,6 +22,15 @@ class ProviderCreate(BaseModel):
     # Write-only — never round-tripped back in ProviderRead. Stored via
     # SecretService (OS keychain), never as a column value.
     api_key: Optional[str] = None
+
+
+class ProviderCredentialRotate(BaseModel):
+    """Write-only, narrowly scoped to credential replacement — never a
+    general provider-mutation payload. Stored via SecretService under a
+    fresh secret_references row; never round-tripped back (ProviderRead
+    has no credential field)."""
+
+    api_key: str = Field(min_length=1)
 
 
 class ProviderRead(TimestampedRead):

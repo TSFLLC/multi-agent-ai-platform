@@ -8,10 +8,142 @@ project isolation, referenced agent/evaluation versions.
 from typing import Dict, List, Optional, Set, Any
 from sqlalchemy.orm import Session
 
-from app.db.enums import WorkflowNodeType
+from app.config import settings
+from app.db.enums import ModelSelectionMode, ModelStatus, RouterFreePolicy, VersionStatus, WorkflowNodeType
 from app.models.agents import Agent, AgentVersion
 from app.models.evaluation_definitions import EvaluationDefinition, EvaluationDefinitionVersion
+from app.models.providers import Model, ProviderModel
 from app.models.workflow import WorkflowVersion, WorkflowNode, WorkflowEdge
+
+# MA7.5A -- the ONLY configuration an EVALUATION node may carry. There is
+# deliberately no ``method`` (it is always the MA6 agent evaluator) and nothing
+# that could turn an evaluation into a decision.
+EVALUATION_REQUIRED_CONFIG_KEYS = ("evaluation_definition_version_id", "evaluator_agent_version_id")
+EVALUATION_ALLOWED_CONFIG_KEYS = frozenset(
+    EVALUATION_REQUIRED_CONFIG_KEYS + ("evaluator_model_policy_override",)
+)
+# Named separately only so the error can say WHY a key is refused: an
+# evaluation is evidence, never authority (no judge, score, ranking, winner or
+# automatic approval/rejection). Anything else unknown is refused too.
+EVALUATION_FORBIDDEN_CONFIG_KEYS = frozenset(
+    {
+        "judge_agent_version_id",
+        "decision_rule",
+        "candidates",
+        "auto_approve",
+        "auto_approval",
+        "auto_reject",
+        "default_decision",
+        "approver_agent_version_id",
+        "approval_group",
+        "winner",
+        "rank",
+        "ranking",
+        "score",
+        "threshold",
+        "pass_threshold",
+        "on_fail",
+        "on_not_met",
+        "method",
+        "agent_version_id",
+    }
+)
+_OVERRIDE_ALLOWED_KEYS = frozenset({"mode", "manual_provider_model_id", "auto_policy"})
+
+
+def evaluation_dependency_problems(db: Session, node: WorkflowNode, project_id: str) -> List[str]:
+    """Everything an EVALUATION node's frozen configuration points at, checked
+    against CURRENT registry state: the Evaluation Definition Version and the
+    evaluator Agent Version must exist, belong to ``project_id`` and be ACTIVE
+    (MA6 refuses to run an evaluation against anything else), and the optional
+    model-policy override must be well formed. One function used by publish
+    validation AND by the WorkflowRun start-time preflight, so the two can
+    never disagree about what "valid" means. Returns human-readable problems
+    (empty = fine); never raises, never modifies anything."""
+    problems: List[str] = []
+    config = node.config or {}
+    key = node.node_key
+
+    version_id = config.get("evaluation_definition_version_id")
+    if isinstance(version_id, str) and version_id:
+        version = db.get(EvaluationDefinitionVersion, version_id)
+        if version is None:
+            problems.append(f"EVALUATION node {key} references unknown evaluation definition version {version_id}")
+        else:
+            definition = db.get(EvaluationDefinition, version.evaluation_definition_id)
+            if definition is None or definition.project_id != project_id:
+                problems.append(
+                    f"EVALUATION node {key} references an evaluation definition version from a different "
+                    f"project: {version_id}"
+                )
+            if version.status != VersionStatus.ACTIVE:
+                problems.append(
+                    f"EVALUATION node {key} evaluation definition version {version_id} is not ACTIVE "
+                    f"(status={version.status.value!r})"
+                )
+
+    agent_version_id = config.get("evaluator_agent_version_id")
+    if isinstance(agent_version_id, str) and agent_version_id:
+        agent_version = db.get(AgentVersion, agent_version_id)
+        if agent_version is None:
+            problems.append(f"EVALUATION node {key} references unknown evaluator agent version {agent_version_id}")
+        else:
+            agent = db.get(Agent, agent_version.agent_id)
+            if agent is None or agent.project_id != project_id:
+                problems.append(
+                    f"EVALUATION node {key} references an evaluator agent version from a different project: "
+                    f"{agent_version_id}"
+                )
+            if agent_version.status != VersionStatus.ACTIVE:
+                problems.append(
+                    f"EVALUATION node {key} evaluator agent version {agent_version_id} is not ACTIVE "
+                    f"(status={agent_version.status.value!r})"
+                )
+
+    override = config.get("evaluator_model_policy_override")
+    if override is not None:
+        problems.extend(_model_policy_override_problems(db, key, override))
+    return problems
+
+
+def _model_policy_override_problems(
+    db: Session,
+    node_key: str,
+    override: object,
+    *,
+    prefix: Optional[str] = None,
+    default_mode: Optional[str] = None,
+    require_active_model: bool = False,
+) -> List[str]:
+    """Problems with a model policy/override object. Defaults reproduce the
+    EVALUATION node check exactly; MA7.6A reuses it for AGENT nodes (a
+    ``prefix`` naming the AGENT node, the runtime's default ``mode`` of
+    manual, and a persistent-failure check that the model is still ACTIVE)."""
+    prefix = prefix or f"EVALUATION node {node_key} evaluator_model_policy_override"
+    if not isinstance(override, dict) or not override:
+        return [f"{prefix} must be a non-empty object"]
+    unknown = sorted(set(override) - _OVERRIDE_ALLOWED_KEYS)
+    if unknown:
+        return [f"{prefix} has unsupported key(s): {', '.join(unknown)}"]
+    mode = override.get("mode", default_mode)
+    if mode == ModelSelectionMode.MANUAL.value:
+        model_id = override.get("manual_provider_model_id")
+        if not isinstance(model_id, str) or not model_id:
+            return [f"{prefix} mode 'manual' requires manual_provider_model_id"]
+        provider_model = db.get(ProviderModel, model_id)
+        if provider_model is None:
+            return [f"{prefix} references unknown provider model {model_id}"]
+        if require_active_model:
+            model = db.get(Model, provider_model.model_id)
+            if model is None or model.status != ModelStatus.ACTIVE:
+                return [f"{prefix} references a model that is not active ({model_id})"]
+        return []
+    if mode == ModelSelectionMode.AUTO.value:
+        allowed = {policy.value for policy in RouterFreePolicy}
+        if override.get("auto_policy") not in allowed:
+            return [f"{prefix} mode 'auto' requires auto_policy in {sorted(allowed)}"]
+        return []
+    return [f"{prefix} mode must be 'manual' or 'auto'"]
 
 
 class DAGValidationError(ValueError):
@@ -45,6 +177,8 @@ class WorkflowValidator:
         self._validate_edges_reference_valid_nodes(edges, nodes)
         self._validate_no_self_edges(edges)
         self._validate_no_duplicate_edges(edges)
+        self._validate_no_conditional_edges(nodes, edges)
+        self._validate_max_fan_out(nodes, edges)
         self._validate_no_cycles(nodes, edges)
         self._validate_connectivity(nodes, edges)
         self._validate_entry_structure(nodes, edges)
@@ -52,6 +186,8 @@ class WorkflowValidator:
         self._validate_all_nodes_reachable(nodes, edges)
         self._validate_all_paths_reach_terminal(nodes, edges)
         self._validate_node_type_constraints(nodes)
+        self._validate_human_approval_nodes(nodes, edges)
+        self._validate_evaluation_nodes(nodes, edges, project_id)
         self._validate_referenced_agents(nodes, project_id)
         self._validate_referenced_evaluations(nodes, project_id)
 
@@ -97,6 +233,44 @@ class WorkflowValidator:
             if key in seen:
                 self.issues.append(f"Duplicate edge: {from_id} -> {to_id}")
             seen.add(key)
+
+    def _validate_no_conditional_edges(self, nodes: Dict[str, WorkflowNode], edges: List[tuple]) -> None:
+        """Conditional routing does not exist yet (MA7.4a). The engine has
+        never evaluated an edge ``condition`` -- it would run the edge
+        unconditionally -- so publishing a workflow whose edges carry one
+        would silently do something other than what its author wrote. Reject
+        any edge that has a condition (even an empty one) until routing is
+        implemented.
+
+        ``condition`` is a JSON column, so "no condition" is a Python ``None``
+        after loading (an explicit None is stored as JSON null, not SQL NULL);
+        the test is therefore ``is not None`` on the loaded value.
+        """
+        for from_id, to_id, edge in edges:
+            if edge.condition is not None:
+                source = nodes[from_id].node_key if from_id in nodes else from_id
+                target = nodes[to_id].node_key if to_id in nodes else to_id
+                self.issues.append(
+                    f"Edge {source} -> {target} has a condition; conditional routing is not supported yet"
+                )
+
+    def _validate_max_fan_out(self, nodes: Dict[str, WorkflowNode], edges: List[tuple]) -> None:
+        """MA7.4b: no node may fan out to more than
+        ``settings.workflow_max_fan_out`` direct successors. Read at call
+        time (not import time) so the operator-configured limit is what
+        publishes are held to. Fan-IN is unbounded by this rule: it is the
+        number of parallel branches a node *starts* that costs."""
+        limit = settings.workflow_max_fan_out
+        outgoing: Dict[str, int] = {}
+        for from_id, _to_id, _edge in edges:
+            outgoing[from_id] = outgoing.get(from_id, 0) + 1
+        for from_id in sorted(outgoing, key=lambda node_id: nodes[node_id].node_key if node_id in nodes else node_id):
+            if outgoing[from_id] > limit:
+                key = nodes[from_id].node_key if from_id in nodes else from_id
+                self.issues.append(
+                    f"Node {key} fans out to {outgoing[from_id]} nodes; the maximum is {limit} "
+                    "direct outgoing branches per node"
+                )
 
     def _validate_connectivity(self, nodes: Dict[str, WorkflowNode], edges: List[tuple]) -> None:
         """All nodes must be in a single connected component.
@@ -331,13 +505,118 @@ class WorkflowValidator:
                 if not node.config or not node.config.get("decision_rule"):
                     self.issues.append(f"CONSENSUS node {node.node_key} requires config.decision_rule")
 
+    # Config keys that would make a human gate something other than an explicit
+    # human decision. A HUMAN_APPROVAL node has no automatic, timed, or
+    # agent-made outcome (MA7.3): only an authenticated human can resolve it.
+    _FORBIDDEN_HUMAN_APPROVAL_CONFIG_KEYS = frozenset(
+        {
+            "auto_approve",
+            "auto_approval",
+            "auto_approve_after_seconds",
+            "auto_reject",
+            "default_decision",
+            "timeout",
+            "timeout_seconds",
+            "expires_at",
+            "expire_after_seconds",
+            "agent_version_id",
+            "approver_agent_version_id",
+            "model_policy_override",
+        }
+    )
+
+    def _validate_human_approval_nodes(self, nodes: Dict[str, WorkflowNode], edges: List[tuple]) -> None:
+        """HUMAN_APPROVAL (MA7.3): a durable wait for an explicit human
+        decision.
+
+        - ``config.approval_group`` is a non-empty string label;
+        - no auto-approve / timeout / agent-approver configuration, and no
+          node-level ``timeout_seconds``: nothing but a human may resolve it;
+
+        MA7.4c: a gate may have SEVERAL upstream dependencies. It is then the
+        ALL-of barrier itself (ready only when every source is COMPLETED) and
+        its Approval binds every source's output -- there is no separate JOIN
+        node. Single-parent gates are unchanged.
+        """
+        for node in nodes.values():
+            if node.node_type != WorkflowNodeType.HUMAN_APPROVAL:
+                continue
+            config = node.config or {}
+            group = config.get("approval_group")
+            # A missing/empty group is already reported by
+            # _validate_node_type_constraints; only report a wrong type here.
+            if group and not (isinstance(group, str) and group.strip()):
+                self.issues.append(f"HUMAN_APPROVAL node {node.node_key} config.approval_group must be a non-empty string")
+            forbidden = sorted(self._FORBIDDEN_HUMAN_APPROVAL_CONFIG_KEYS.intersection(config))
+            if forbidden:
+                self.issues.append(
+                    f"HUMAN_APPROVAL node {node.node_key} must not configure automatic or timed approval: "
+                    f"{', '.join(forbidden)}"
+                )
+            if node.timeout_seconds is not None:
+                self.issues.append(f"HUMAN_APPROVAL node {node.node_key} must not set timeout_seconds")
+
+    def _validate_evaluation_nodes(
+        self, nodes: Dict[str, WorkflowNode], edges: List[tuple], project_id: str
+    ) -> None:
+        """EVALUATION (MA7.5A): one MA6 agent-evaluator run over the output of
+        exactly ONE upstream AGENT node. Evidence, never a decision.
+
+        - exactly one incoming edge, and its source is an AGENT node (the
+          evaluated artifact must belong to a real Agent Run; evaluating a
+          SET of outputs is not something MA6 supports);
+        - configuration is an allow-list: the two frozen version ids and the
+          optional model-policy override. Anything that could make the node a
+          judge / scorer / approver, and anything unknown, is refused;
+        - its dependencies exist, belong to this project and are ACTIVE
+          (``evaluation_dependency_problems``, shared with the start preflight).
+        """
+        sources_of: Dict[str, List[str]] = {}
+        for from_id, to_id, _edge in edges:
+            sources_of.setdefault(to_id, []).append(from_id)
+
+        for node_id, node in nodes.items():
+            if node.node_type != WorkflowNodeType.EVALUATION:
+                continue
+            key = node.node_key
+            sources = sources_of.get(node_id, [])
+            if len(sources) != 1:
+                self.issues.append(
+                    f"EVALUATION node {key} must have exactly one incoming edge from an AGENT node "
+                    f"(found {len(sources)})"
+                )
+            elif sources[0] in nodes and nodes[sources[0]].node_type != WorkflowNodeType.AGENT:
+                self.issues.append(
+                    f"EVALUATION node {key} must be fed by an AGENT node, not "
+                    f"{nodes[sources[0]].node_type.value.upper()} node {nodes[sources[0]].node_key}"
+                )
+
+            config = node.config or {}
+            forbidden = sorted(EVALUATION_FORBIDDEN_CONFIG_KEYS.intersection(config))
+            if forbidden:
+                self.issues.append(
+                    f"EVALUATION node {key} must not configure a decision, judge, score or automatic "
+                    f"approval (an evaluation is evidence only): {', '.join(forbidden)}"
+                )
+            unknown = sorted(set(config) - EVALUATION_ALLOWED_CONFIG_KEYS - EVALUATION_FORBIDDEN_CONFIG_KEYS)
+            if unknown:
+                self.issues.append(f"EVALUATION node {key} has unsupported configuration key(s): {', '.join(unknown)}")
+            for required in EVALUATION_REQUIRED_CONFIG_KEYS:
+                value = config.get(required)
+                if not isinstance(value, str) or not value.strip():
+                    self.issues.append(f"EVALUATION node {key} requires config.{required}")
+            if node.max_iterations is not None or node.timeout_seconds is not None:
+                self.issues.append(f"EVALUATION node {key} must not set max_iterations or timeout_seconds")
+
+            self.issues.extend(evaluation_dependency_problems(self.db, node, project_id))
+
     def _validate_referenced_agents(self, nodes: Dict[str, WorkflowNode], project_id: str) -> None:
         """Validate that all referenced agent versions exist and belong to the project."""
         for node_id, node in nodes.items():
             if node.node_type == WorkflowNodeType.AGENT:
                 agent_version_id = node.config.get("agent_version_id") if node.config else None
                 if agent_version_id:
-                    self._validate_agent_version_exists(agent_version_id, project_id, node.node_key)
+                    self._validate_agent_node(node, agent_version_id, project_id)
 
             elif node.node_type in (WorkflowNodeType.JUDGE, WorkflowNodeType.PARALLEL_GROUP):
                 config = node.config or {}
@@ -354,6 +633,56 @@ class WorkflowValidator:
                             self._validate_agent_version_exists(
                                 candidate_version_id, project_id, f"{node.node_key}[{i}]"
                             )
+
+    def _validate_agent_node(self, node: WorkflowNode, agent_version_id: str, project_id: str) -> None:
+        """MA7.6A: an AGENT node must not be publishable if it is guaranteed to
+        fail at runtime. Beyond existing in this project, its Agent Version
+        must be ACTIVE (only a published version can run) and a model must be
+        resolvable: an explicit manual model override on the node, OR the
+        Agent Version's own usable model policy. No routing is invented -- this
+        mirrors the runtime's own precedence (override, then the version's
+        policy) and only reports what could never resolve."""
+        key = node.node_key
+        before = len(self.issues)
+        self._validate_agent_version_exists(agent_version_id, project_id, key)
+        if len(self.issues) != before:
+            return  # unknown / foreign version: already reported, nothing more to check
+        agent_version = self.db.query(AgentVersion).filter(AgentVersion.id == agent_version_id).first()
+        if agent_version is None:
+            return
+        if agent_version.status != VersionStatus.ACTIVE:
+            self.issues.append(
+                f"AGENT node {key} references an agent version that is not ACTIVE "
+                f"(status={agent_version.status.value}): publish that Agent Version first"
+            )
+        config = node.config or {}
+        if "model_policy_override" in config:
+            self.issues.extend(
+                _model_policy_override_problems(
+                    self.db,
+                    key,
+                    config["model_policy_override"],
+                    prefix=f"AGENT node {key} model_policy_override",
+                    default_mode=ModelSelectionMode.MANUAL.value,
+                    require_active_model=True,
+                )
+            )
+        elif not agent_version.model_policy:
+            self.issues.append(
+                f"AGENT node {key} has no model: choose a model for this node, or use an Agent Version "
+                "whose model policy names one"
+            )
+        else:
+            self.issues.extend(
+                _model_policy_override_problems(
+                    self.db,
+                    key,
+                    agent_version.model_policy,
+                    prefix=f"AGENT node {key} agent version model_policy",
+                    default_mode=ModelSelectionMode.MANUAL.value,
+                    require_active_model=True,
+                )
+            )
 
     def _validate_agent_version_exists(self, agent_version_id: str, project_id: str, node_key: str) -> None:
         """Validate a specific agent version exists and is in the correct project."""

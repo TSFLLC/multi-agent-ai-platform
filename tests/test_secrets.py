@@ -111,6 +111,24 @@ def test_api_key_never_logged(db, caplog):
         assert "sk-must-never-appear-in-any-log-line" not in record.getMessage()
 
 
+def test_rotated_provider_credential_never_logged(db, caplog):
+    project = make_project(db)
+    provider = make_provider(db)
+    svc = SecretService(db)
+    svc.store_secret(project_id=project.id, provider_id=provider.id, name="k", value="sk-original-value")
+
+    with caplog.at_level(logging.DEBUG):
+        svc.store_secret(
+            project_id=project.id,
+            provider_id=provider.id,
+            name="k",
+            value="sk-rotated-value-must-never-appear-in-logs",
+        )
+    for record in caplog.records:
+        assert "sk-rotated-value-must-never-appear-in-logs" not in record.getMessage()
+    assert svc.get_current_provider_api_key(provider.id) == "sk-rotated-value-must-never-appear-in-logs"
+
+
 def test_api_key_never_appears_in_flight_recorder_events(db):
     from app.services.flight_recorder import FlightRecorderService
     from tests.conftest import make_task, make_task_run
@@ -137,3 +155,100 @@ def test_api_key_never_appears_in_flight_recorder_events(db):
 
     for event in db.query(ExecutionEvent).all():
         assert "sk-should-never-reach-execution-events" not in (event.decision_summary or "")
+
+
+# -- EncryptedFileSecretStore (MA7.7B — hosted-deployment backend) ----------
+
+
+def _fernet_key():
+    from cryptography.fernet import Fernet
+
+    return Fernet.generate_key().decode()
+
+
+def test_encrypted_file_store_roundtrip(tmp_path):
+    from app.secrets_store import EncryptedFileSecretStore
+
+    store = EncryptedFileSecretStore(path=tmp_path / "secrets.enc.json", key=_fernet_key())
+    store.set_secret("secret:1", "sk-or-real-value")
+    assert store.get_secret("secret:1") == "sk-or-real-value"
+
+
+def test_encrypted_file_store_value_is_not_plaintext_on_disk(tmp_path):
+    from app.secrets_store import EncryptedFileSecretStore
+
+    path = tmp_path / "secrets.enc.json"
+    store = EncryptedFileSecretStore(path=path, key=_fernet_key())
+    store.set_secret("secret:1", "sk-must-not-appear-verbatim-on-disk")
+    assert b"sk-must-not-appear-verbatim-on-disk" not in path.read_bytes()
+
+
+def test_encrypted_file_store_persists_across_instances(tmp_path):
+    from app.secrets_store import EncryptedFileSecretStore
+
+    path = tmp_path / "secrets.enc.json"
+    key = _fernet_key()
+    EncryptedFileSecretStore(path=path, key=key).set_secret("secret:1", "sk-value")
+    reopened = EncryptedFileSecretStore(path=path, key=key)
+    assert reopened.get_secret("secret:1") == "sk-value"
+
+
+def test_encrypted_file_store_wrong_key_returns_none_not_a_crash(tmp_path):
+    from app.secrets_store import EncryptedFileSecretStore
+
+    path = tmp_path / "secrets.enc.json"
+    EncryptedFileSecretStore(path=path, key=_fernet_key()).set_secret("secret:1", "sk-value")
+    wrong_key_store = EncryptedFileSecretStore(path=path, key=_fernet_key())
+    assert wrong_key_store.get_secret("secret:1") is None
+
+
+def test_encrypted_file_store_delete_removes_the_entry(tmp_path):
+    from app.secrets_store import EncryptedFileSecretStore
+
+    path = tmp_path / "secrets.enc.json"
+    key = _fernet_key()
+    store = EncryptedFileSecretStore(path=path, key=key)
+    store.set_secret("secret:1", "sk-value")
+    store.delete_secret("secret:1")
+    assert store.get_secret("secret:1") is None
+
+
+def test_encrypted_file_store_get_of_unknown_ref_is_none(tmp_path):
+    from app.secrets_store import EncryptedFileSecretStore
+
+    store = EncryptedFileSecretStore(path=tmp_path / "secrets.enc.json", key=_fernet_key())
+    assert store.get_secret("secret:does-not-exist") is None
+
+
+def test_encrypted_file_store_requires_a_key():
+    from app.secrets_store import EncryptedFileSecretStore
+
+    try:
+        EncryptedFileSecretStore(path=None, key=None)
+        assert False, "expected RuntimeError when no key is configured"
+    except RuntimeError:
+        pass
+
+
+def test_get_secret_store_selects_keyring_backend_when_not_hosted(monkeypatch):
+    import app.secrets_store as secrets_store_module
+    from app.config import settings
+
+    monkeypatch.setattr(secrets_store_module, "_store", None)
+    monkeypatch.setattr(settings, "hosted_mode", False)
+
+    store = secrets_store_module.get_secret_store()
+    assert isinstance(store, secrets_store_module.KeyringSecretStore)
+
+
+def test_get_secret_store_selects_encrypted_file_backend_when_hosted(monkeypatch, tmp_path):
+    import app.secrets_store as secrets_store_module
+    from app.config import settings
+
+    monkeypatch.setattr(secrets_store_module, "_store", None)
+    monkeypatch.setattr(settings, "hosted_mode", True)
+    monkeypatch.setattr(settings, "secret_encryption_key", _fernet_key())
+    monkeypatch.setattr(settings, "secrets_file_path", tmp_path / "secrets.enc.json")
+
+    store = secrets_store_module.get_secret_store()
+    assert isinstance(store, secrets_store_module.EncryptedFileSecretStore)
