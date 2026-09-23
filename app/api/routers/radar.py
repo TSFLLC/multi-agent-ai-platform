@@ -2,15 +2,16 @@ from datetime import datetime, timezone
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db
 from app.auth import get_current_user
 from app.authz import require_platform_admin
 from app.errors import NotFoundError
+from app.models.concepts import Concept
 from app.models.identity import User
-from app.models.providers import ProviderModel
+from app.models.providers import Model, Provider, ProviderModel
 from app.models.radar import (
     AttentionSample,
     Claim,
@@ -28,6 +29,7 @@ from app.models.radar import (
 )
 from app.schemas.radar import (
     ClaimRead,
+    ConceptDiscoveryRead,
     DevelopmentRead,
     MergeDevelopmentRequest,
     RadarItemRead,
@@ -55,6 +57,22 @@ from app.services.radar_service import (
 )
 
 router = APIRouter(prefix="/radar", tags=["radar"])
+
+
+@router.get("/concepts", response_model=List[ConceptDiscoveryRead])
+def list_concepts_for_selection(
+    q: Optional[str] = Query(default=None, min_length=1, max_length=120),
+    limit: int = Query(default=50, ge=1, le=100),
+    db: Session = Depends(get_db),
+    _user: User = Depends(get_current_user),
+):
+    """Read-only discovery over AIL.1A's canonical Concept identities."""
+    stmt = select(Concept)
+    if q:
+        pattern = f"%{q}%"
+        stmt = stmt.where(or_(Concept.name.ilike(pattern), Concept.slug.ilike(pattern)))
+    stmt = stmt.order_by(Concept.name, Concept.id).limit(limit)
+    return list(db.execute(stmt).scalars().all())
 
 
 @router.get("/sources", response_model=List[RadarSourceRead])
@@ -300,6 +318,8 @@ def get_development_intelligence(
     provider_ids = list(db.execute(
         select(ProviderModel.provider_id).where(ProviderModel.model_id.in_(model_ids))
     ).scalars()) if model_ids else []
+    models = list(db.execute(select(Model).where(Model.id.in_(model_ids))).scalars()) if model_ids else []
+    providers = list(db.execute(select(Provider).where(Provider.id.in_(provider_ids))).scalars()) if provider_ids else []
     concept_links = db.execute(
         select(DevelopmentConcept).where(DevelopmentConcept.development_id == development_id)
     ).scalars().all()
@@ -317,6 +337,14 @@ def get_development_intelligence(
         "claims": claim_rows,
         "model_ids": model_ids,
         "provider_ids": sorted(set(provider_ids)),
+        "model_links": [
+            {"id": model.id, "name": model.canonical_model_id}
+            for model in sorted(models, key=lambda row: (row.canonical_model_id, row.id))
+        ],
+        "provider_links": [
+            {"id": provider.id, "name": provider.name}
+            for provider in sorted(providers, key=lambda row: (row.name, row.id))
+        ],
         "concept_links": [
             {"id": link.id, "concept_id": link.concept_id, "state": link.state, "proposed_by": link.proposed_by}
             for link in concept_links

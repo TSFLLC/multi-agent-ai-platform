@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { claimTypeLabel, groupToday, reasonLabel, sortRecent } from "../assets/js/pages/radar.js";
+import { claimTypeLabel, friendlyLinkName, groupToday, reasonLabel, sortRecent, triageActionValues, verificationStepState } from "../assets/js/pages/radar.js";
 
 function detail(id, date, reasons = [], triage = null, type = "capability") {
   return {
@@ -39,4 +39,19 @@ test("recent ordering uses announced date then first-seen date", () => {
     detail("new", "2026-09-22"),
   ]);
   assert.deepEqual(sorted.map((item) => item.development.id), ["new", "old"]);
+});
+
+test("triage actions have no implicit default and preserve the five decisions", () => {
+  assert.deepEqual(triageActionValues(), ["IGNORE", "WATCH", "LEARN", "EXPERIMENT", "INVESTIGATE"]);
+});
+
+test("verification state identifies exactly the current rung and reached history", () => {
+  assert.deepEqual(verificationStepState("DOCUMENTED", "CLAIMED"), { current: false, reached: true });
+  assert.deepEqual(verificationStepState("DOCUMENTED", "DOCUMENTED"), { current: true, reached: true });
+  assert.deepEqual(verificationStepState("DOCUMENTED", "AVAILABLE"), { current: false, reached: false });
+});
+
+test("friendly registry names fall back safely when a relationship is incomplete", () => {
+  assert.equal(friendlyLinkName({ id: "model-1", name: "Model One" }), "Model One");
+  assert.equal(friendlyLinkName({ id: "model-2" }), "model-2");
 });

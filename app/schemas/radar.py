@@ -168,6 +168,17 @@ class DevelopmentConceptPropose(BaseModel):
     proposed_by: DevelopmentConceptProposedBy = DevelopmentConceptProposedBy.USER
 
 
+class ConceptDiscoveryRead(BaseModel):
+    """Bounded, read-only selection shape for the canonical Concept Graph."""
+
+    id: str
+    name: str
+    slug: str
+
+    class Config:
+        orm_mode = True
+
+
 class ManualRadarItemCreate(BaseModel):
     title: str = Field(min_length=1, max_length=1000)
     canonical_url: str = Field(min_length=1, max_length=2000)

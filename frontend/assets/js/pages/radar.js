@@ -61,6 +61,21 @@ export function developmentTypeLabel(type) {
   return TYPE_LABELS[type] || type || "Development";
 }
 
+export function triageActionValues() {
+  return ["IGNORE", "WATCH", "LEARN", "EXPERIMENT", "INVESTIGATE"];
+}
+
+export function friendlyLinkName(link) {
+  return link?.name || link?.id || "Unknown";
+}
+
+export function verificationStepState(level, item) {
+  const levels = ["CLAIMED", "DOCUMENTED", "AVAILABLE", "INDEPENDENTLY_MEASURED", "TESTED_BY_US"];
+  const index = levels.indexOf(level);
+  const position = levels.indexOf(item);
+  return { current: item === level, reached: position >= 0 && position <= index };
+}
+
 export function visibleReasons(detail) {
   return (detail?.reason_codes || []).map(reasonLabel);
 }
@@ -123,15 +138,15 @@ function dateLine(development) {
 }
 
 function modelLinks(detail) {
-  const ids = detail.model_ids || [];
-  if (!ids.length) return el("span", { class: "hint" }, "No linked models.");
-  return el("div", { class: "chip-row" }, ids.map((id) => el("a", { class: "link-chip", href: `#/models/${encodeURIComponent(id)}/explore` }, id)));
+  const links = detail.model_links || (detail.model_ids || []).map((id) => ({ id, name: id }));
+  if (!links.length) return el("span", { class: "hint" }, "No linked models.");
+  return el("div", { class: "chip-row" }, links.map((link) => el("a", { class: "link-chip", href: `#/models/${encodeURIComponent(link.id)}/explore` }, friendlyLinkName(link))));
 }
 
 function providerLinks(detail) {
-  const ids = detail.provider_ids || [];
-  if (!ids.length) return el("span", { class: "hint" }, "No linked providers.");
-  return el("div", { class: "chip-row" }, ids.map((id) => el("a", { class: "link-chip", href: `#/providers/${encodeURIComponent(id)}/explore` }, id)));
+  const links = detail.provider_links || (detail.provider_ids || []).map((id) => ({ id, name: id }));
+  if (!links.length) return el("span", { class: "hint" }, "No linked providers.");
+  return el("div", { class: "chip-row" }, links.map((link) => el("a", { class: "link-chip", href: `#/providers/${encodeURIComponent(link.id)}/explore` }, friendlyLinkName(link))));
 }
 
 function conceptLinks(detail) {
@@ -264,12 +279,16 @@ function claimView(claim) {
 
 function triagePanel(detail, redraw) {
   const current = detail.current_triage;
-  const decision = el("select", {}, ["IGNORE", "WATCH", "LEARN", "EXPERIMENT", "INVESTIGATE"].map((value) => el("option", { value }, value)));
+  const decision = el("select", { "aria-label": "Choose a triage action" }, [
+    el("option", { value: "", selected: true, disabled: true }, "Choose an action..."),
+    ...triageActionValues().map((value) => el("option", { value }, value)),
+  ]);
   const rationale = el("textarea", { placeholder: "Optional rationale" });
   const revisit = el("input", { type: "datetime-local" });
   const message = el("p", { class: "hint" }, "");
   const submitButton = el("button", { class: "primary" }, "Save decision");
   const submit = async () => {
+    if (!decision.value) { message.textContent = "Choose an action before saving."; return; }
     if (decision.value === "WATCH" && !revisit.value) { message.textContent = "WATCH requires a revisit date."; return; }
     submitButton.disabled = true;
     try {
@@ -320,7 +339,7 @@ function renderDetail(detail, redraw) {
       el("p", { class: "hint" }, `${detail.claims?.length || 0} claim(s) · ${detail.attention_samples?.length || 0} attention sample(s) · ${detail.current_triage ? `triaged ${detail.current_triage.decision}` : "not reviewed"}`),
     ]),
     el("div", { class: "card" }, [el("h2", {}, "Related models"), modelLinks(detail), el("h2", {}, "Related providers"), providerLinks(detail), el("h2", {}, "Related Concepts"), conceptLinks(detail)]),
-    el("section", { class: "card" }, [el("h2", {}, "Verification ladder"), verificationLadder(detail.verification_level)]),
+    el("section", { class: "card" }, [el("h2", {}, "Verification ladder"), verificationLadderWithCurrent(detail.verification_level)]),
     el("section", { class: "card" }, [el("h2", {}, "Claims and provenance"), detail.claims?.length ? el("div", { class: "stack" }, detail.claims.map(claimView)) : stateCard("No claims recorded for this Development.")]),
     el("section", { class: "card" }, [el("h2", {}, "Attention evidence"), detail.attention_samples?.length ? el("div", { class: "stack" }, detail.attention_samples.map((sample) => el("div", { class: "row between" }, [el("span", {}, `${sample.metric}: ${sample.value}${sample.unit ? ` ${sample.unit}` : ""}`), el("span", { class: "hint" }, formatDateTime(sample.sampled_at))]))) : stateCard("No attention evidence recorded.")]),
     triagePanel(detail, redraw),
@@ -329,6 +348,17 @@ function renderDetail(detail, redraw) {
       el("button", { class: "small", onclick: () => { if (learnTarget) window.alert(`Open Concept ${learnTarget.concept_id} from the Learning surface.`); } }, learnTarget ? "Open learning context" : "Learning context unavailable"),
     ])]),
   ]);
+}
+
+function verificationLadderWithCurrent(level) {
+  const levels = ["CLAIMED", "DOCUMENTED", "AVAILABLE", "INDEPENDENTLY_MEASURED", "TESTED_BY_US"];
+  return el("div", { class: "verification-ladder", "aria-label": `Current verification: ${level || "unknown"}` }, levels.map((item, position) => {
+    const { current, reached } = verificationStepState(level, item);
+    return el("div", {
+      class: `verification-step${reached ? " reached" : ""}${current ? " current" : ""}`,
+      "aria-current": current ? "step" : null,
+    }, [el("span", { "aria-hidden": "true" }, reached ? "*" : "-"), current ? `${item} (current)` : item]);
+  }));
 }
 
 function verificationLadder(level) {
