@@ -55,6 +55,7 @@ def _add_wave1_orm_compat_columns(engine):
     with engine.begin() as conn:
         conn.execute(text("ALTER TABLE projects ADD COLUMN kind VARCHAR(20) NOT NULL DEFAULT 'standard'"))
         conn.execute(text("ALTER TABLE projects ADD COLUMN ail_evidence_opt_in BOOLEAN NOT NULL DEFAULT 0"))
+        conn.execute(text("ALTER TABLE task_runs ADD COLUMN experiment_id VARCHAR(36)"))
 
 def _columns(engine):
     return {c["name"] for c in inspect(engine).get_columns("model_routing_decisions")}

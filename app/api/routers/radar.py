@@ -27,26 +27,28 @@ from app.models.radar import (
     RadarSourceState,
     TriageDecisionKind,
 )
+from app.schemas.lab import ExperimentCreate, ExperimentRead
 from app.schemas.radar import (
+    AttentionSampleCreate,
+    AttentionSampleRead,
+    AttentionStateRead,
     ClaimRead,
     ConceptDiscoveryRead,
     DevelopmentRead,
+    DevelopmentTermCreate,
+    DevelopmentTermRead,
+    ManualRadarItemCreate,
     MergeDevelopmentRequest,
+    RadarIngestionCreate,
+    RadarIngestionRead,
     RadarItemRead,
     RadarSourceCreate,
     RadarSourceRead,
     RadarSourceReview,
-    AttentionSampleCreate,
-    AttentionSampleRead,
-    AttentionStateRead,
-    DevelopmentTermCreate,
-    DevelopmentTermRead,
-    ManualRadarItemCreate,
-    RadarIngestionCreate,
-    RadarIngestionRead,
     TriageDecisionCreate,
     TriageDecisionRead,
 )
+from app.services.lab_service import LabService
 from app.services.radar_intelligence_service import RadarIntelligenceService, create_manual_radar_item
 from app.services.radar_service import (
     RadarClaimService,
@@ -57,6 +59,19 @@ from app.services.radar_service import (
 )
 
 router = APIRouter(prefix="/radar", tags=["radar"])
+
+
+@router.post("/developments/{development_id}/experiments", response_model=ExperimentRead, status_code=201)
+def create_experiment_draft_from_development(
+    development_id: str,
+    body: ExperimentCreate,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Explicit Radar-to-Lab bridge; saving Radar triage never calls this."""
+    return LabService(db).experiment_read(
+        LabService(db).create_experiment(user, body, development_id=development_id)
+    )
 
 
 @router.get("/concepts", response_model=List[ConceptDiscoveryRead])
@@ -513,7 +528,6 @@ def merge_development(
 
 from app.errors import ForbiddenError
 from app.models.radar import (
-    DevelopmentConcept,
     DevelopmentConceptProposedBy,
     DevelopmentConceptState,
 )

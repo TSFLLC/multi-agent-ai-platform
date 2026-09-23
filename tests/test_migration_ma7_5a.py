@@ -87,6 +87,10 @@ def _add_wave1_orm_compat_columns(engine):
     with engine.begin() as conn:
         conn.execute(text("ALTER TABLE projects ADD COLUMN kind VARCHAR(20) NOT NULL DEFAULT 'standard'"))
         conn.execute(text("ALTER TABLE projects ADD COLUMN ail_evidence_opt_in BOOLEAN NOT NULL DEFAULT 0"))
+        # AIL.3A's current ORM is also used by historical migration fixtures
+        # that intentionally stop before AIL.3A. Keep those disposable
+        # fixtures compatible without changing the historical schema owner.
+        conn.execute(text("ALTER TABLE task_runs ADD COLUMN experiment_id VARCHAR(36)"))
 
 
 def _populate(engine, label):

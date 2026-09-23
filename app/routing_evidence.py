@@ -301,6 +301,7 @@ def load_evidence(
         )
         .where(
             ModelCall.provider_model_id.in_(ids),
+            TaskRun.experiment_id.is_(None),
             ModelCall.started_at >= since,
             ModelCall.status.in_([ModelCallStatus.SUCCESS, ModelCallStatus.ERROR, ModelCallStatus.TIMEOUT]),
         )
@@ -342,6 +343,7 @@ def load_evidence(
         )
         .where(
             ModelCall.provider_model_id.in_(ids),
+            TaskRun.experiment_id.is_(None),
             ModelCall.started_at >= since,
             ModelCall.status == ModelCallStatus.SUCCESS,
             EvaluationRun.status == EvaluationRunStatus.COMPLETED,

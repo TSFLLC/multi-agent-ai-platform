@@ -25,12 +25,12 @@ from app.api.routers import (
     evaluations,
     events,
     internal,
-    model_explorer,
+    lab,
     model_explorer,
     model_intelligence,
-    radar,
     models,
     projects,
+    radar,
     tasks,
     usage,
     workflows,
@@ -187,6 +187,7 @@ for router in (
     usage.router,
     events.router,
     internal.router,
+    lab.router,
 ):
     app.include_router(router)
 

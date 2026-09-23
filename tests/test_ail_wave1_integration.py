@@ -1,13 +1,13 @@
 from pathlib import Path
 
 import pytest
-from alembic import command
 from alembic.config import Config
 from sqlalchemy import inspect, text
 
+from alembic import command
 from app.config import settings
-from app.db.session import build_engine
 from app.db.enums import ConceptKind, ConceptLevel
+from app.db.session import build_engine
 from app.models.concepts import Concept
 from app.models.radar import Development
 
@@ -38,7 +38,7 @@ def test_final_chain_is_linear_and_has_one_head():
 
     script = ScriptDirectory.from_config(_cfg())
     assert [head.revision for head in script.get_revisions("heads")] == [
-        "ail2b_radar_intelligence"
+        "ail3a_personal_lab_foundation"
     ]
     assert script.get_revision("8c3f6b2e9d14").down_revision == "5e1d8a4c7b30"
     assert script.get_revision("ef873dac62a1").down_revision == "8c3f6b2e9d14"

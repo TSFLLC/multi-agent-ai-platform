@@ -50,6 +50,11 @@ class TaskRun(UUIDPrimaryKeyMixin, Base):
     __tablename__ = "task_runs"
 
     task_id: Mapped[str] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False)
+    # AIL.3: nullable foundation seam. Runs tagged with an Experiment are
+    # excluded from MA8 historical evidence; ordinary runs remain unchanged.
+    experiment_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("experiments.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     workflow_version_id: Mapped[Optional[str]] = mapped_column(
         ForeignKey("workflow_versions.id"), nullable=True
     )

@@ -560,6 +560,38 @@ class EvidenceRefType(str, enum.Enum):
     NONE = "none"
 
 
+# --- AIL.3 Personal Lab ---------------------------------------------------
+
+
+class EvalSetVersionStatus(str, enum.Enum):
+    DRAFT = "draft"
+    PUBLISHED = "published"
+    FROZEN = "frozen"
+
+
+class ExperimentType(str, enum.Enum):
+    MODEL_COMPARISON = "model_comparison"
+    PROMPT_COMPARISON = "prompt_comparison"
+    VARIANCE = "variance"
+
+
+class ExperimentStatus(str, enum.Enum):
+    DRAFT = "draft"
+    ESTIMATED = "estimated"
+    AWAITING_APPROVAL = "awaiting_approval"
+    APPROVED = "approved"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class CostEstimateKind(str, enum.Enum):
+    KNOWN = "known"
+    ESTIMATED = "estimated"
+    UNKNOWN = "unknown"
+
+
 class PlanItemState(str, enum.Enum):
     PROPOSED = "proposed"
     PLANNED = "planned"

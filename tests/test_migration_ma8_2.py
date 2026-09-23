@@ -60,6 +60,7 @@ def _add_wave1_orm_compat_columns(engine):
     with engine.begin() as conn:
         conn.execute(text("ALTER TABLE projects ADD COLUMN kind VARCHAR(20) NOT NULL DEFAULT 'standard'"))
         conn.execute(text("ALTER TABLE projects ADD COLUMN ail_evidence_opt_in BOOLEAN NOT NULL DEFAULT 0"))
+        conn.execute(text("ALTER TABLE task_runs ADD COLUMN experiment_id VARCHAR(36)"))
 
 def test_ma8_2_is_followed_by_ail1a_in_the_integrated_chain():
     """MA8.2 must be a direct, uncontested descendant of MA8.1 — no
