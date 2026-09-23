@@ -24,10 +24,16 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
+    # Add concept version provenance to freeze the version at experiment creation
+    op.add_column('experiments', sa.Column('concept_version_id', sa.String(36), nullable=True))
+
     # Add human conclusion columns to experiments table (simple additive change)
     op.add_column('experiments', sa.Column('conclusion_type', sa.String(50), nullable=True))
     op.add_column('experiments', sa.Column('conclusion_text', sa.Text(), nullable=True))
     op.add_column('experiments', sa.Column('concluded_at', sa.DateTime(timezone=True), nullable=True))
+
+    # Idempotency protection: application layer checks for existing evidence before creation
+    # Future migration can add database-level uniqueness constraint once schema stabilizes
 
 
 def downgrade() -> None:
@@ -35,3 +41,6 @@ def downgrade() -> None:
     op.drop_column('experiments', 'concluded_at')
     op.drop_column('experiments', 'conclusion_text')
     op.drop_column('experiments', 'conclusion_type')
+
+    # Remove concept version provenance
+    op.drop_column('experiments', 'concept_version_id')

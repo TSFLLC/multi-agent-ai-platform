@@ -77,6 +77,7 @@ class Experiment(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     budget_id: Mapped[Optional[str]] = mapped_column(ForeignKey("budgets.id"), nullable=True)
     approval_id: Mapped[Optional[str]] = mapped_column(ForeignKey("approvals.id"), nullable=True)
     frozen_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    concept_version_id: Mapped[Optional[str]] = mapped_column(ForeignKey("concept_versions.id"), nullable=True)
     conclusion_type: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     conclusion_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     concluded_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
