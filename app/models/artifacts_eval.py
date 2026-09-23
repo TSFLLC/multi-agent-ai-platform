@@ -87,6 +87,12 @@ class ComparisonRun(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     __tablename__ = "comparison_runs"
 
     task_run_id: Mapped[str] = mapped_column(ForeignKey("task_runs.id", ondelete="CASCADE"), nullable=False)
+    # AIL.3B experiment grouping; ordinary MA5 comparisons leave these NULL.
+    experiment_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("experiments.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    experiment_task_position: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    experiment_repetition: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     status: Mapped[ComparisonRunStatus] = mapped_column(
         sa_enum(ComparisonRunStatus),
         nullable=False,

@@ -77,7 +77,14 @@ class TaskService(BaseService):
     # -- Task Run lifecycle -------------------------------------------------
 
     def start_task_run(
-        self, *, task_id: str, agent_version_id: str, budget_id: Optional[str] = None
+        self,
+        *,
+        task_id: str,
+        agent_version_id: str,
+        budget_id: Optional[str] = None,
+        experiment_id: Optional[str] = None,
+        model_policy_override: Optional[dict] = None,
+        frozen_task_snapshot: Optional[dict] = None,
     ) -> TaskRun:
         task = self.get_task(task_id)
 
@@ -98,10 +105,13 @@ class TaskService(BaseService):
             "agent_version_number": agent_version.version,
             "model_policy": agent_version.model_policy,
             "budget_id": budget_id,
+            "experiment_id": experiment_id,
+            "frozen_task_snapshot": frozen_task_snapshot,
         }
 
         task_run = TaskRun(
             task_id=task.id,
+            experiment_id=experiment_id,
             status=TaskRunStatus.CREATED,
             budget_id=budget_id,
             config_snapshot=config_snapshot,
@@ -115,6 +125,7 @@ class TaskService(BaseService):
             agent_version_id=agent_version.id,
             status=AgentRunStatus.CREATED,
             timeout_seconds=agent_version.timeout_seconds or settings.default_agent_run_timeout_seconds,
+            model_policy_override_json=model_policy_override,
         )
         self.db.add(agent_run)
         self.db.flush()

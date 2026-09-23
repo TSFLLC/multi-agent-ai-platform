@@ -102,3 +102,19 @@ class ExperimentModel(UUIDPrimaryKeyMixin, Base):
         ForeignKey("provider_model_snapshots.id", ondelete="RESTRICT"), nullable=False
     )
     position: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+
+class ExperimentTaskRun(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
+    """Minimal reproducibility index for every TaskRun launched by an experiment."""
+
+    __tablename__ = "experiment_task_runs"
+    __table_args__ = (
+        UniqueConstraint("experiment_id", "task_run_id", name="uq_experiment_task_runs_pair"),
+        UniqueConstraint("experiment_id", "task_position", "repetition", "label", name="uq_experiment_task_runs_slot"),
+    )
+
+    experiment_id: Mapped[str] = mapped_column(ForeignKey("experiments.id", ondelete="CASCADE"), nullable=False, index=True)
+    task_run_id: Mapped[str] = mapped_column(ForeignKey("task_runs.id", ondelete="CASCADE"), nullable=False)
+    task_position: Mapped[int] = mapped_column(Integer, nullable=False)
+    repetition: Mapped[int] = mapped_column(Integer, nullable=False)
+    label: Mapped[str] = mapped_column(String(120), nullable=False)

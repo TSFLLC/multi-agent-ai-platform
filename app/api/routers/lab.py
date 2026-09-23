@@ -10,6 +10,7 @@ from app.models.identity import User
 from app.models.lab import EvalSetVersionTask, Experiment
 from app.schemas.lab import (
     ExperimentCreate,
+    ExperimentEvaluateRequest,
     ExperimentListRead,
     ExperimentRead,
     StarterTestKitsRead,
@@ -18,6 +19,7 @@ from app.schemas.lab import (
     TestKitVersionCreate,
     TestKitVersionRead,
 )
+from app.services.experiment_execution_service import ExperimentExecutionService
 from app.services.lab_service import LabService
 
 router = APIRouter(prefix="/lab", tags=["personal-lab"])
@@ -136,7 +138,38 @@ def list_experiments(db: Session = Depends(get_db), user: User = Depends(get_cur
     return {"items": [service.experiment_read(experiment) for experiment in experiments]}
 
 
+@router.get("/experiments/{experiment_id}/results")
+def experiment_results(experiment_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    return ExperimentExecutionService(db).read(user.id, experiment_id)
+
+
 @router.get("/experiments/{experiment_id}", response_model=ExperimentRead)
 def get_experiment(experiment_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     service = LabService(db)
     return service.experiment_read(service.get_experiment(user.id, experiment_id))
+
+
+@router.post("/experiments/{experiment_id}/run")
+def run_experiment(experiment_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    return ExperimentExecutionService(db).read(user.id, ExperimentExecutionService(db).launch(user.id, experiment_id).id)
+
+
+@router.post("/experiments/{experiment_id}/cancel")
+def cancel_experiment(experiment_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    return ExperimentExecutionService(db).read(user.id, ExperimentExecutionService(db).cancel(user.id, experiment_id).id)
+
+
+@router.post("/experiments/{experiment_id}/evaluate")
+def evaluate_experiment(
+    experiment_id: str,
+    body: ExperimentEvaluateRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    return ExperimentExecutionService(db).evaluate(
+        user.id,
+        experiment_id,
+        evaluation_definition_version_id=body.evaluation_definition_version_id,
+        method=body.method,
+        evaluator_agent_version_id=body.evaluator_agent_version_id,
+    )

@@ -17,7 +17,7 @@ what proves a later re-derivation matches what was actually sent.
 import hashlib
 import json
 from dataclasses import dataclass
-from typing import Mapping, Optional, Sequence, Tuple
+from typing import Any, Mapping, Optional, Sequence, Tuple
 
 from app.models.agents import AgentVersion, PromptVersion
 from app.models.tasks import Task
@@ -63,6 +63,7 @@ def build_prompt(
     agent_version: AgentVersion,
     prompt_version: Optional[PromptVersion],
     task: Task,
+    task_snapshot: Optional[Mapping[str, Any]] = None,
     extra_context: Optional[str] = None,
 ) -> PromptAssembly:
     """``extra_context`` (MA4) is an opaque, already-rendered text block
@@ -74,11 +75,12 @@ def build_prompt(
     to MA3's, unchanged."""
     system_prompt = prompt_version.content if prompt_version else None
 
-    user_parts = [task.title]
-    if task.description:
-        user_parts.append(task.description)
-    if task.requirements:
-        user_parts.append(json.dumps(task.requirements, sort_keys=True, default=str))
+    task_data = task_snapshot or {"title": task.title, "description": task.description, "requirements": task.requirements}
+    user_parts = [task_data.get("title") or task.title]
+    if task_data.get("description"):
+        user_parts.append(task_data["description"])
+    if task_data.get("requirements"):
+        user_parts.append(json.dumps(task_data["requirements"], sort_keys=True, default=str))
     if extra_context:
         user_parts.append(extra_context)
     user_prompt = "\n\n".join(user_parts)

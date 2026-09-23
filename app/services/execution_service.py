@@ -81,6 +81,7 @@ from app.models.evaluation_definitions import EvaluationDefinitionVersion
 from app.models.execution import ModelCall
 from app.models.governance import BudgetReservation
 from app.models.identity import Project
+from app.models.providers import ProviderModelSnapshot
 from app.models.tasks import AgentRun, AgentRunAttempt, Task, TaskRun
 from app.prompt_builder import build_prompt, build_workflow_upstream_extra_context
 from app.providers.base import (
@@ -139,6 +140,7 @@ class _Context:
     agent_version: AgentVersion
     prompt_version: Optional[PromptVersion]
     project: Project
+    frozen_task_snapshot: Optional[dict] = None
 
 
 def _utcnow() -> datetime:
@@ -225,6 +227,7 @@ class AgentExecutionService:
             agent_version=agent_version,
             prompt_version=prompt_version,
             project=project,
+            frozen_task_snapshot=(task_run.config_snapshot or {}).get("frozen_task_snapshot"),
         )
 
     # -- worker-restart recovery (MA7.8) ------------------------------------
@@ -482,7 +485,17 @@ class AgentExecutionService:
             decision_summary=resolved.rationale,
         )
 
-        snapshot = freeze_snapshot(self.db, resolved)
+        pinned_snapshot_id = (ctx.agent_run.model_policy_override_json or {}).get("provider_model_snapshot_id")
+        snapshot = self.db.get(ProviderModelSnapshot, pinned_snapshot_id) if pinned_snapshot_id else None
+        if snapshot is not None and snapshot.provider_model_id != resolved.provider_model.id:
+            self._finalize_failed(
+                ctx,
+                category="model_snapshot_mismatch",
+                message="Pinned provider model snapshot does not match the resolved provider model.",
+                attempt=attempt,
+            )
+            raise ExecutionAborted("pinned model snapshot mismatch")
+        snapshot = snapshot or freeze_snapshot(self.db, resolved)
         routing_record = record_routing_decision(
             self.db,
             agent_run_id=agent_run.id,
@@ -565,6 +578,7 @@ class AgentExecutionService:
             agent_version=ctx.agent_version,
             prompt_version=ctx.prompt_version,
             task=ctx.task,
+            task_snapshot=ctx.frozen_task_snapshot,
             extra_context=extra_context,
         )
         self._event(

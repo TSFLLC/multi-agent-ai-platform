@@ -4,7 +4,13 @@ from typing import List, Optional
 
 from pydantic import BaseModel, Field
 
-from app.db.enums import CostEstimateKind, EvalSetVersionStatus, ExperimentStatus, ExperimentType
+from app.db.enums import (
+    CostEstimateKind,
+    EvalSetVersionStatus,
+    EvaluationMethod,
+    ExperimentStatus,
+    ExperimentType,
+)
 
 
 class TestKitRead(BaseModel):
@@ -93,3 +99,12 @@ class ExperimentRead(BaseModel):
 
 class ExperimentListRead(BaseModel):
     items: List[ExperimentRead]
+
+
+class ExperimentEvaluateRequest(BaseModel):
+    evaluation_definition_version_id: str
+    method: EvaluationMethod = EvaluationMethod.DETERMINISTIC
+    evaluator_agent_version_id: Optional[str] = None
+
+    class Config:
+        extra = "forbid"

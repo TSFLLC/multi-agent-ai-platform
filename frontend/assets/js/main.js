@@ -13,6 +13,7 @@ import { renderWorkflows } from "./pages/workflows.js";
 import { renderWorkflowStudio } from "./pages/workflowStudio.js";
 import { renderWorkflowRun } from "./pages/workflowRun.js";
 import { renderToday, renderRadar, renderDevelopmentDetail } from "./pages/radar.js";
+import { renderLab, renderExperimentDetail } from "./pages/lab.js";
 
 registerRoute("/ask", renderAsk);
 registerRoute("/comparisons", renderComparisons);
@@ -31,6 +32,8 @@ registerRoute("/workflow-runs/:id", renderWorkflowRun);
 registerRoute("/ail/today", renderToday);
 registerRoute("/ail/radar", renderRadar);
 registerRoute("/ail/radar/developments/:id", renderDevelopmentDetail);
+registerRoute("/ail/lab", renderLab);
+registerRoute("/ail/lab/experiments/:id", renderExperimentDetail);
 
 // Locally this resolves immediately (the server already injected the
 // token — see tokenGate.js). In hosted mode it blocks the app shell

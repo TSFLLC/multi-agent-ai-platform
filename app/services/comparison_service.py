@@ -81,6 +81,10 @@ class ComparisonService(BaseService):
         task_id: str,
         candidates: List[Dict[str, Any]],
         budget_id: Optional[str] = None,
+        experiment_id: Optional[str] = None,
+        experiment_task_position: Optional[int] = None,
+        experiment_repetition: Optional[int] = None,
+        frozen_task_snapshot: Optional[dict] = None,
     ) -> ComparisonRun:
         """``candidates`` items: ``{"agent_version_id", "label",
         "model_policy_override"?, "review"?}`` where ``review`` (if present)
@@ -92,7 +96,7 @@ class ComparisonService(BaseService):
         task = self.db.get(Task, task_id)
         if task is None:
             raise NotFoundError(f"Task {task_id} not found.")
-        if task.execution_mode != ExecutionMode.PARALLEL_COMPARISON:
+        if task.execution_mode != ExecutionMode.PARALLEL_COMPARISON and experiment_id is None:
             raise ConflictError(
                 f"Task {task_id} has execution_mode={task.execution_mode.value!r}, not "
                 "parallel_comparison -- cannot create a comparison for it."
@@ -118,6 +122,7 @@ class ComparisonService(BaseService):
 
         bookkeeping_run = TaskRun(
             task_id=task.id,
+            experiment_id=experiment_id,
             status=TaskRunStatus.CREATED,
             budget_id=budget_id,
             config_snapshot={
@@ -125,13 +130,20 @@ class ComparisonService(BaseService):
                 "execution_mode": task.execution_mode.value,
                 "candidate_labels": labels,
                 "budget_id": budget_id,
+                "frozen_task_snapshot": frozen_task_snapshot,
             },
             timeout_seconds=settings.default_task_run_timeout_seconds,
         )
         self.db.add(bookkeeping_run)
         self.db.flush()
 
-        comparison = ComparisonRun(task_run_id=bookkeeping_run.id, status=ComparisonRunStatus.PENDING)
+        comparison = ComparisonRun(
+            task_run_id=bookkeeping_run.id,
+            experiment_id=experiment_id,
+            experiment_task_position=experiment_task_position,
+            experiment_repetition=experiment_repetition,
+            status=ComparisonRunStatus.PENDING,
+        )
         self.db.add(comparison)
         self.db.flush()
 
@@ -198,6 +210,7 @@ class ComparisonService(BaseService):
                 "model_policy": agent_version.model_policy,
                 "model_policy_override": candidate.model_policy_override_json,
                 "budget_id": bookkeeping_run.budget_id,
+                "frozen_task_snapshot": (bookkeeping_run.config_snapshot or {}).get("frozen_task_snapshot"),
             }
             if review:
                 candidate_config["reviewer_agent_version_id"] = review["reviewer_agent_version_id"]
@@ -210,6 +223,7 @@ class ComparisonService(BaseService):
 
             candidate_run = TaskRun(
                 task_id=task.id,
+                experiment_id=comparison.experiment_id,
                 status=TaskRunStatus.CREATED,
                 budget_id=bookkeeping_run.budget_id,
                 config_snapshot=candidate_config,
