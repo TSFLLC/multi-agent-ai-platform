@@ -556,6 +556,7 @@ class EvidenceRefType(str, enum.Enum):
     MODEL_ROUTING_DECISION = "model_routing_decision"
     TOOL_CALL = "tool_call"
     WORKFLOW_RUN = "workflow_run"
+    EXPERIMENT = "experiment"
     HUMAN = "human"
     NONE = "none"
 
