@@ -12,6 +12,7 @@ import { renderActivity } from "./pages/activity.js";
 import { renderWorkflows } from "./pages/workflows.js";
 import { renderWorkflowStudio } from "./pages/workflowStudio.js";
 import { renderWorkflowRun } from "./pages/workflowRun.js";
+import { renderToday, renderRadar, renderDevelopmentDetail } from "./pages/radar.js";
 
 registerRoute("/ask", renderAsk);
 registerRoute("/comparisons", renderComparisons);
@@ -27,10 +28,13 @@ registerRoute("/activity", renderActivity);
 registerRoute("/workflows", renderWorkflows);
 registerRoute("/workflows/:id", renderWorkflowStudio);
 registerRoute("/workflow-runs/:id", renderWorkflowRun);
+registerRoute("/ail/today", renderToday);
+registerRoute("/ail/radar", renderRadar);
+registerRoute("/ail/radar/developments/:id", renderDevelopmentDetail);
 
 // Locally this resolves immediately (the server already injected the
 // token — see tokenGate.js). In hosted mode it blocks the app shell
 // behind a login prompt until a valid token is entered (MA7.7B).
 ensureToken().then(() => {
-  startRouter(document.getElementById("app-root"), document.getElementById("app-nav"), "#/ask");
+  startRouter(document.getElementById("app-root"), document.getElementById("app-nav"), "#/ail/today");
 });

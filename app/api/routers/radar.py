@@ -14,10 +14,12 @@ from app.models.providers import ProviderModel
 from app.models.radar import (
     AttentionSample,
     Claim,
+    ClaimCitation,
     ClaimOrigin,
     Development,
     DevelopmentConcept,
     DevelopmentModel,
+    DevelopmentStatus,
     DevelopmentTerm,
     RadarItem,
     RadarSource,
@@ -144,9 +146,47 @@ def _development_read(db: Session, development: Development) -> DevelopmentRead:
 
 
 @router.get("/developments", response_model=List[DevelopmentRead])
-def list_developments(db: Session = Depends(get_db), _user: User = Depends(get_current_user)):
-    developments = db.execute(select(Development).order_by(Development.first_seen_at.desc())).scalars().all()
-    return [_development_read(db, development) for development in developments]
+def list_developments(
+    development_type: Optional[str] = Query(default=None),
+    status: Optional[DevelopmentStatus] = Query(default=None),
+    model_id: Optional[str] = Query(default=None),
+    provider_id: Optional[str] = Query(default=None),
+    since: Optional[datetime] = Query(default=None),
+    until: Optional[datetime] = Query(default=None),
+    verification_level: Optional[str] = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+    _user: User = Depends(get_current_user),
+):
+    stmt = select(Development).order_by(Development.first_seen_at.desc())
+    if development_type:
+        stmt = stmt.where(Development.development_type == development_type)
+    if status:
+        stmt = stmt.where(Development.status == status)
+    if since:
+        stmt = stmt.where(Development.first_seen_at >= since)
+    if until:
+        stmt = stmt.where(Development.first_seen_at <= until)
+    if model_id:
+        stmt = stmt.where(
+            Development.id.in_(
+                select(DevelopmentModel.development_id).where(DevelopmentModel.model_id == model_id)
+            )
+        )
+    if provider_id:
+        stmt = stmt.where(
+            Development.id.in_(
+                select(DevelopmentModel.development_id)
+                .join(ProviderModel, ProviderModel.model_id == DevelopmentModel.model_id)
+                .where(ProviderModel.provider_id == provider_id)
+            )
+        )
+    developments = db.execute(stmt.distinct().offset(offset).limit(limit)).scalars().all()
+    rows = [_development_read(db, development) for development in developments]
+    if verification_level:
+        rows = [row for row in rows if row.verification_level == verification_level]
+    return rows
 
 
 @router.get("/developments/{development_id}", response_model=DevelopmentRead)
@@ -178,6 +218,9 @@ def get_development_intelligence(
             select(ClaimOrigin).where(ClaimOrigin.claim_id == claim.id)
         ).scalar_one_or_none()
         source_item = db.get(RadarItem, origin.source_item_id) if origin and origin.source_item_id else None
+        citations = db.execute(
+            select(ClaimCitation).where(ClaimCitation.explanation_claim_id == claim.id)
+        ).scalars().all()
         claim_rows.append({
             "id": claim.id,
             "claim_type": claim.claim_type,
@@ -203,6 +246,10 @@ def get_development_intelligence(
                 "retrieved_at": source_item.retrieved_at,
                 "content_hash": source_item.content_hash,
             } if source_item else None,
+            "citations": [
+                {"id": citation.id, "cited_claim_id": citation.cited_claim_id}
+                for citation in citations
+            ],
         })
     model_ids = list(db.execute(
         select(DevelopmentModel.model_id).where(DevelopmentModel.development_id == development_id)

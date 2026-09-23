@@ -211,3 +211,19 @@ def test_radar_triage_and_manual_ingestion_api_are_authenticated(client, auth_he
     )
     assert item_response.status_code == 201
     assert item_response.json()["content_hash"]
+
+
+def test_radar_development_listing_is_bounded_and_filterable(client, auth_headers, bootstrap, db):
+    development(db, "list-one")
+    second = development(db, "list-two")
+    second.development_type = "pricing"
+    db.commit()
+
+    response = client.get("/radar/developments?limit=1", headers=auth_headers)
+    assert response.status_code == 200
+    assert len(response.json()) == 1
+
+    response = client.get("/radar/developments?development_type=pricing", headers=auth_headers)
+    assert response.status_code == 200
+    assert len(response.json()) == 1
+    assert response.json()[0]["development_type"] == "pricing"

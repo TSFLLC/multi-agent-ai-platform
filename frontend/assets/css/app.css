@@ -83,6 +83,15 @@ html, body {
   color: #cddaff;
 }
 
+#app-nav .nav-section-label {
+  color: var(--text-faint);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  margin: 18px 10px 2px;
+  text-transform: uppercase;
+}
+
 #app-root {
   flex: 1;
   min-width: 0;
@@ -112,6 +121,56 @@ p { color: var(--text-muted); line-height: 1.5; }
 }
 
 .card + .card { margin-top: 16px; }
+
+.button-link {
+  background: var(--accent-soft);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  color: #cddaff;
+  display: inline-block;
+  font-size: 0.86rem;
+  font-weight: 600;
+  padding: 8px 12px;
+  text-decoration: none;
+}
+.button-link:hover { background: var(--accent); color: #fff; }
+
+.eyebrow {
+  color: var(--accent);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.radar-card h2 { margin-bottom: 4px; }
+.radar-card.compact { padding: 16px; }
+.radar-date { margin: 2px 0 12px; font-size: 0.84rem; }
+.radar-reasons { margin: 8px 0 14px; }
+.radar-meta-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 14px 0; }
+.radar-meta-grid > div { display: flex; flex-direction: column; gap: 3px; }
+.radar-links { margin: 8px 0 16px; }
+.link-chip { color: #b9caff; margin-right: 8px; word-break: break-all; }
+.today-section { margin-top: 8px; }
+.claim-card { background: var(--bg-elevated); border: 1px solid var(--border-soft); border-radius: var(--radius); padding: 16px; }
+.claim-card + .claim-card { margin-top: 10px; }
+.claim-text { color: var(--text); margin: 12px 0; }
+.claim-provenance { color: var(--text-muted); font-size: 0.84rem; }
+blockquote { border-left: 3px solid var(--accent); color: var(--text-muted); margin: 10px 0; padding-left: 12px; }
+.triage-form { display: grid; gap: 12px; grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: end; }
+.triage-form textarea { min-height: 42px; }
+.verification-ladder { display: flex; flex-wrap: wrap; gap: 8px; }
+.verification-step { background: var(--bg-elevated); border: 1px solid var(--border); border-radius: 999px; color: var(--text-faint); padding: 8px 12px; font-size: 0.8rem; }
+.verification-step.reached { border-color: var(--free); color: var(--free); }
+.loading-state { color: var(--text-muted); padding: 32px; text-align: center; }
+
+@media (max-width: 820px) {
+  #app-shell { display: block; }
+  #app-nav { width: 100%; height: auto; position: static; flex-direction: row; flex-wrap: wrap; }
+  #app-nav .brand { width: 100%; padding-bottom: 8px; }
+  #app-nav .nav-section-label { margin: 10px 4px; }
+  #app-root { padding: 22px 16px 40px; }
+  .radar-meta-grid, .triage-form { grid-template-columns: 1fr 1fr; }
+}
 
 .stack { display: flex; flex-direction: column; gap: 16px; }
 .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
