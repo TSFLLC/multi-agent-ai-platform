@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -40,11 +40,19 @@ from app.schemas.radar import (
     DevelopmentTermCreate,
     DevelopmentTermRead,
     ManualRadarItemCreate,
+    RadarIngestionCreate,
+    RadarIngestionRead,
     TriageDecisionCreate,
     TriageDecisionRead,
 )
 from app.services.radar_intelligence_service import RadarIntelligenceService, create_manual_radar_item
-from app.services.radar_service import RadarClaimService, RadarSourceService, derive_verification
+from app.services.radar_service import (
+    RadarClaimService,
+    RadarIngestionService,
+    RadarSourceService,
+    RadarValidationError,
+    derive_verification,
+)
 
 router = APIRouter(prefix="/radar", tags=["radar"])
 
@@ -128,6 +136,41 @@ def create_manual_item(
     db.commit()
     db.refresh(item)
     return item
+
+
+@router.post(
+    "/items/{source_item_id}/ingest",
+    response_model=RadarIngestionRead,
+    status_code=201,
+)
+def ingest_source_item(
+    source_item_id: str,
+    body: RadarIngestionCreate,
+    db: Session = Depends(get_db),
+    _admin: User = Depends(require_platform_admin),
+):
+    """Turn one approved Source Item into durable Radar evidence."""
+    try:
+        result = RadarIngestionService(db).ingest(
+            source_item_id=source_item_id,
+            title=body.title,
+            development_type=body.development_type,
+            subject_key=body.subject_key,
+            change_key=body.change_key,
+            announced_at=body.announced_at,
+            effective_at=body.effective_at,
+            development_id=body.development_id,
+            claims=body.claims,
+            model_ids=body.model_ids,
+        )
+        db.commit()
+        return result
+    except RadarValidationError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception:
+        db.rollback()
+        raise
 
 
 def _development_read(db: Session, development: Development) -> DevelopmentRead:

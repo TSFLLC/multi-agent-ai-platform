@@ -91,6 +91,41 @@ class DevelopmentRead(BaseModel):
         orm_mode = True
 
 
+class RadarIngestionClaimCreate(BaseModel):
+    claim_type: ClaimType
+    text: str = Field(min_length=1)
+    as_of: datetime
+    quote_span: Optional[str] = None
+    conditions: Optional[dict] = None
+
+    class Config:
+        extra = "forbid"
+
+
+class RadarIngestionCreate(BaseModel):
+    title: Optional[str] = Field(default=None, max_length=500)
+    development_type: Optional[str] = Field(default=None, max_length=80)
+    subject_key: Optional[str] = Field(default=None, max_length=300)
+    change_key: Optional[str] = Field(default=None, max_length=300)
+    announced_at: Optional[datetime] = None
+    effective_at: Optional[datetime] = None
+    development_id: Optional[str] = None
+    claims: List[RadarIngestionClaimCreate] = Field(default_factory=list)
+    model_ids: List[str] = Field(default_factory=list)
+
+    class Config:
+        extra = "forbid"
+
+
+class RadarIngestionRead(BaseModel):
+    development: DevelopmentRead
+    source_item: RadarItemRead
+    claim_ids: List[str]
+    development_model_ids: List[str]
+    verification_level: Optional[str] = None
+    freshness: str
+
+
 class ClaimRead(BaseModel):
     id: str
     claim_type: ClaimType

@@ -5,12 +5,13 @@ import json
 import re
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from typing import ClassVar, Optional
+from typing import ClassVar, List, Optional
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db.enums import HealthStatus, ModelStatus
+from app.errors import NotFoundError
 from app.models.artifacts_eval import Evaluation
 from app.models.providers import Model, Provider, ProviderModel
 from app.models.radar import (
@@ -279,6 +280,193 @@ class RadarDevelopmentService:
         self.db.add(development)
         self.db.flush()
         return development
+
+
+class RadarIngestionService:
+    """Atomic, deterministic orchestration for curated Radar ingestion.
+
+    This service deliberately accepts one already-frozen Source Item and
+    never performs retrieval, extraction, inference, or model execution.
+    The caller owns the transaction boundary and commits only after this
+    method returns successfully.
+    """
+
+    def __init__(self, db: Session):
+        self.db = db
+
+    def ingest(
+        self,
+        *,
+        source_item_id: str,
+        title: Optional[str],
+        development_type: Optional[str],
+        subject_key: Optional[str],
+        change_key: Optional[str],
+        announced_at: Optional[datetime],
+        effective_at: Optional[datetime],
+        development_id: Optional[str],
+        claims: list,
+        model_ids: List[str],
+    ):
+        source_item = self.db.get(RadarItem, source_item_id)
+        if source_item is None:
+            raise NotFoundError(f"Radar Source Item {source_item_id} not found.")
+        source = self.db.get(RadarSource, source_item.source_id)
+        if source is None:
+            raise NotFoundError(f"Radar Source {source_item.source_id} not found.")
+        RadarSourceService(self.db).assert_fetchable(source)
+        if source_item.processing_state in {RadarItemState.FAILED, RadarItemState.REJECTED}:
+            raise RadarValidationError("This Source Item is not eligible for ingestion.")
+        if not claims:
+            raise RadarValidationError("At least one claim is required.")
+
+        # An already-attached item is the strongest idempotency identity. It
+        # prevents changed presentation fields from creating a new candidate.
+        if source_item.development_id:
+            if development_id and development_id != source_item.development_id:
+                raise RadarValidationError("A Source Item cannot be reassigned to another Development.")
+            development = self.db.get(Development, source_item.development_id)
+            if development is None:
+                raise RadarValidationError("The Source Item references an unknown Development.")
+        elif development_id:
+            development = self.db.get(Development, development_id)
+            if development is None:
+                raise NotFoundError(f"Development {development_id} not found.")
+        else:
+            required = {
+                "title": title,
+                "development_type": development_type,
+                "subject_key": subject_key,
+                "change_key": change_key,
+            }
+            missing = [name for name, value in required.items() if not value or not value.strip()]
+            if missing:
+                raise RadarValidationError(
+                    "New Development ingestion requires: " + ", ".join(missing) + "."
+                )
+            development = RadarDevelopmentService(self.db).get_or_create_candidate(
+                title=title,
+                development_type=development_type,
+                subject_key=subject_key,
+                effective_at=effective_at,
+                change_key=change_key,
+                announced_at=announced_at,
+            )
+
+        if source_item.development_id and source_item.development_id != development.id:
+            raise RadarValidationError("A Source Item cannot be reassigned to another Development.")
+
+        requested_model_ids = list(dict.fromkeys(model_ids))
+        development_model_ids = []
+        for model_id in requested_model_ids:
+            if self.db.get(Model, model_id) is None:
+                raise RadarValidationError(f"Unknown canonical Model {model_id}.")
+            link = self.db.execute(
+                select(DevelopmentModel).where(
+                    DevelopmentModel.development_id == development.id,
+                    DevelopmentModel.model_id == model_id,
+                )
+            ).scalar_one_or_none()
+            if link is None:
+                link = DevelopmentModel(development_id=development.id, model_id=model_id)
+                self.db.add(link)
+                self.db.flush()
+        development_model_ids = [
+            link.id
+            for link in self.db.execute(
+                select(DevelopmentModel)
+                .where(DevelopmentModel.development_id == development.id)
+                .order_by(DevelopmentModel.id)
+            ).scalars()
+        ]
+
+        claim_service = RadarClaimService(self.db)
+        claim_ids = []
+        for claim_input in claims:
+            claim_type = claim_input.claim_type
+            if claim_type == ClaimType.AI_EXPLANATION:
+                raise RadarValidationError("AI_EXPLANATION cannot be created by manual Source Item ingestion.")
+            existing = self._equivalent_claim(
+                development_id=development.id,
+                source_item_id=source_item.id,
+                claim_type=claim_type,
+                text=claim_input.text,
+                as_of=claim_input.as_of,
+                quote_span=claim_input.quote_span,
+                conditions=claim_input.conditions,
+            )
+            if existing is None:
+                existing = claim_service.create_claim(
+                    claim_type=claim_type,
+                    text=claim_input.text,
+                    as_of=claim_input.as_of,
+                    created_by=ClaimCreationMethod.USER,
+                    development_id=development.id,
+                    quote_span=claim_input.quote_span,
+                    conditions=claim_input.conditions,
+                    source_item_id=source_item.id,
+                )
+            claim_ids.append(existing.id)
+
+        source_item.development_id = development.id
+        source_item.processing_state = RadarItemState.PROCESSED
+        self.db.flush()
+
+        return {
+            "development": development,
+            "source_item": source_item,
+            "claim_ids": claim_ids,
+            "development_model_ids": development_model_ids,
+            "verification_level": derive_verification(self.db, development.id),
+            # Import locally because the AIL.2B intelligence service already
+            # depends on this module.
+            "freshness": self._freshness(development.id),
+        }
+
+    def _equivalent_claim(
+        self,
+        *,
+        development_id: str,
+        source_item_id: str,
+        claim_type: ClaimType,
+        text: str,
+        as_of: datetime,
+        quote_span: Optional[str],
+        conditions: Optional[dict],
+    ) -> Optional[Claim]:
+        rows = self.db.execute(
+            select(Claim)
+            .join(ClaimOrigin, ClaimOrigin.claim_id == Claim.id)
+            .where(
+                Claim.development_id == development_id,
+                ClaimOrigin.source_item_id == source_item_id,
+                Claim.status == ClaimStatus.ACTIVE,
+            )
+        ).scalars().all()
+        for claim in rows:
+            if (
+                claim.claim_type == claim_type
+                and claim.text == text.strip()
+                and _same_instant(claim.as_of, as_of)
+                and claim.quote_span == quote_span
+                and claim.conditions == conditions
+            ):
+                return claim
+        return None
+
+    def _freshness(self, development_id: str) -> str:
+        from app.services.radar_intelligence_service import RadarIntelligenceService
+
+        return RadarIntelligenceService(self.db).development_freshness(development_id).value
+
+
+def _same_instant(left: datetime, right: datetime) -> bool:
+    """Compare SQLite-naive and API-aware timestamps at the same instant."""
+    if left.tzinfo is None and right.tzinfo is not None:
+        right = right.astimezone(timezone.utc).replace(tzinfo=None)
+    elif left.tzinfo is not None and right.tzinfo is None:
+        left = left.astimezone(timezone.utc).replace(tzinfo=None)
+    return left == right
 
 
 def derive_verification(db: Session, development_id: str) -> str:
