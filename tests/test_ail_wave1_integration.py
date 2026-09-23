@@ -38,13 +38,14 @@ def test_final_chain_is_linear_and_has_one_head():
 
     script = ScriptDirectory.from_config(_cfg())
     assert [head.revision for head in script.get_revisions("heads")] == [
-        "ail_wave1_integration"
+        "ail2b_radar_intelligence"
     ]
     assert script.get_revision("8c3f6b2e9d14").down_revision == "5e1d8a4c7b30"
     assert script.get_revision("ef873dac62a1").down_revision == "8c3f6b2e9d14"
     assert script.get_revision("0f87701fabff").down_revision == "ef873dac62a1"
     assert script.get_revision("ail2a_radar_ledger").down_revision == "0f87701fabff"
     assert script.get_revision("ail_wave1_integration").down_revision == "ail2a_radar_ledger"
+    assert script.get_revision("ail2b_radar_intelligence").down_revision == "ail_wave1_integration"
 
 
 def test_fresh_and_ma8_2_upgrade_create_wave1_contracts(migration_db):
@@ -62,6 +63,15 @@ def test_fresh_and_ma8_2_upgrade_create_wave1_contracts(migration_db):
     project_columns = {column["name"] for column in inspect(migration_db).get_columns("projects")}
     assert "kind" not in project_columns
     assert "ail_evidence_opt_in" not in project_columns
+
+
+def test_wave1_upgrade_creates_ail2b_intelligence_tables(migration_db):
+    command.upgrade(_cfg(), "ail_wave1_integration")
+    assert not inspect(migration_db).has_table("attention_samples")
+    assert not inspect(migration_db).has_table("triage_decisions")
+    command.upgrade(_cfg(), "head")
+    inspector = inspect(migration_db)
+    assert {"development_terms", "attention_samples", "triage_decisions"} <= set(inspector.get_table_names())
 
     command.upgrade(_cfg(), "8c3f6b2e9d14")
     command.upgrade(_cfg(), "head")

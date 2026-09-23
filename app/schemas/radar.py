@@ -1,18 +1,24 @@
 from datetime import datetime
 from typing import List, Optional
 
+from decimal import Decimal
+
 from pydantic import BaseModel, Field
 
 from app.models.radar import (
     ClaimCreationMethod,
     ClaimStatus,
     ClaimType,
+    AttentionSample,
+    AttentionState,
     DevelopmentConceptProposedBy,
     DevelopmentConceptState,
     DevelopmentStatus,
+    RadarReasonCode,
     RadarItemState,
     RadarSourceClass,
     RadarSourceState,
+    TriageDecisionKind,
 )
 
 
@@ -125,3 +131,88 @@ class DevelopmentConceptRead(BaseModel):
 class DevelopmentConceptPropose(BaseModel):
     concept_id: str
     proposed_by: DevelopmentConceptProposedBy = DevelopmentConceptProposedBy.USER
+
+
+class ManualRadarItemCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=1000)
+    canonical_url: str = Field(min_length=1, max_length=2000)
+    normalized_content: str = Field(min_length=1)
+    external_identity: Optional[str] = Field(default=None, max_length=500)
+    published_at: Optional[datetime] = None
+    storage_ref: Optional[str] = Field(default=None, max_length=1000)
+
+
+class DevelopmentTermCreate(BaseModel):
+    term_id: str
+    created_by: ClaimCreationMethod = ClaimCreationMethod.USER
+
+
+class DevelopmentTermRead(BaseModel):
+    id: str
+    development_id: str
+    term_id: str
+    created_by: ClaimCreationMethod
+    created_at: datetime
+
+    class Config:
+        orm_mode = True
+
+
+class AttentionSampleCreate(BaseModel):
+    metric: str = Field(min_length=1, max_length=120)
+    value: Decimal
+    unit: Optional[str] = Field(default=None, max_length=40)
+    measurement_metadata: Optional[dict] = None
+    sampled_at: datetime
+    external_identity: Optional[str] = Field(default=None, max_length=500)
+    sample_hash: Optional[str] = Field(default=None, min_length=64, max_length=64)
+    development_id: Optional[str] = None
+    model_id: Optional[str] = None
+
+
+class AttentionSampleRead(BaseModel):
+    id: str
+    development_id: Optional[str] = None
+    model_id: Optional[str] = None
+    source_id: str
+    metric: str
+    value: Decimal
+    unit: Optional[str] = None
+    measurement_metadata: Optional[dict] = None
+    sampled_at: datetime
+    external_identity: Optional[str] = None
+    sample_hash: Optional[str] = None
+
+    class Config:
+        orm_mode = True
+
+
+class TriageDecisionCreate(BaseModel):
+    decision: TriageDecisionKind
+    rationale: Optional[str] = None
+    reason_codes: List[str] = Field(default_factory=list)
+    revisit_at: Optional[datetime] = None
+    revisit_condition: Optional[dict] = None
+
+
+class TriageDecisionRead(BaseModel):
+    id: str
+    user_id: str
+    development_id: Optional[str] = None
+    model_id: Optional[str] = None
+    decision: TriageDecisionKind
+    rationale: Optional[str] = None
+    reason_codes: List[str]
+    revisit_at: Optional[datetime] = None
+    revisit_condition: Optional[dict] = None
+    decided_at: datetime
+    superseded_by_id: Optional[str] = None
+
+    class Config:
+        orm_mode = True
+
+
+class AttentionStateRead(BaseModel):
+    subject_id: str
+    subject_type: str
+    state: AttentionState

@@ -3,7 +3,8 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from app.db.enums import ModelStatus
-from app.models.providers import Model
+from app.models.providers import Model, Provider, ProviderModel
+from app.db.enums import HealthStatus, ProviderType
 from app.models.radar import (
     ClaimCreationMethod,
     ClaimType,
@@ -157,11 +158,13 @@ def test_claim_requires_exactly_one_origin_and_ai_citations(db):
 
 def test_canonical_model_link_and_verification_derivation(db):
     model = Model(canonical_model_id="canonical:test", status=ModelStatus.ACTIVE)
-    db.add(model)
+    provider = Provider(type=ProviderType.DIRECT, name="Test Provider", health_status=HealthStatus.UP)
+    db.add_all([model, provider])
     development = make_development(db)
     from app.models.radar import DevelopmentModel
 
     db.add(DevelopmentModel(development_id=development.id, model_id=model.id))
+    db.add(ProviderModel(model_id=model.id, provider_id=provider.id, provider_model_id="canonical:test"))
     db.flush()
     assert derive_verification(db, development.id) == "Available"
 

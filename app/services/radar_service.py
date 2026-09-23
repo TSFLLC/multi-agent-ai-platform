@@ -10,8 +10,9 @@ from typing import ClassVar, Optional
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.db.enums import HealthStatus, ModelStatus
 from app.models.artifacts_eval import Evaluation
-from app.models.providers import Model
+from app.models.providers import Model, Provider, ProviderModel
 from app.models.radar import (
     Claim,
     ClaimCitation,
@@ -296,8 +297,25 @@ def derive_verification(db: Session, development_id: str) -> str:
         return "Independently Measured"
     if development_id and db.execute(select(DevelopmentModel).where(DevelopmentModel.development_id == development_id)).first():
         model_ids = db.execute(select(DevelopmentModel.model_id).where(DevelopmentModel.development_id == development_id)).scalars().all()
-        if any((db.get(Model, model_id) is not None and db.get(Model, model_id).status.value == "active") for model_id in model_ids):
+        available_rows = db.execute(
+            select(ProviderModel, Model, Provider)
+            .join(Model, Model.id == ProviderModel.model_id)
+            .join(Provider, Provider.id == ProviderModel.provider_id)
+            .where(ProviderModel.model_id.in_(model_ids))
+        ).all()
+        if any(
+            model.status == ModelStatus.ACTIVE
+            and provider.health_status != HealthStatus.DOWN
+            and provider_model.availability_status != HealthStatus.DOWN
+            for provider_model, model, provider in available_rows
+        ):
             return "Available"
+    if any(
+        claim.claim_type == ClaimType.FACT
+        and bool((claim.conditions or {}).get("documented_public_api"))
+        for claim in claims
+    ):
+        return "Available"
     if ClaimType.FACT in types:
         return "Documented"
     return "Claimed"

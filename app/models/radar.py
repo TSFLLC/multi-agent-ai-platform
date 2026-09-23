@@ -9,7 +9,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Optional
 
-from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, Integer, JSON, Numeric, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -234,6 +234,43 @@ class DevelopmentConceptProposedBy(str, Enum):
     USER = "user"
 
 
+class AttentionState(str, Enum):
+    UNKNOWN = "UNKNOWN"
+    LOW = "LOW"
+    RISING = "RISING"
+    HIGH = "HIGH"
+    SUSTAINED = "SUSTAINED"
+
+
+class TriageDecisionKind(str, Enum):
+    IGNORE = "IGNORE"
+    WATCH = "WATCH"
+    LEARN = "LEARN"
+    EXPERIMENT = "EXPERIMENT"
+    INVESTIGATE = "INVESTIGATE"
+
+
+class RadarReasonCode(str, Enum):
+    NEW_MODEL = "NEW_MODEL"
+    PRICE_CHANGE = "PRICE_CHANGE"
+    CAPABILITY_CHANGE = "CAPABILITY_CHANGE"
+    CONTEXT_CHANGE = "CONTEXT_CHANGE"
+    STATUS_CHANGE = "STATUS_CHANGE"
+    RELATED_TO_INTEREST = "RELATED_TO_INTEREST"
+    RELATED_TO_LEARNING_PLAN = "RELATED_TO_LEARNING_PLAN"
+    RELATED_TO_USED_MODEL = "RELATED_TO_USED_MODEL"
+    RELATED_TO_USED_PROVIDER = "RELATED_TO_USED_PROVIDER"
+    RELATED_TO_PLATFORM_COMPONENT = "RELATED_TO_PLATFORM_COMPONENT"
+    NEEDS_VERIFICATION = "NEEDS_VERIFICATION"
+    CONFLICTING_CLAIMS = "CONFLICTING_CLAIMS"
+    SOURCE_STALE = "SOURCE_STALE"
+    ATTENTION_RISING = "ATTENTION_RISING"
+    WATCH_TRIGGERED = "WATCH_TRIGGERED"
+    UNREVIEWED = "UNREVIEWED"
+    NEW_RESEARCH = "NEW_RESEARCH"
+    NEW_BENCHMARK = "NEW_BENCHMARK"
+
+
 class DevelopmentConcept(UUIDPrimaryKeyMixin, Base):
     __tablename__ = "development_concepts"
 
@@ -266,5 +303,127 @@ class DevelopmentConcept(UUIDPrimaryKeyMixin, Base):
             "development_id",
             "concept_id",
             name="uq_development_concepts_pair",
+        ),
+    )
+
+
+class DevelopmentTerm(UUIDPrimaryKeyMixin, Base):
+    __tablename__ = "development_terms"
+
+    development_id: Mapped[str] = mapped_column(
+        ForeignKey("developments.id", ondelete="CASCADE"), nullable=False
+    )
+    term_id: Mapped[str] = mapped_column(
+        ForeignKey("taxonomy_terms.id", ondelete="RESTRICT"), nullable=False
+    )
+    created_by: Mapped[ClaimCreationMethod] = mapped_column(
+        sa_enum(ClaimCreationMethod), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utcnow
+    )
+
+    __table_args__ = (
+        UniqueConstraint("development_id", "term_id", name="uq_development_terms_pair"),
+        Index("ix_development_terms_development_id", "development_id"),
+        Index("ix_development_terms_term_id", "term_id"),
+    )
+
+
+class AttentionSample(UUIDPrimaryKeyMixin, Base):
+    __tablename__ = "attention_samples"
+
+    development_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("developments.id", ondelete="CASCADE"), nullable=True
+    )
+    model_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("models.id", ondelete="RESTRICT"), nullable=True
+    )
+    source_id: Mapped[str] = mapped_column(
+        ForeignKey("radar_sources.id", ondelete="RESTRICT"), nullable=False
+    )
+    metric: Mapped[str] = mapped_column(String(120), nullable=False)
+    value: Mapped[float] = mapped_column(Numeric(20, 8), nullable=False)
+    unit: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    measurement_metadata: Mapped[Optional[dict]] = mapped_column(
+        "measurement_metadata_json", JSON, nullable=True
+    )
+    sampled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    external_identity: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    sample_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "((development_id IS NOT NULL) + (model_id IS NOT NULL)) = 1",
+            name="attention_sample_exactly_one_subject",
+        ),
+        Index("ix_attention_samples_development_sampled", "development_id", "sampled_at"),
+        Index("ix_attention_samples_model_sampled", "model_id", "sampled_at"),
+        Index(
+            "uq_attention_samples_development_identity",
+            "development_id",
+            "source_id",
+            "metric",
+            "sampled_at",
+            unique=True,
+            sqlite_where=text("development_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_attention_samples_model_identity",
+            "model_id",
+            "source_id",
+            "metric",
+            "sampled_at",
+            unique=True,
+            sqlite_where=text("model_id IS NOT NULL"),
+        ),
+    )
+
+
+class TriageDecision(UUIDPrimaryKeyMixin, Base):
+    __tablename__ = "triage_decisions"
+
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    development_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("developments.id", ondelete="CASCADE"), nullable=True
+    )
+    model_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("models.id", ondelete="RESTRICT"), nullable=True
+    )
+    decision: Mapped[TriageDecisionKind] = mapped_column(
+        sa_enum(TriageDecisionKind), nullable=False
+    )
+    rationale: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    reason_codes: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    revisit_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    revisit_condition: Mapped[Optional[dict]] = mapped_column(
+        "revisit_condition_json", JSON, nullable=True
+    )
+    decided_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utcnow
+    )
+    superseded_by_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("triage_decisions.id", ondelete="SET NULL"), nullable=True
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "((development_id IS NOT NULL) + (model_id IS NOT NULL)) = 1",
+            name="triage_decision_exactly_one_target",
+        ),
+        Index("ix_triage_decisions_user_decided", "user_id", "decided_at"),
+        Index(
+            "uq_triage_decisions_active_development",
+            "user_id",
+            "development_id",
+            unique=True,
+            sqlite_where=text("development_id IS NOT NULL AND superseded_by_id IS NULL"),
+        ),
+        Index(
+            "uq_triage_decisions_active_model",
+            "user_id",
+            "model_id",
+            unique=True,
+            sqlite_where=text("model_id IS NOT NULL AND superseded_by_id IS NULL"),
         ),
     )

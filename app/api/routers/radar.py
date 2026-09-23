@@ -10,7 +10,20 @@ from app.auth import get_current_user
 from app.authz import require_platform_admin
 from app.errors import NotFoundError
 from app.models.identity import User
-from app.models.radar import Claim, Development, RadarItem, RadarSource, RadarSourceState
+from app.models.providers import ProviderModel
+from app.models.radar import (
+    AttentionSample,
+    Claim,
+    ClaimOrigin,
+    Development,
+    DevelopmentConcept,
+    DevelopmentModel,
+    DevelopmentTerm,
+    RadarItem,
+    RadarSource,
+    RadarSourceState,
+    TriageDecisionKind,
+)
 from app.schemas.radar import (
     ClaimRead,
     DevelopmentRead,
@@ -19,7 +32,16 @@ from app.schemas.radar import (
     RadarSourceCreate,
     RadarSourceRead,
     RadarSourceReview,
+    AttentionSampleCreate,
+    AttentionSampleRead,
+    AttentionStateRead,
+    DevelopmentTermCreate,
+    DevelopmentTermRead,
+    ManualRadarItemCreate,
+    TriageDecisionCreate,
+    TriageDecisionRead,
 )
+from app.services.radar_intelligence_service import RadarIntelligenceService, create_manual_radar_item
 from app.services.radar_service import RadarClaimService, RadarSourceService, derive_verification
 
 router = APIRouter(prefix="/radar", tags=["radar"])
@@ -81,6 +103,31 @@ def list_items(
     return list(db.execute(stmt).scalars().all())
 
 
+@router.post("/sources/{source_id}/items/manual", response_model=RadarItemRead, status_code=201)
+def create_manual_item(
+    source_id: str,
+    body: ManualRadarItemCreate,
+    db: Session = Depends(get_db),
+    _admin: User = Depends(require_platform_admin),
+):
+    source = db.get(RadarSource, source_id)
+    if source is None:
+        raise NotFoundError(f"Radar source {source_id} not found.")
+    item = create_manual_radar_item(
+        db,
+        source=source,
+        title=body.title,
+        canonical_url=body.canonical_url,
+        normalized_content=body.normalized_content,
+        external_identity=body.external_identity,
+        published_at=body.published_at,
+        storage_ref=body.storage_ref,
+    )
+    db.commit()
+    db.refresh(item)
+    return item
+
+
 def _development_read(db: Session, development: Development) -> DevelopmentRead:
     return DevelopmentRead(
         id=development.id,
@@ -110,6 +157,105 @@ def get_development(development_id: str, db: Session = Depends(get_db), _user: U
     return _development_read(db, development)
 
 
+@router.get("/developments/{development_id}/intelligence")
+def get_development_intelligence(
+    development_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    development = db.get(Development, development_id)
+    if development is None:
+        raise NotFoundError(f"Development {development_id} not found.")
+    service = RadarIntelligenceService(db)
+    claims = db.execute(
+        select(Claim)
+        .where(Claim.development_id == development_id)
+        .order_by(Claim.as_of.desc(), Claim.created_at.desc())
+    ).scalars().all()
+    claim_rows = []
+    for claim in claims:
+        origin = db.execute(
+            select(ClaimOrigin).where(ClaimOrigin.claim_id == claim.id)
+        ).scalar_one_or_none()
+        source_item = db.get(RadarItem, origin.source_item_id) if origin and origin.source_item_id else None
+        claim_rows.append({
+            "id": claim.id,
+            "claim_type": claim.claim_type,
+            "text": claim.text,
+            "development_id": claim.development_id,
+            "model_id": claim.model_id,
+            "quote_span": claim.quote_span,
+            "conditions": claim.conditions,
+            "as_of": claim.as_of,
+            "created_by": claim.created_by,
+            "status": claim.status,
+            "origin": {
+                "kind": origin.origin_kind if origin else None,
+                "source_item_id": origin.source_item_id if origin else None,
+                "evaluation_id": origin.evaluation_id if origin else None,
+                "agent_run_id": origin.agent_run_id if origin else None,
+            },
+            "source_item": {
+                "id": source_item.id,
+                "title": source_item.title,
+                "canonical_url": source_item.canonical_url,
+                "published_at": source_item.published_at,
+                "retrieved_at": source_item.retrieved_at,
+                "content_hash": source_item.content_hash,
+            } if source_item else None,
+        })
+    model_ids = list(db.execute(
+        select(DevelopmentModel.model_id).where(DevelopmentModel.development_id == development_id)
+    ).scalars())
+    provider_ids = list(db.execute(
+        select(ProviderModel.provider_id).where(ProviderModel.model_id.in_(model_ids))
+    ).scalars()) if model_ids else []
+    concept_links = db.execute(
+        select(DevelopmentConcept).where(DevelopmentConcept.development_id == development_id)
+    ).scalars().all()
+    term_links = db.execute(
+        select(DevelopmentTerm).where(DevelopmentTerm.development_id == development_id)
+    ).scalars().all()
+    samples = db.execute(
+        select(AttentionSample)
+        .where(AttentionSample.development_id == development_id)
+        .order_by(AttentionSample.sampled_at.desc())
+    ).scalars().all()
+    current_triage = service.current_triage(user.id, development_id=development_id)
+    return {
+        "development": _development_read(db, development),
+        "claims": claim_rows,
+        "model_ids": model_ids,
+        "provider_ids": sorted(set(provider_ids)),
+        "concept_links": [
+            {"id": link.id, "concept_id": link.concept_id, "state": link.state, "proposed_by": link.proposed_by}
+            for link in concept_links
+        ],
+        "term_links": [
+            {"id": link.id, "term_id": link.term_id, "created_by": link.created_by}
+            for link in term_links
+        ],
+        "verification_level": derive_verification(db, development_id),
+        "freshness": service.development_freshness(development_id).value,
+        "attention_state": service.attention_state(development_id=development_id).value,
+        "reason_codes": [code.value for code in service.relevance_reason_codes(user.id, development_id)],
+        "current_triage": {
+            "id": current_triage.id,
+            "decision": current_triage.decision,
+            "rationale": current_triage.rationale,
+            "reason_codes": current_triage.reason_codes,
+            "revisit_at": current_triage.revisit_at,
+            "revisit_condition": current_triage.revisit_condition,
+            "decided_at": current_triage.decided_at,
+        } if current_triage else None,
+        "attention_samples": [
+            {"id": sample.id, "source_id": sample.source_id, "metric": sample.metric, "value": sample.value,
+             "unit": sample.unit, "sampled_at": sample.sampled_at, "external_identity": sample.external_identity}
+            for sample in samples
+        ],
+    }
+
+
 @router.get("/developments/{development_id}/claims", response_model=List[ClaimRead])
 def list_development_claims(
     development_id: str, db: Session = Depends(get_db), _user: User = Depends(get_current_user)
@@ -125,6 +271,110 @@ def list_development_claims(
         .scalars()
         .all()
     )
+
+
+@router.post("/developments/{development_id}/terms", response_model=DevelopmentTermRead, status_code=201)
+def add_development_term(
+    development_id: str,
+    body: DevelopmentTermCreate,
+    db: Session = Depends(get_db),
+    _admin: User = Depends(require_platform_admin),
+):
+    link = RadarIntelligenceService(db).add_term(development_id, body.term_id, body.created_by.value)
+    db.commit()
+    db.refresh(link)
+    return link
+
+
+@router.post("/attention", response_model=AttentionSampleRead, status_code=201)
+def create_attention_sample(
+    source_id: str,
+    body: AttentionSampleCreate,
+    db: Session = Depends(get_db),
+    _admin: User = Depends(require_platform_admin),
+):
+    sample = RadarIntelligenceService(db).create_attention_sample(
+        source_id=source_id,
+        metric=body.metric,
+        value=body.value,
+        sampled_at=body.sampled_at,
+        development_id=body.development_id,
+        model_id=body.model_id,
+        unit=body.unit,
+        measurement_metadata=body.measurement_metadata,
+        external_identity=body.external_identity,
+        sample_hash=body.sample_hash,
+    )
+    db.commit()
+    db.refresh(sample)
+    return sample
+
+
+@router.get("/developments/{development_id}/attention", response_model=AttentionStateRead)
+def get_development_attention(
+    development_id: str,
+    db: Session = Depends(get_db),
+    _user: User = Depends(get_current_user),
+):
+    state = RadarIntelligenceService(db).attention_state(development_id=development_id)
+    return AttentionStateRead(subject_id=development_id, subject_type="development", state=state)
+
+
+@router.get("/developments/{development_id}/triage", response_model=Optional[TriageDecisionRead])
+def get_development_triage(
+    development_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    return RadarIntelligenceService(db).current_triage(user.id, development_id=development_id)
+
+
+@router.get("/developments/{development_id}/triage/history", response_model=List[TriageDecisionRead])
+def get_development_triage_history(
+    development_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    return RadarIntelligenceService(db).triage_history(user.id, development_id=development_id)
+
+
+@router.post("/developments/{development_id}/triage", response_model=TriageDecisionRead, status_code=201)
+def create_development_triage(
+    development_id: str,
+    body: TriageDecisionCreate,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    triage = RadarIntelligenceService(db).create_triage(
+        user_id=user.id,
+        development_id=development_id,
+        decision=body.decision,
+        rationale=body.rationale,
+        reason_codes=body.reason_codes,
+        revisit_at=body.revisit_at,
+        revisit_condition=body.revisit_condition,
+    )
+    db.commit()
+    db.refresh(triage)
+    return triage
+
+
+@router.post("/developments/{development_id}/reviewed", response_model=TriageDecisionRead, status_code=201)
+def mark_development_reviewed(
+    development_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    triage = RadarIntelligenceService(db).create_triage(
+        user_id=user.id,
+        development_id=development_id,
+        decision=TriageDecisionKind.IGNORE,
+        rationale="Reviewed without a further action.",
+        reason_codes=["UNREVIEWED"],
+    )
+    db.commit()
+    db.refresh(triage)
+    return triage
 
 
 @router.post("/developments/{development_id}/merge", response_model=DevelopmentRead)
