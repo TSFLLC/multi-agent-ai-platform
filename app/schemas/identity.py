@@ -1,6 +1,6 @@
 from pydantic import BaseModel
 
-from app.db.enums import OrgRole, ProjectRole
+from app.db.enums import OrgRole, ProjectKind, ProjectRole
 from app.schemas.common import ORMModel, TimestampedRead
 
 
@@ -20,6 +20,8 @@ class ProjectCreate(BaseModel):
 class ProjectRead(TimestampedRead):
     org_id: str
     name: str
+    kind: ProjectKind
+    ail_evidence_opt_in: bool
 
 
 class UserRead(TimestampedRead):

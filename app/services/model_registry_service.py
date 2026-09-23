@@ -1,4 +1,4 @@
-"""Model Registry Service — Section 11, 13.3, MA2.
+"""Model Registry Service — Section 11, 13.3, MA2; AIL.1B change history.
 
 Talks only to the generic ``ProviderAdapter`` interface (Section 13.1) —
 never imports or references ``OpenRouterAdapter`` by name, never
@@ -10,6 +10,15 @@ then happen without further network I/O, and commit once at the end. A
 network/auth failure leaves the last-known-good catalog completely
 untouched — only a ``provider_catalog_refreshes`` row records the
 failure.
+
+AIL.1B addition: a catalog-refresh ``ProviderModelSnapshot`` is written only
+when it actually differs from the previous catalog-refresh snapshot for that
+``provider_model_id`` — a no-op refresh creates no row at all, and a genuine
+change is tagged with every dimension that changed
+(``new``/``price``/``context``/``capability``/``status``). This is a
+separate concern from ``app.model_resolution.freeze_snapshot``'s
+execution-time, always-write-a-fresh-row behavior, which this module never
+touches — see ``ProviderModelSnapshot.source`` on the model.
 """
 
 from datetime import datetime, timezone
@@ -18,7 +27,14 @@ from typing import Any, Dict, List, Optional, Tuple
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.db.enums import CatalogRefreshStatus, ModelStatus, PricingClassification, ToolCallingSupport
+from app.db.enums import (
+    CatalogRefreshStatus,
+    ModelStatus,
+    PricingClassification,
+    SnapshotChangeKind,
+    SnapshotSource,
+    ToolCallingSupport,
+)
 from app.domain.pricing import classify_pricing
 from app.models.providers import (
     Model,
@@ -70,9 +86,12 @@ class ModelRegistryService:
                 added += 1
             else:
                 updated += 1
-            self._create_snapshot(provider_model, model, provider)
             if model.status != ModelStatus.ACTIVE:
                 model.status = ModelStatus.ACTIVE  # rediscovered after a prior refresh missed it
+            # Status must be settled *before* diffing so a rediscovery is
+            # correctly tagged STATUS rather than compared against the
+            # stale (about to be corrected) value.
+            self._create_catalog_snapshot_if_changed(provider_model, model, provider)
 
         unavailable = self._mark_missing_unavailable(provider, seen_provider_model_ids)
 
@@ -175,30 +194,89 @@ class ModelRegistryService:
 
         return provider_model, was_created
 
-    def _create_snapshot(self, provider_model: ProviderModel, model: Model, provider: Provider) -> None:
-        capability_snapshot = {
+    @staticmethod
+    def _capability_facts(model: Model) -> Dict[str, Any]:
+        return {
             "tool_calling_support": (
                 model.tool_calling_support.value if model.tool_calling_support else None
             ),
             "structured_output_support": model.structured_output_support,
             "vision_capability": model.vision_capability,
         }
+
+    def _latest_catalog_snapshot(self, provider_model_id: str) -> Optional[ProviderModelSnapshot]:
+        return self.db.execute(
+            select(ProviderModelSnapshot)
+            .where(
+                ProviderModelSnapshot.provider_model_id == provider_model_id,
+                ProviderModelSnapshot.source == SnapshotSource.CATALOG_REFRESH,
+            )
+            .order_by(ProviderModelSnapshot.snapshotted_at.desc(), ProviderModelSnapshot.id.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+
+    def _create_catalog_snapshot_if_changed(
+        self, provider_model: ProviderModel, model: Model, provider: Provider
+    ) -> Optional[ProviderModelSnapshot]:
+        """AIL.1B — write a catalog-history snapshot only when something
+        genuinely differs from the previous catalog-refresh snapshot for
+        this offering; a no-op refresh creates no row (never a fake
+        change-history event), and old rows are never rewritten or
+        backfilled with a guessed classification.
+
+        Every dimension that changed is recorded (not just the first one
+        found) — the smallest deterministic representation of "what
+        changed," never a single opaque score.
+        """
+        capability_facts = self._capability_facts(model)
+        status_value = model.status.value
+        previous = self._latest_catalog_snapshot(provider_model.id)
+
+        if previous is None:
+            change_kinds = [SnapshotChangeKind.NEW.value]
+        else:
+            change_kinds = []
+            if (
+                previous.pricing_input_per_mtok,
+                previous.pricing_output_per_mtok,
+                previous.currency,
+            ) != (provider_model.cost_input_per_mtok, provider_model.cost_output_per_mtok, provider_model.currency):
+                change_kinds.append(SnapshotChangeKind.PRICE.value)
+            if previous.context_window != model.context_window:
+                change_kinds.append(SnapshotChangeKind.CONTEXT.value)
+            previous_capability = previous.capability_snapshot or {}
+            previous_facts = {key: previous_capability.get(key) for key in capability_facts}
+            if previous_facts != capability_facts:
+                change_kinds.append(SnapshotChangeKind.CAPABILITY.value)
+            if previous_capability.get("model_status") != status_value:
+                change_kinds.append(SnapshotChangeKind.STATUS.value)
+            if not change_kinds:
+                return None  # genuine no-op refresh — no fake history event
+
         snapshot = ProviderModelSnapshot(
             provider_model_id=provider_model.id,
             model_id=model.id,
             provider_id=provider.id,
             pricing_input_per_mtok=provider_model.cost_input_per_mtok,
             pricing_output_per_mtok=provider_model.cost_output_per_mtok,
+            currency=provider_model.currency,
             context_window=model.context_window,
-            capability_snapshot=capability_snapshot,
+            capability_snapshot={**capability_facts, "model_status": status_value},
+            source=SnapshotSource.CATALOG_REFRESH,
+            change_kinds=change_kinds,
         )
         self.db.add(snapshot)
+        self.db.flush()
+        return snapshot
 
     def _mark_missing_unavailable(self, provider: Provider, seen_provider_model_ids: set) -> int:
         """A model that disappears from a provider's catalog is marked
         unavailable, not deleted (Section 13.3) — historical Agent Runs
         still resolve which model/pricing they used via their frozen
-        provider_model_snapshot."""
+        provider_model_snapshot. AIL.1B: this transition is itself a
+        genuine registry change, so it is recorded in catalog history too
+        (``change_kinds=["status"]``) — a model disappearing from the
+        descriptor list never silently skips the change feed."""
         existing = (
             self.db.execute(select(ProviderModel).where(ProviderModel.provider_id == provider.id))
             .scalars()
@@ -209,9 +287,11 @@ class ModelRegistryService:
         for provider_model in existing:
             if provider_model.id in seen_provider_model_ids:
                 continue
-            if provider_model.model.status != ModelStatus.UNAVAILABLE:
-                provider_model.model.status = ModelStatus.UNAVAILABLE
+            model = provider_model.model
+            if model.status != ModelStatus.UNAVAILABLE:
+                model.status = ModelStatus.UNAVAILABLE
                 count += 1
+                self._create_catalog_snapshot_if_changed(provider_model, model, provider)
         return count
 
     # -- Model selection API (Section 11) ------------------------------------

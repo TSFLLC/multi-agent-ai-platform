@@ -444,3 +444,157 @@ class EvaluationFinding(str, enum.Enum):
 class CatalogRefreshStatus(str, enum.Enum):
     SUCCESS = "success"
     FAILED = "failed"
+
+
+# --- AIL.1A Learning Foundation (docs/ail-learning-spec-v1.md Sec 15-18) ---
+#
+# ``taxonomy_terms.vocabulary`` is deliberately NOT an enum here (AIL
+# architecture reconciliation, frozen contract #3): it is a shared,
+# data-driven vocabulary across AIL.1A/AIL.1B/AIL.2A, extended by other
+# slices without a schema change. Everything below is AIL.1A's own closed
+# vocabulary and is safe to enforce as a real enum.
+
+
+class ConceptLevel(str, enum.Enum):
+    """Shared by ``concepts.level`` and ``learner_profiles.level`` — a
+    learner self-selects a starting level on the same scale a concept is
+    rated on, so depth-filtering (spec Sec 17.3) is a plain ordinal
+    comparison, not a second vocabulary to keep in sync."""
+
+    FOUNDATIONAL = "foundational"
+    PRACTITIONER = "practitioner"
+    ADVANCED = "advanced"
+
+
+class ConceptKind(str, enum.Enum):
+    """Selects the default evidence-requirement shape (spec Sec 18.3)."""
+
+    DEFINITIONAL = "definitional"
+    MECHANISM = "mechanism"
+    OPERATIONAL = "operational"
+    ARCHITECTURAL = "architectural"
+
+
+class ConceptRelationType(str, enum.Enum):
+    """Deliberately few (spec Sec 15.2) — every extra edge type is a
+    maintenance burden with no planner/navigation payoff."""
+
+    PREREQUISITE = "prerequisite"
+    PART_OF = "part_of"
+    RELATED = "related"
+
+
+class ContentOrigin(str, enum.Enum):
+    HUMAN = "human"
+    AI_DRAFTED_REVIEWED = "ai_drafted_reviewed"
+    AI_DRAFTED_UNREVIEWED = "ai_drafted_unreviewed"
+
+
+class ChangeSeverity(str, enum.Enum):
+    """Governs whether a new concept version preserves DEMONSTRATED or
+    adds the CHANGED overlay (spec Sec 18.4 rule 5)."""
+
+    MINOR = "minor"
+    MATERIAL = "material"
+
+
+class LearningItemType(str, enum.Enum):
+    RESOURCE = "resource"
+    EXERCISE = "exercise"
+    CHECK_QUESTION = "check_question"
+    SCENARIO = "scenario"
+    LAB = "lab"
+    OBSERVATION_TASK = "observation_task"
+
+
+class GradingMode(str, enum.Enum):
+    """Shared by ``learning_items.grading_mode`` and
+    ``learning_evidence.grader`` — the same four-way vocabulary grades a
+    learning item and the evidence it produced (spec Sec 18.3/18.4)."""
+
+    DETERMINISTIC = "deterministic"
+    AI_RUBRIC = "ai_rubric"
+    HUMAN = "human"
+    SELF = "self"
+
+
+class LearnerDepth(str, enum.Enum):
+    SURVEY = "survey"
+    WORKING = "working"
+    DEEP = "deep"
+
+
+class EvidenceType(str, enum.Enum):
+    """Deliberately excludes ``experiment`` — AIL.3 (Experiment Lab, out
+    of AIL.1A's ownership) adds it as an enum-extension migration once the
+    ``experiments`` table it references exists, the same forward-compat
+    pattern already used by ``dc6427b0a95a_ma1_add_internal_test_job_type``."""
+
+    LESSON_COMPLETED = "lesson_completed"
+    KNOWLEDGE_CHECK = "knowledge_check"
+    OBSERVATION = "observation"
+    LAB = "lab"
+    INTERPRETATION = "interpretation"
+    SELF_REPORT = "self_report"
+
+
+class QuestionOrigin(str, enum.Enum):
+    REVIEWED = "reviewed"
+    GENERATED = "generated"
+
+
+class EvidenceRefType(str, enum.Enum):
+    """What ``learning_evidence.ref_id`` points at. No DB-level FK is
+    possible across these variable target tables (same trade-off already
+    accepted by ``execution_events.artifact_refs_json`` and
+    ``evaluation_criterion_results.evidence_refs``) — validated at the
+    service layer instead. Points at the LIVE MA6 evaluation engine
+    (``evaluation_runs``), never the legacy unused ``evaluations`` table."""
+
+    AGENT_RUN = "agent_run"
+    EVALUATION_RUN = "evaluation_run"
+    MODEL_ROUTING_DECISION = "model_routing_decision"
+    TOOL_CALL = "tool_call"
+    WORKFLOW_RUN = "workflow_run"
+    HUMAN = "human"
+    NONE = "none"
+
+
+class PlanItemState(str, enum.Enum):
+    PROPOSED = "proposed"
+    PLANNED = "planned"
+    SKIPPED = "skipped"
+    DONE = "done"
+    REJECTED = "rejected"
+
+
+class PlanItemOrigin(str, enum.Enum):
+    """Deliberately excludes ``radar`` — Radar-originated plan proposals
+    need ``learning_plan_items.development_id``, which this slice does not
+    add (frozen contract #6: no unvalidated reference to a Radar-owned
+    table). Add ``radar`` alongside ``development_id`` in the coordinated
+    AIL.1/AIL.2 integration migration."""
+
+    PLANNER = "planner"
+    USER = "user"
+    PROFESSOR = "professor"
+
+# --- Provider model snapshot provenance (AIL.1B addition) --------------------
+
+
+class SnapshotSource(str, enum.Enum):
+    EXECUTION_FREEZE = "execution_freeze"
+    CATALOG_REFRESH = "catalog_refresh"
+    LEGACY_UNKNOWN = "legacy_unknown"
+
+
+class SnapshotChangeKind(str, enum.Enum):
+    NEW = "new"
+    PRICE = "price"
+    CONTEXT = "context"
+    CAPABILITY = "capability"
+    STATUS = "status"
+
+class ProjectKind(str, enum.Enum):
+    STANDARD = "standard"
+    SYSTEM_AIL = "system_ail"

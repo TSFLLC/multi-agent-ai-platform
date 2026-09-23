@@ -79,7 +79,14 @@ def _counts(engine):
         return {
             table: conn.execute(text(f"SELECT count(*) FROM {table}")).scalar()
             for table in ("workflow_nodes", "workflow_edges", "workflow_node_runs", "agent_runs", "job_queue")
-        }
+    }
+
+
+def _add_wave1_orm_compat_columns(engine):
+    """Historical MA7.5a fixtures use the current ORM before Wave-1."""
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE projects ADD COLUMN kind VARCHAR(20) NOT NULL DEFAULT 'standard'"))
+        conn.execute(text("ALTER TABLE projects ADD COLUMN ail_evidence_opt_in BOOLEAN NOT NULL DEFAULT 0"))
 
 
 def _populate(engine, label):
@@ -134,6 +141,7 @@ def test_revision_chain_places_this_migration_directly_after_a3c9e17b5d42():
 def test_upgrade_widens_only_the_node_type_check_and_keeps_the_repair_loop_check(disposable_db):
     _, engine = disposable_db
     command.upgrade(_cfg(), PREVIOUS_HEAD)
+    _add_wave1_orm_compat_columns(engine)
     graph, _run = _populate(engine, "chk")
     version_id = _version_id(engine)
     before = _ddl(engine)
@@ -172,6 +180,7 @@ def test_upgrade_widens_only_the_node_type_check_and_keeps_the_repair_loop_check
 def test_a_populated_database_keeps_every_node_edge_and_node_run(disposable_db):
     _, engine = disposable_db
     command.upgrade(_cfg(), PREVIOUS_HEAD)
+    _add_wave1_orm_compat_columns(engine)
     _populate(engine, "pop")
     before = _counts(engine)
     assert before["workflow_edges"] == 4 and before["workflow_node_runs"] == 4  # a real graph, really started
@@ -193,6 +202,7 @@ def test_the_real_uat_path_bd27cdb01c15_straight_to_the_new_revision(disposable_
     migration's open transaction). Populated, as a UAT database is."""
     _, engine = disposable_db
     command.upgrade(_cfg(), UAT_HEAD)
+    _add_wave1_orm_compat_columns(engine)
     _populate(engine, "uat")
     before = _counts(engine)
 
@@ -208,6 +218,7 @@ def test_the_real_uat_path_bd27cdb01c15_straight_to_the_new_revision(disposable_
 def test_downgrade_refuses_while_an_evaluation_node_exists_and_changes_nothing(disposable_db):
     _, engine = disposable_db
     command.upgrade(_cfg(), REVISION)
+    _add_wave1_orm_compat_columns(engine)
     _populate(engine, "dg1")
     with engine.begin() as conn:
         conn.execute(text("PRAGMA foreign_keys=ON"))
@@ -224,6 +235,7 @@ def test_downgrade_refuses_while_an_evaluation_node_exists_and_changes_nothing(d
 def test_downgrade_without_evaluation_nodes_restores_the_narrow_check_and_keeps_data(disposable_db):
     _, engine = disposable_db
     command.upgrade(_cfg(), REVISION)
+    _add_wave1_orm_compat_columns(engine)
     _populate(engine, "dg2")
     before = _counts(engine)
 
@@ -242,6 +254,7 @@ def test_downgrade_without_evaluation_nodes_restores_the_narrow_check_and_keeps_
 def test_upgrade_downgrade_upgrade_round_trip_is_stable(disposable_db):
     _, engine = disposable_db
     command.upgrade(_cfg(), REVISION)
+    _add_wave1_orm_compat_columns(engine)
     _populate(engine, "rt")
     first_ddl, counts = _ddl(engine), _counts(engine)
 
@@ -299,6 +312,7 @@ def test_negative_control_a_naive_rebuild_under_foreign_keys_on_is_destructive(d
     and this test is the alarm."""
     db_path, engine = disposable_db
     command.upgrade(_cfg(), PREVIOUS_HEAD)
+    _add_wave1_orm_compat_columns(engine)
     _populate(engine, "naive")
     before = _counts(engine)
     engine.dispose()

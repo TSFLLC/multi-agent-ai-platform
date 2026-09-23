@@ -9,11 +9,11 @@ item 1 / Appendix D item 7).
 from datetime import datetime
 from typing import List, Optional
 
-from sqlalchemy import DateTime, ForeignKey, String, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, ForeignKey, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
-from app.db.enums import OrgRole, ProjectRole
+from app.db.enums import OrgRole, ProjectKind, ProjectRole
 from app.db.mixins import CreatedAtMixin, UUIDPrimaryKeyMixin, utcnow
 from app.db.types import sa_enum
 
@@ -48,6 +48,8 @@ class Project(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     org_id: Mapped[str] = mapped_column(ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     policy_settings: Mapped[Optional[dict]] = mapped_column("policy_settings_json", nullable=True)
+    kind: Mapped[ProjectKind] = mapped_column(sa_enum(ProjectKind), nullable=False, default=ProjectKind.STANDARD, deferred=True)
+    ail_evidence_opt_in: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0", deferred=True)
 
     organization: Mapped["Organization"] = relationship(back_populates="projects")
     memberships: Mapped[List["ProjectMembership"]] = relationship(back_populates="project")

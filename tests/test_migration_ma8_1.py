@@ -50,6 +50,12 @@ def disposable_db(tmp_path, monkeypatch):
     engine.dispose()
 
 
+def _add_wave1_orm_compat_columns(engine):
+    """Allow the historical MA8.1 fixture to use the current Project ORM."""
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE projects ADD COLUMN kind VARCHAR(20) NOT NULL DEFAULT 'standard'"))
+        conn.execute(text("ALTER TABLE projects ADD COLUMN ail_evidence_opt_in BOOLEAN NOT NULL DEFAULT 0"))
+
 def _columns(engine):
     return {c["name"] for c in inspect(engine).get_columns("model_routing_decisions")}
 
@@ -111,6 +117,7 @@ def test_revision_follows_ma7_5a_in_the_chain():
 def test_upgrade_adds_nullable_columns_and_keeps_existing_rows(disposable_db):
     engine = disposable_db
     command.upgrade(_cfg(), PREVIOUS_HEAD)
+    _add_wave1_orm_compat_columns(engine)
     assert not (_columns(engine) & NEW_COLUMNS)
     decision_id, call_id = _seed_decision_referenced_by_a_model_call(engine)
 
@@ -140,6 +147,7 @@ def test_upgrade_adds_nullable_columns_and_keeps_existing_rows(disposable_db):
 def test_downgrade_drops_only_the_new_columns_without_losing_referenced_rows(disposable_db):
     engine = disposable_db
     command.upgrade(_cfg(), PREVIOUS_HEAD)
+    _add_wave1_orm_compat_columns(engine)
     decision_id, call_id = _seed_decision_referenced_by_a_model_call(engine)
     command.upgrade(_cfg(), REVISION)
 

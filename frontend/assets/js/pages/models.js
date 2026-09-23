@@ -162,7 +162,7 @@ function buildModelTable(state, provider) {
   }
 
   const table = el("table", {}, [
-    el("thead", {}, el("tr", {}, [el("th", {}, "Model"), el("th", {}, "Pricing"), el("th", {}, "Status"), el("th", {}, "Context"), el("th", {}, "Refreshed")])),
+    el("thead", {}, el("tr", {}, [el("th", {}, "Model"), el("th", {}, "Pricing"), el("th", {}, "Status"), el("th", {}, "Context"), el("th", {}, "Refreshed"), el("th", {})])),
     el(
       "tbody",
       {},
@@ -173,6 +173,7 @@ function buildModelTable(state, provider) {
           el("td", {}, el("span", { class: m.model_status === "active" ? "badge badge-done" : "badge badge-neutral" }, m.model_status)),
           el("td", {}, m.context_window ? m.context_window.toLocaleString("en-US") : "—"),
           el("td", {}, formatDateTime(m.last_refreshed_at)),
+          el("td", {}, el("a", { href: `#/models/${m.id}/explore`, class: "button-link small" }, "Explore")),
         ])
       )
     ),

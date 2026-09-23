@@ -51,10 +51,25 @@ def _policy_rows(engine):
         ).all()
 
 
-def test_revision_is_the_new_head_directly_after_ma8_1():
+def _add_wave1_orm_compat_columns(engine):
+    """The historical MA8.2 fixture uses the current ORM before Wave-1.
+
+    Add only the later Project columns needed by that ORM; the actual
+    Wave-1 migration remains the owner of these columns in production.
+    """
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE projects ADD COLUMN kind VARCHAR(20) NOT NULL DEFAULT 'standard'"))
+        conn.execute(text("ALTER TABLE projects ADD COLUMN ail_evidence_opt_in BOOLEAN NOT NULL DEFAULT 0"))
+
+def test_ma8_2_is_followed_by_ail1a_in_the_integrated_chain():
+    """MA8.2 must be a direct, uncontested descendant of MA8.1 — no
+    branching. This intentionally no longer asserts MA8.2 is the *global*
+    chain head: AIL.1B (0f87701fabff) is a later, additive migration on top
+    of it, which is expected and does not touch MA8.2's own schema."""
     script = ScriptDirectory.from_config(_cfg())
-    assert script.get_revision(REVISION).down_revision == PREVIOUS
-    assert script.get_current_head() == REVISION
+    revision = script.get_revision(REVISION)
+    assert revision.down_revision == PREVIOUS
+    assert script.get_revision(REVISION).nextrev == frozenset({"ef873dac62a1"})
 
 
 def _set_status(engine, status):
@@ -65,6 +80,7 @@ def _set_status(engine, status):
 def test_upgrade_adds_indexes_and_seeds_v1_inactive_so_routing_stays_ma8_1(disposable_db):
     engine = disposable_db
     command.upgrade(_cfg(), PREVIOUS)
+    _add_wave1_orm_compat_columns(engine)
     _decision_id, call_id = _seed_decision_referenced_by_a_model_call(engine)
     command.upgrade(_cfg(), REVISION)
 
@@ -95,6 +111,7 @@ def test_upgrade_adds_indexes_and_seeds_v1_inactive_so_routing_stays_ma8_1(dispo
 def test_downgrade_refuses_while_a_decision_references_v1_and_otherwise_reverts(disposable_db):
     engine = disposable_db
     command.upgrade(_cfg(), PREVIOUS)
+    _add_wave1_orm_compat_columns(engine)
     _seed_decision_referenced_by_a_model_call(engine)
     command.upgrade(_cfg(), REVISION)
 

@@ -16,6 +16,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     Numeric,
     String,
@@ -24,7 +25,14 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
-from app.db.enums import CatalogRefreshStatus, HealthStatus, ModelStatus, ProviderType, ToolCallingSupport
+from app.db.enums import (
+    CatalogRefreshStatus,
+    HealthStatus,
+    ModelStatus,
+    ProviderType,
+    SnapshotSource,
+    ToolCallingSupport,
+)
 from app.db.mixins import CreatedAtMixin, UUIDPrimaryKeyMixin, utcnow
 from app.db.types import sa_enum
 from app.domain.pricing import classify_pricing
@@ -162,15 +170,38 @@ class ProviderModel(UUIDPrimaryKeyMixin, Base):
 
 
 class ProviderModelSnapshot(UUIDPrimaryKeyMixin, Base):
-    """Immutable point-in-time copy for reproducibility — Section 24.4 #8.
+    """Immutable point-in-time copy — Section 24.4 #8, extended AIL.1B.
 
-    ``agent_runs.provider_model_snapshot_id`` is set once at Router
-    resolution time and never changes, so a historical Agent Run's recorded
-    pricing/capability context can never silently drift when the live
-    registry is later refreshed.
+    Two distinct writers use this one table, distinguished by ``source``:
+
+    * ``EXECUTION_FREEZE`` — ``app.model_resolution.freeze_snapshot``, a
+      fresh row created at every Router resolution, never reused, so a
+      historical Agent Run's recorded pricing/capability context can never
+      silently drift when the live registry is later refreshed.
+      ``change_kinds`` is always ``None`` for these rows — they are not part
+      of the registry change-history feed.
+    * ``CATALOG_REFRESH`` — ``app.services.model_registry_service``, written
+      only when a catalog refresh actually detects a difference from the
+      previous catalog-refresh snapshot for that ``provider_model_id`` (a
+      no-op refresh writes nothing). ``change_kinds`` then lists every
+      dimension that changed (``new``/``price``/``context``/``capability``/
+      ``status``) — AIL.1B's What's New / price-and-capability history reads
+      only these rows.
+
+    ``LEGACY_UNKNOWN`` (the migration backfill default) marks rows written
+    before this distinction existed — never retroactively guessed as one or
+    the other.
     """
 
     __tablename__ = "provider_model_snapshots"
+    __table_args__ = (
+        Index(
+            "ix_provider_model_snapshots_provider_model_id_source_snapshotted_at",
+            "provider_model_id",
+            "source",
+            "snapshotted_at",
+        ),
+    )
 
     provider_model_id: Mapped[str] = mapped_column(
         ForeignKey("provider_models.id", ondelete="RESTRICT"), nullable=False
@@ -183,6 +214,15 @@ class ProviderModelSnapshot(UUIDPrimaryKeyMixin, Base):
     context_window: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     capability_snapshot: Mapped[Optional[dict]] = mapped_column("capability_snapshot_json", nullable=True)
     snapshotted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+    source: Mapped[SnapshotSource] = mapped_column(
+        sa_enum(SnapshotSource), nullable=False, default=SnapshotSource.EXECUTION_FREEZE
+    )
+    # A JSON list of SnapshotChangeKind values (e.g. ["price", "context"]) —
+    # a deterministic set representation, never a single opaque "how much
+    # changed" score, so a refresh where several dimensions change at once
+    # is still fully and exactly described. None for EXECUTION_FREEZE and
+    # LEGACY_UNKNOWN rows.
+    change_kinds: Mapped[Optional[list]] = mapped_column("change_kinds_json", nullable=True)
 
     @property
     def pricing_classification(self):
