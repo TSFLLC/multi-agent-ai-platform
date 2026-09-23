@@ -2,14 +2,15 @@
 
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.db.enums import ExperimentStatus, ExperimentType, TaskRunStatus
+from app.db.enums import EvaluationRunStatus, ExperimentStatus, ExperimentType, TaskRunStatus
 from app.errors import ConflictError, NotFoundError
 from app.models.artifacts_eval import ComparisonCandidate, ComparisonRun
+from app.models.evaluation_runs import EvaluationRun
 from app.models.execution import ModelCall
 from app.models.lab import (
     EvalSetVersionTask,
@@ -188,16 +189,105 @@ class ExperimentExecutionService:
         return experiment
 
     def refresh(self, experiment: Experiment) -> Experiment:
+        execution_status, runs = self._execution_state(experiment)
+        if experiment.status == ExperimentStatus.RUNNING and runs and execution_status in {
+            "COMPLETED", "PARTIAL", "FAILED"
+        }:
+            evaluation_status = self._evaluation_state(experiment, runs)
+            if execution_status == "FAILED":
+                experiment.status = ExperimentStatus.FAILED
+            elif execution_status == "PARTIAL":
+                # Preserve partial evidence without presenting the run as a
+                # successful complete experiment. The read contract exposes
+                # PARTIAL explicitly; the lifecycle column remains compatible
+                # with the AIL.3A enum.
+                experiment.status = ExperimentStatus.RUNNING
+            elif not self._evaluation_required(experiment) or evaluation_status == "COMPLETED":
+                experiment.status = ExperimentStatus.COMPLETED
+            elif evaluation_status == "FAILED":
+                experiment.status = ExperimentStatus.FAILED
+            # PENDING/RUNNING evaluation deliberately keeps the experiment in
+            # RUNNING until canonical MA6 evidence reaches a terminal success.
+            self.db.commit()
+        return experiment
+
+    @staticmethod
+    def _evaluation_required(experiment: Experiment) -> bool:
+        return bool((experiment.config_snapshot or {}).get("evaluation_definition_version_id"))
+
+    def _execution_state(self, experiment: Experiment) -> Tuple[str, List[TaskRun]]:
         runs = list(self.db.execute(
             select(TaskRun).join(ExperimentTaskRun, ExperimentTaskRun.task_run_id == TaskRun.id)
             .where(ExperimentTaskRun.experiment_id == experiment.id)
         ).scalars())
-        if experiment.status == ExperimentStatus.RUNNING and runs and all(
-            run.status in (TaskRunStatus.COMPLETED, TaskRunStatus.FAILED, TaskRunStatus.CANCELLED) for run in runs
-        ):
-            experiment.status = ExperimentStatus.COMPLETED if any(run.status == TaskRunStatus.COMPLETED for run in runs) else ExperimentStatus.FAILED
-            self.db.commit()
-        return experiment
+        if not runs or any(run.status not in (
+            TaskRunStatus.COMPLETED, TaskRunStatus.FAILED, TaskRunStatus.CANCELLED
+        ) for run in runs):
+            return "RUNNING", runs
+        completed = any(run.status == TaskRunStatus.COMPLETED for run in runs)
+        failed_or_cancelled = any(run.status in (TaskRunStatus.FAILED, TaskRunStatus.CANCELLED) for run in runs)
+        if completed and failed_or_cancelled:
+            return "PARTIAL", runs
+        return "COMPLETED" if completed else "FAILED", runs
+
+    def _evaluation_state(self, experiment: Experiment, runs: List[TaskRun]) -> str:
+        definition_id = (experiment.config_snapshot or {}).get("evaluation_definition_version_id")
+        if not definition_id:
+            return "NOT_REQUIRED"
+        statuses = []
+        for task_run in runs:
+            if task_run.status != TaskRunStatus.COMPLETED:
+                continue
+            agent_run = self.db.execute(
+                select(AgentRun).where(AgentRun.task_run_id == task_run.id)
+            ).scalar_one_or_none()
+            if agent_run is None:
+                statuses.append("PENDING")
+                continue
+            evaluation = self.db.execute(
+                select(EvaluationRun)
+                .where(
+                    EvaluationRun.subject_agent_run_id == agent_run.id,
+                    EvaluationRun.evaluation_definition_version_id == definition_id,
+                )
+                .order_by(EvaluationRun.created_at.desc())
+            ).scalars().first()
+            statuses.append(evaluation.status.value.upper() if evaluation else "PENDING")
+        if not statuses:
+            return "PENDING"
+        if any(status == EvaluationRunStatus.FAILED.value.upper() for status in statuses):
+            return "FAILED"
+        if any(status == EvaluationRunStatus.CANCELLED.value.upper() for status in statuses):
+            return "FAILED"
+        if any(status == EvaluationRunStatus.RUNNING.value.upper() for status in statuses):
+            return "RUNNING"
+        if any(status == EvaluationRunStatus.PENDING.value.upper() for status in statuses):
+            return "PENDING"
+        return "COMPLETED"
+
+    def _state_summary(self, experiment: Experiment) -> dict:
+        execution_status, runs = self._execution_state(experiment)
+        evaluation_status = self._evaluation_state(experiment, runs)
+        if execution_status == "RUNNING":
+            overall_status = "RUNNING"
+        elif execution_status == "PARTIAL":
+            overall_status = "PARTIAL"
+        elif execution_status == "FAILED":
+            overall_status = "FAILED"
+        elif evaluation_status == "NOT_REQUIRED" or evaluation_status == "COMPLETED":
+            overall_status = "COMPLETED"
+        elif evaluation_status == "FAILED":
+            overall_status = "EVALUATION_FAILED"
+        else:
+            overall_status = "EVALUATING"
+        if experiment.status == ExperimentStatus.CANCELLED:
+            overall_status = "CANCELLED"
+        return {
+            "execution_status": execution_status,
+            "evaluation_status": evaluation_status,
+            "evaluation_required": self._evaluation_required(experiment),
+            "overall_status": overall_status,
+        }
 
     def cancel(self, user_id: str, experiment_id: str) -> Experiment:
         experiment = self._owned(user_id, experiment_id)
@@ -216,7 +306,19 @@ class ExperimentExecutionService:
         return experiment
 
     def evaluate(self, user_id: str, experiment_id: str, *, evaluation_definition_version_id: str, method, evaluator_agent_version_id: Optional[str] = None) -> dict:
-        experiment = self.refresh(self._owned(user_id, experiment_id))
+        experiment = self._owned(user_id, experiment_id)
+        configured_definition = (experiment.config_snapshot or {}).get("evaluation_definition_version_id")
+        if configured_definition and configured_definition != evaluation_definition_version_id:
+            raise ConflictError("This experiment is configured for a different Evaluation Definition Version.")
+        if not configured_definition:
+            experiment.config_snapshot = {
+                **(experiment.config_snapshot or {}),
+                "evaluation_definition_version_id": evaluation_definition_version_id,
+            }
+            if experiment.status == ExperimentStatus.COMPLETED:
+                experiment.status = ExperimentStatus.RUNNING
+            self.db.commit()
+        experiment = self.refresh(experiment)
         comparisons = list(self.db.execute(select(ComparisonRun).where(ComparisonRun.experiment_id == experiment.id)).scalars())
         outcomes = []
         for comparison in comparisons:
@@ -233,6 +335,7 @@ class ExperimentExecutionService:
 
     def read(self, user_id: str, experiment_id: str) -> dict:
         experiment = self.refresh(self._owned(user_id, experiment_id))
+        state = self._state_summary(experiment)
         run_rows = list(self.db.execute(
             select(ExperimentTaskRun, TaskRun, AgentRun)
             .join(TaskRun, TaskRun.id == ExperimentTaskRun.task_run_id)
@@ -266,4 +369,6 @@ class ExperimentExecutionService:
             total_out += tokens_out
             items.append({"task_position": slot.task_position, "repetition": slot.repetition, "label": slot.label, "task_run_id": task_run.id, "agent_run_id": agent_run.id, "status": task_run.status.value, "model_id": agent_run.model_id, "provider_model_snapshot_id": agent_run.provider_model_snapshot_id, "tokens_in": tokens_in, "tokens_out": tokens_out})
         cost_kind = "UNKNOWN" if unknown_cost or not has_calls else ("ESTIMATED" if estimated_cost else "KNOWN")
-        return {"experiment": LabService(self.db).experiment_read(experiment), "progress": {"total": len(items), "completed": sum(i["status"] == "completed" for i in items), "failed": sum(i["status"] == "failed" for i in items), "cancelled": sum(i["status"] == "cancelled" for i in items), "tokens_in": total_in, "tokens_out": total_out, "cost_kind": cost_kind, "cost": str(total_cost) if cost_kind != "UNKNOWN" else None}, "runs": items}
+        experiment_read = LabService(self.db).experiment_read(experiment)
+        experiment_read.update(state)
+        return {"experiment": experiment_read, "progress": {"total": len(items), "completed": sum(i["status"] == "completed" for i in items), "failed": sum(i["status"] == "failed" for i in items), "cancelled": sum(i["status"] == "cancelled" for i in items), "tokens_in": total_in, "tokens_out": total_out, "cost_kind": cost_kind, "cost": str(total_cost) if cost_kind != "UNKNOWN" else None, **state}, "runs": items}

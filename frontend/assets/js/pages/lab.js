@@ -16,6 +16,21 @@ function statusLabel(value) {
   return String(value || "").replaceAll("_", " ");
 }
 
+function overallLabel(experiment) {
+  const status = experiment?.overall_status || experiment?.status;
+  if (status === "EVALUATING" && experiment?.evaluation_status === "RUNNING") return "Evaluating";
+  if (status === "EVALUATING" && experiment?.evaluation_status === "PENDING") return "Execution complete — evaluation pending";
+  return {
+    RUNNING: "Running experiment",
+    EVALUATING: "Evaluating",
+    COMPLETED: "Completed",
+    EVALUATION_FAILED: "Execution complete — evaluation failed",
+    PARTIAL: "Partial results",
+    FAILED: "Execution failed",
+    CANCELLED: "Cancelled",
+  }[status] || statusLabel(status);
+}
+
 function message(text, className = "empty-state") {
   return el("div", { class: className }, [el("p", {}, [text])]);
 }
@@ -95,12 +110,18 @@ export async function renderExperimentDetail(root, params) {
     mount(root, el("section", { class: "page-section" }, [
       el("a", { href: "#/ail/lab" }, ["← Personal AI Lab"]),
       el("h1", {}, [typeLabel(data.experiment?.experiment_type)]),
-      el("p", {}, [`Status: ${statusLabel(data.experiment?.status)}`]),
+      el("p", {}, [`Status: ${overallLabel(data.experiment)}`]),
+      el("p", { class: "muted" }, [
+        `Execution: ${statusLabel(data.experiment?.execution_status)} · Evaluation: ${statusLabel(data.experiment?.evaluation_status)}`,
+      ]),
       el("h2", {}, ["What happened"]),
       el("p", {}, [`${progress.completed || 0} completed, ${progress.failed || 0} failed, ${progress.cancelled || 0} cancelled of ${progress.total || 0} runs.`]),
       el("p", {}, [`Tokens: ${progress.tokens_in || 0} input / ${progress.tokens_out || 0} output · Cost: ${progress.cost_kind || "UNKNOWN"}${progress.cost ? ` (${progress.cost})` : ""}`]),
       el("h2", {}, ["Run evidence"]),
       runItems.length ? el("ul", {}, runItems) : message("No execution evidence has been recorded yet."),
+      data.experiment?.evaluation_required && data.experiment?.evaluation_status !== "COMPLETED"
+        ? el("p", { class: "muted" }, ["Evaluation findings are not available yet. Criteria results will appear only after the canonical evaluation completes."])
+        : null,
       el("p", { class: "muted" }, ["Personal AI Lab reports evidence and does not choose a winner. Human conclusions are a later phase."]),
     ]));
   } catch (err) {
