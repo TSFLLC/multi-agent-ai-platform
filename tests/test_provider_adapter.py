@@ -317,6 +317,71 @@ def test_invoke_no_choices_raises_invalid_response():
         adapter.invoke(InvokeRequest(provider_model_id="x/y", user_prompt="hi"))
 
 
+@pytest.mark.parametrize(
+    ("content", "extra_message", "expected"),
+    [
+        (None, {"reasoning_content": "do not log this"}, "'type': 'NoneType'"),
+        ([{"type": "text", "text": "private"}], {}, "'element_types': ['dict']"),
+        ({"text": "private", "secret": "do not log this"}, {}, "'keys': ['secret', 'text']"),
+    ],
+)
+def test_invoke_invalid_content_logs_only_sanitized_shape(caplog, content, extra_message, expected):
+    def handler(request):
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{
+                    "finish_reason": "stop",
+                    "message": {"role": "assistant", "content": content, **extra_message},
+                }],
+                "usage": {"prompt_tokens": 9, "completion_tokens": 3, "total_tokens": 12},
+            },
+        )
+
+    adapter = _adapter_with_transport(handler)
+    with caplog.at_level("WARNING", logger="app.providers.openrouter"), pytest.raises(ProviderInvalidResponseError):
+        adapter.invoke(InvokeRequest(provider_model_id="x/y", user_prompt="private prompt"))
+
+    message = caplog.records[-1].getMessage()
+    assert "openrouter_response_shape_invalid" in message
+    assert expected in message
+    assert "private" not in message
+    assert "do not log this" not in message
+    assert "private prompt" not in message
+    assert "prompt_tokens=9" in message
+    assert "completion_tokens=3" in message
+    assert "total_tokens=12" in message
+
+
+def test_invoke_invalid_content_does_not_log_tool_arguments_or_reasoning(caplog):
+    def handler(request):
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{
+                    "finish_reason": "tool_calls",
+                    "message": {
+                        "content": None,
+                        "reasoning": "hidden reasoning",
+                        "tool_calls": [{"id": "call-1", "function": {"arguments": "secret args"}}],
+                    },
+                }],
+            },
+        )
+
+    adapter = _adapter_with_transport(handler)
+    with caplog.at_level("WARNING", logger="app.providers.openrouter"), pytest.raises(ProviderInvalidResponseError):
+        adapter.invoke(InvokeRequest(provider_model_id="x/y", user_prompt="secret prompt"))
+
+    message = caplog.records[-1].getMessage()
+    assert "reasoning_present=True" in message
+    assert "tool_calls_present=True" in message
+    assert "tool_calls_count=1" in message
+    assert "hidden reasoning" not in message
+    assert "secret args" not in message
+    assert "secret prompt" not in message
+
+
 def test_invoke_authentication_failure_raises_specific_error():
     def handler(request):
         return httpx.Response(401, json={"error": "invalid key"})

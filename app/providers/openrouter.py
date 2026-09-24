@@ -212,6 +212,45 @@ class OpenRouterAdapter:
         message = choices[0].get("message") or {}
         text = message.get("content")
         if not isinstance(text, str):
+            usage = payload.get("usage")
+            usage_data = usage if isinstance(usage, dict) else {}
+            tool_calls = message.get("tool_calls")
+            content_shape = {
+                "type": type(text).__name__,
+                "is_null": text is None,
+            }
+            if isinstance(text, str):
+                content_shape["length"] = len(text)
+            elif isinstance(text, list):
+                content_shape["length"] = len(text)
+                content_shape["element_types"] = sorted({type(item).__name__ for item in text})
+            elif isinstance(text, dict):
+                content_shape["keys"] = sorted(str(key) for key in text)
+            logger.warning(
+                "openrouter_response_shape_invalid provider=openrouter model=%s "
+                "http_status=%s choices_count=%s choice_keys=%s finish_reason=%s "
+                "message_keys=%s content_shape=%s reasoning_present=%s "
+                "reasoning_content_present=%s refusal_present=%s tool_calls_present=%s "
+                "tool_calls_count=%s annotations_present=%s usage_present=%s "
+                "prompt_tokens=%s completion_tokens=%s total_tokens=%s",
+                request.provider_model_id,
+                response.status_code,
+                len(choices),
+                sorted(str(key) for key in choices[0]),
+                choices[0].get("finish_reason"),
+                sorted(str(key) for key in message),
+                content_shape,
+                "reasoning" in message,
+                "reasoning_content" in message,
+                "refusal" in message,
+                "tool_calls" in message,
+                len(tool_calls) if isinstance(tool_calls, list) else None,
+                "annotations" in message,
+                isinstance(usage, dict),
+                usage_data.get("prompt_tokens") if isinstance(usage_data.get("prompt_tokens"), int) else None,
+                usage_data.get("completion_tokens") if isinstance(usage_data.get("completion_tokens"), int) else None,
+                usage_data.get("total_tokens") if isinstance(usage_data.get("total_tokens"), int) else None,
+            )
             raise ProviderInvalidResponseError("OpenRouter response's message had no text content.")
 
         usage = payload.get("usage") or {}
