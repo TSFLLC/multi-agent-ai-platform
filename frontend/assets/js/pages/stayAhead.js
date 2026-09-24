@@ -176,6 +176,7 @@ function sectionView(section) {
   return el("section", { class: "stack today-section stay-ahead-section" }, [
     el("div", { class: "row between" }, [el("h2", {}, section.title), el("span", { class: "hint" }, section.countText)]),
     section.cardType === "review" && section.cards.length ? el("p", { class: "hint" }, REVIEW_INTRO) : null,
+    section.quotaText ? el("p", { class: "hint stay-ahead-quota" }, section.quotaText) : null,
     section.cards.length
       ? el("div", { class: "stack" }, section.cards.map((card) => render(card)))
       : el("p", { class: "hint stay-ahead-empty" }, section.empty),

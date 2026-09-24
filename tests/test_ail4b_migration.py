@@ -1,4 +1,5 @@
-"""AIL.4B migration: real upgrade/downgrade on DISPOSABLE SQLite databases only.
+"""AIL.4B migration (review_attempts + review_prompt_deliveries): real upgrade/downgrade on
+DISPOSABLE SQLite databases only.
 
 Every test points ``settings.database_path`` at a fresh file under pytest's
 ``tmp_path`` (and asserts it is not the persistent development database), so
@@ -81,6 +82,13 @@ def _attempt(conn, attempt_id, *, status="started", user="user-1", completed=Non
     ))
 
 
+def _delivery(conn, delivery_id, *, concept="concept-1", user="user-1", week="2026-09-14T00:00:00", slot=1):
+    conn.execute(text(
+        "INSERT INTO review_prompt_deliveries (id, user_id, concept_id, week_start, slot, prompt_kind, delivered_at) "
+        f"VALUES ('{delivery_id}', '{user}', '{concept}', '{week}', {slot}, 'REVIEW_DUE', '{NOW}')"
+    ))
+
+
 def _clean(conn) -> None:
     assert conn.execute(text("PRAGMA integrity_check")).scalar() == "ok"
     assert conn.execute(text("PRAGMA foreign_key_check")).fetchall() == []
@@ -90,7 +98,7 @@ def _other_table_sql(conn) -> dict:
     return {
         name: sql
         for name, sql in conn.execute(text(
-            "SELECT name, sql FROM sqlite_master WHERE type = 'table' AND name NOT IN ('review_attempts', 'alembic_version')"
+            "SELECT name, sql FROM sqlite_master WHERE type = 'table' AND name NOT IN ('review_attempts', 'review_prompt_deliveries', 'alembic_version')"
         )).fetchall()
     }
 
@@ -132,6 +140,12 @@ def test_upgrade_is_purely_additive_and_keeps_existing_data(db_path):
         assert {
             "uq_review_attempts_active", "uq_review_attempts_resulting_evidence", "ix_review_attempts_user_concept_started",
         } <= indexes
+
+        delivery_columns = {row[1]: row for row in conn.execute(text("PRAGMA table_info(review_prompt_deliveries)"))}
+        assert set(delivery_columns) == {"id", "user_id", "concept_id", "week_start", "slot", "prompt_kind", "delivered_at"}
+        assert all(row[3] == 1 for row in delivery_columns.values() if row[1] != "id")  # every column required
+        delivery_fks = {(fk[3], fk[2]) for fk in conn.execute(text("PRAGMA foreign_key_list(review_prompt_deliveries)"))}
+        assert delivery_fks == {("user_id", "users"), ("concept_id", "concepts")}
         _clean(conn)
     engine.dispose()
 
@@ -171,6 +185,44 @@ def test_the_migrated_table_enforces_the_lifecycle(db_path):
     engine.dispose()
 
 
+def test_the_migrated_delivery_table_enforces_two_prompts_per_user_per_week(db_path):
+    command.upgrade(_cfg(), HEAD)
+    engine = _engine(db_path)
+    with engine.begin() as conn:
+        _seed(conn)
+        conn.execute(text(
+            f"INSERT INTO concepts (slug, name, level, kind, is_core, id, created_at) "
+            f"VALUES ('routing', 'Routing', 'foundational', 'operational', 1, 'concept-2', '{NOW}')"
+        ))
+        conn.execute(text(
+            f"INSERT INTO concepts (slug, name, level, kind, is_core, id, created_at) "
+            f"VALUES ('agents', 'Agents', 'foundational', 'architectural', 1, 'concept-3', '{NOW}')"
+        ))
+        _delivery(conn, "d1", concept="concept-1", slot=1)
+        _delivery(conn, "d2", concept="concept-2", slot=2)
+        _delivery(conn, "d-next-week", concept="concept-1", week="2026-09-21T00:00:00", slot=1)  # a new week is fresh
+        _delivery(conn, "d-other-user", concept="concept-1", user="user-2", slot=1)  # another user has their own quota
+        _clean(conn)
+
+    refused = [
+        ("a third delivery (slot 3)", lambda c: _delivery(c, "x1", concept="concept-3", slot=3)),
+        ("slot zero", lambda c: _delivery(c, "x2", concept="concept-3", slot=0)),
+        ("slot 1 reused in the same week", lambda c: _delivery(c, "x3", concept="concept-3", slot=1)),
+        ("slot 2 reused in the same week", lambda c: _delivery(c, "x4", concept="concept-3", slot=2)),
+        ("the same concept twice in one week", lambda c: _delivery(c, "x5", concept="concept-1", week="2026-09-21T00:00:00", slot=2)),
+        ("an unknown concept", lambda c: _delivery(c, "x6", concept="nope", week="2026-09-28T00:00:00", slot=1)),
+        ("an unknown user", lambda c: _delivery(c, "x7", user="nobody", week="2026-09-28T00:00:00", slot=1)),
+    ]
+    for label, insert in refused:
+        with pytest.raises(IntegrityError), engine.begin() as conn:
+            insert(conn)
+        assert label
+    with engine.begin() as conn:
+        assert conn.execute(text("SELECT COUNT(*) FROM review_prompt_deliveries")).scalar() == 4
+        _clean(conn)
+    engine.dispose()
+
+
 def test_downgrade_refuses_while_attempts_exist_then_reverses_cleanly_and_reupgrades(db_path):
     command.upgrade(_cfg(), HEAD)
     engine = _engine(db_path)
@@ -186,12 +238,24 @@ def test_downgrade_refuses_while_attempts_exist_then_reverses_cleanly_and_reupgr
         assert conn.execute(text("SELECT COUNT(*) FROM review_attempts")).scalar() == 1  # changed nothing
         assert conn.execute(text("SELECT version_num FROM alembic_version")).scalar() == HEAD
         conn.execute(text("DELETE FROM review_attempts"))
+        _delivery(conn, "delivery-1")
+    engine.dispose()
+
+    with pytest.raises(RuntimeError, match="prompt delivery"):  # deliveries alone also block a downgrade
+        command.downgrade(_cfg(), BASE)
+    engine = _engine(db_path)
+    with engine.begin() as conn:
+        assert conn.execute(text("SELECT COUNT(*) FROM review_prompt_deliveries")).scalar() == 1  # changed nothing
+        assert conn.execute(text("SELECT COUNT(*) FROM sqlite_master WHERE name = 'review_attempts'")).scalar() == 1
+        conn.execute(text("DELETE FROM review_prompt_deliveries"))
     engine.dispose()
 
     command.downgrade(_cfg(), BASE)
     engine = _engine(db_path)
     with engine.begin() as conn:
-        assert conn.execute(text("SELECT COUNT(*) FROM sqlite_master WHERE name LIKE '%review_attempts%'")).scalar() == 0
+        assert conn.execute(text(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name LIKE '%review_attempts%' OR name LIKE '%review_prompt_deliveries%'"
+        )).scalar() == 0
         assert conn.execute(text("SELECT COUNT(*) FROM learning_evidence")).scalar() == 2  # learner evidence untouched
         assert conn.execute(text("SELECT version_num FROM alembic_version")).scalar() == BASE
         _clean(conn)
@@ -205,17 +269,26 @@ def test_downgrade_refuses_while_attempts_exist_then_reverses_cleanly_and_reupgr
     engine.dispose()
 
 
-def test_the_orm_model_and_the_migration_describe_the_same_table(db_path):
+def test_the_orm_models_and_the_migration_describe_the_same_tables(db_path):
     command.upgrade(_cfg(), HEAD)
     engine = _engine(db_path)
-    table = Base.metadata.tables["review_attempts"]
-    with engine.begin() as conn:
-        info = {row[1]: row for row in conn.execute(text("PRAGMA table_info(review_attempts)"))}
-        indexes = {row[1] for row in conn.execute(text("PRAGMA index_list(review_attempts)"))}
+    for name in ("review_attempts", "review_prompt_deliveries"):
+        table = Base.metadata.tables[name]
+        with engine.begin() as conn:
+            info = {row[1]: row for row in conn.execute(text(f"PRAGMA table_info({name})"))}
+            indexes = {row[1] for row in conn.execute(text(f"PRAGMA index_list({name})"))}
+            unique = {
+                tuple(col[2] for col in conn.execute(text(f"PRAGMA index_info({row[1]})")))
+                for row in conn.execute(text(f"PRAGMA index_list({name})"))
+                if row[2]
+            }
+        assert set(info) == {c.name for c in table.columns}, name
+        assert {n: bool(info[n][3]) for n in info} == {c.name: not c.nullable for c in table.columns}, name
+        assert {i.name for i in table.indexes} <= indexes, name
+        for constraint in table.constraints:
+            if constraint.__class__.__name__ == "UniqueConstraint":
+                assert tuple(c.name for c in constraint.columns) in unique, (name, constraint.name)
     engine.dispose()
-    assert set(info) == {c.name for c in table.columns}
-    assert {n: bool(info[n][3]) for n in info} == {c.name: not c.nullable for c in table.columns}
-    assert {i.name for i in table.indexes} <= indexes
 
 
 def test_full_chain_round_trips_on_a_disposable_database(db_path):

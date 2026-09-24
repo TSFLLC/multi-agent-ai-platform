@@ -28,7 +28,7 @@ from app.db.enums import (
 )
 from app.main import app as fastapi_app
 from app.models.learner import LearningEvidence, LearningPlanItem
-from app.models.learning_review import ReviewAttempt
+from app.models.learning_review import ReviewAttempt, ReviewPromptDelivery
 from app.services.concept_graph_service import ConceptGraphService
 from app.services.learner_state_service import (
     CHANGED,
@@ -45,6 +45,7 @@ from app.services.review_attempt_service import (
     choice_spec,
     qualifies_as_review_item,
 )
+from app.services.review_prompt_service import ReviewPromptService
 from app.services.review_retention_service import (
     BASE_INTERVAL_DAYS,
     MAX_INTERVAL_DAYS,
@@ -290,7 +291,7 @@ def test_a_successful_review_resets_the_clock_and_extends_the_interval(db, boots
     assert _review(db, bootstrap.user, concept).due
     _passed_review(db, bootstrap.user, concept, version, at=ago(1))
     review = _review(db, bootstrap.user, concept)
-    assert not review.due and review.streak == 1
+    assert not review.due and review.successful_reviews == 1
     assert review.interval_days == 360 and review.base_interval_days == 180  # doubled once
     assert review.due_at == ago(1) + timedelta(days=360)
 
@@ -309,21 +310,58 @@ def test_the_cap_holds_through_real_attempt_history(db, bootstrap):
     for i in range(4):
         _passed_review(db, bootstrap.user, concept, version, at=ago(800 - i * 100))
     review = _review(db, bootstrap.user, concept)
-    assert review.streak == 4 and review.interval_days == 365
+    assert review.successful_reviews == 4 and review.interval_days == 365
 
 
-def test_a_failed_review_resets_the_streak_but_not_the_clock(db, bootstrap):
-    concept, version = _concept(db)
-    _evidence(db, bootstrap.user, concept, version, at=ago(500))
-    _passed_review(db, bootstrap.user, concept, version, at=ago(400))
+def test_the_first_and_each_later_successful_review_extend_the_interval_again(db, bootstrap):
+    concept, version = _concept(db, kind=ConceptKind.DEFINITIONAL)
+    _evidence(db, bootstrap.user, concept, version, at=ago(900))
+    assert _review(db, bootstrap.user, concept, now=ago(800)).interval_days == 180  # no review yet
+    _passed_review(db, bootstrap.user, concept, version, at=ago(700))
+    first = _review(db, bootstrap.user, concept, now=ago(690))
+    assert (first.successful_reviews, first.interval_days) == (1, 360)  # first success extends it
     _passed_review(db, bootstrap.user, concept, version, at=ago(300))
-    assert _review(db, bootstrap.user, concept, now=ago(299)).streak == 2
-    _failed_review(db, bootstrap.user, concept, version, at=ago(200))
-    review = _review(db, bootstrap.user, concept)
-    assert review.streak == 0 and review.interval_days == 180
-    assert review.baseline.recorded_at == ago(300)  # failure appended no evidence
+    second = _review(db, bootstrap.user, concept, now=ago(290))
+    assert (second.successful_reviews, second.interval_days) == (2, 365)  # a subsequent success extends again, capped
+
+
+def test_a_failed_review_does_not_reset_accumulated_extension(db, bootstrap):
+    concept, version = _concept(db, kind=ConceptKind.OPERATIONAL)  # 90 -> 180 -> 360
+    _evidence(db, bootstrap.user, concept, version, at=ago(900))
+    _passed_review(db, bootstrap.user, concept, version, at=ago(800))
+    _passed_review(db, bootstrap.user, concept, version, at=ago(700))
+    before = _review(db, bootstrap.user, concept, now=ago(690))
+    assert (before.successful_reviews, before.interval_days) == (2, 360)
+
+    _failed_review(db, bootstrap.user, concept, version, at=ago(600))
+    after = _review(db, bootstrap.user, concept, now=ago(590))
+    assert after.failed  # a failure may derive REVIEW_FAILED...
+    assert (after.successful_reviews, after.interval_days) == (2, 360)  # ...but erases nothing
+    assert after.baseline.recorded_at == ago(700)  # and appended no evidence
+
+
+def test_a_later_success_continues_from_the_prior_successful_review_history(db, bootstrap):
+    concept, version = _concept(db, kind=ConceptKind.OPERATIONAL)
+    _evidence(db, bootstrap.user, concept, version, at=ago(900))
+    _passed_review(db, bootstrap.user, concept, version, at=ago(800))  # 90 -> 180
+    _failed_review(db, bootstrap.user, concept, version, at=ago(700))
+    resumed = _passed_review(db, bootstrap.user, concept, version, at=ago(600))  # continues: 2nd success -> 360
+    review = _review(db, bootstrap.user, concept, now=ago(590))
+    assert (review.successful_reviews, review.interval_days) == (2, 360)
+    assert not review.failed  # the later success cleared REVIEW_FAILED
+    assert review.due_at == resumed.completed_at + timedelta(days=360)
     _passed_review(db, bootstrap.user, concept, version, at=ago(100))
-    assert _review(db, bootstrap.user, concept).streak == 1
+    assert _review(db, bootstrap.user, concept).interval_days == 365  # 720 capped
+
+
+def test_only_qualifying_successes_count_toward_the_extension(db, bootstrap):
+    concept, version = _concept(db)
+    _evidence(db, bootstrap.user, concept, version, at=ago(300))
+    _passed_review(db, bootstrap.user, concept, version, at=ago(200))
+    unusable = _evidence(db, bootstrap.user, concept, version, at=ago(100), passed=False)
+    _attempt(db, bootstrap.user, concept, version, status=ReviewAttemptStatus.PASSED,
+             started=ago(100) - timedelta(minutes=1), completed=ago(100), evidence=unusable)
+    assert _review(db, bootstrap.user, concept).successful_reviews == 1  # the PASSED row without qualifying evidence is ignored
 
 
 # =============================================================================
@@ -437,7 +475,7 @@ def test_a_passed_attempt_with_unusable_evidence_is_ignored_entirely(db, bootstr
                  evidence=evidence)
     review = _review(db, bootstrap.user, concept)
     assert review.failed  # not cleared by an attempt that merely says PASSED
-    assert review.streak == 0  # nor extended
+    assert review.successful_reviews == 0  # nor extended
     assert review.baseline.recorded_at == ago(200)  # nor did it reset the clock
 
 
@@ -573,20 +611,15 @@ def test_starting_is_idempotent_while_a_review_is_in_progress(db, bootstrap):
 @pytest.mark.parametrize("build,reason", [
     ("not_demonstrated", "NOT_DEMONSTRATED"),
     ("not_eligible", "NOT_ELIGIBLE"),
-    ("not_due", "NOT_DUE"),
     ("no_item", "NO_REVIEW_ITEM"),
 ])
-def test_a_review_cannot_start_unless_one_is_warranted(db, bootstrap, build, reason):
+def test_a_review_cannot_start_unless_the_learner_may_review(db, bootstrap, build, reason):
     if build == "not_demonstrated":
         concept, version = _concept(db)
         _evidence(db, bootstrap.user, concept, version, at=rago(500), passed=False)
     elif build == "not_eligible":
         concept, version = _concept(db, core=False)
         _evidence(db, bootstrap.user, concept, version, at=rago(500))
-        _item(db, concept)
-    elif build == "not_due":
-        concept, version = _concept(db)
-        _evidence(db, bootstrap.user, concept, version, at=rago(5))
         _item(db, concept)
     else:
         concept, _ = _due_core(db, bootstrap.user)
@@ -595,6 +628,66 @@ def test_a_review_cannot_start_unless_one_is_warranted(db, bootstrap, build, rea
         ReviewAttemptService(db).start(bootstrap.user.id, concept.id)
     assert raised.value.detail["reason"] == reason
     assert db.execute(select(func.count()).select_from(ReviewAttempt)).scalar() == 0
+
+
+def test_an_eligible_demonstrated_concept_can_be_reviewed_voluntarily_before_it_is_due(db, bootstrap):
+    """REVIEW_DUE controls recommendation, not permission."""
+    concept, version = _concept(db)
+    _evidence(db, bootstrap.user, concept, version, at=rago(5))  # far inside the 180-day interval
+    item = _item(db, concept)
+    state = _state(db, bootstrap.user, concept, now=datetime.now(timezone.utc))
+    assert "review_due" not in state.overlays and state.review.eligible and not state.review.due
+    assert ReviewAttemptService(db).availability(bootstrap.user.id, concept.id).action == "start"
+
+    result = ReviewAttemptService(db).start(bootstrap.user.id, concept.id)
+    assert result.created and result.item.id == item.id
+    done = ReviewAttemptService(db).complete(bootstrap.user.id, result.attempt.id, [1])
+    assert done.passed and done.evidence.concept_version_id == version.id
+    assert done.state.ladder == DEMONSTRATED and done.state.review.successful_reviews == 1
+
+
+def test_voluntary_review_still_needs_eligibility_history_and_a_valid_item(db, bootstrap):
+    not_core, version = _concept(db, core=False)
+    _evidence(db, bootstrap.user, not_core, version, at=rago(5))
+    _item(db, not_core)
+    assert ReviewAttemptService(db).availability(bootstrap.user.id, not_core.id).reason == "NOT_ELIGIBLE"
+    _plan(db, bootstrap.user, not_core)  # an active plan makes it eligible, due or not
+    assert ReviewAttemptService(db).availability(bootstrap.user.id, not_core.id).action == "start"
+
+    fresh, _ = _concept(db)  # core but never demonstrated
+    _item(db, fresh)
+    assert ReviewAttemptService(db).availability(bootstrap.user.id, fresh.id).reason == "NOT_DEMONSTRATED"
+    itemless, iv = _concept(db)
+    _evidence(db, bootstrap.user, itemless, iv, at=rago(5))
+    assert ReviewAttemptService(db).availability(bootstrap.user.id, itemless.id).reason == "NO_REVIEW_ITEM"
+
+
+def test_a_voluntary_early_review_keeps_the_single_active_attempt_rule(db, bootstrap):
+    concept, version = _concept(db)
+    _evidence(db, bootstrap.user, concept, version, at=rago(5))
+    _item(db, concept)
+    service = ReviewAttemptService(db)
+    first = service.start(bootstrap.user.id, concept.id)
+    second = service.start(bootstrap.user.id, concept.id)
+    assert (first.created, second.created) == (True, False) and first.attempt.id == second.attempt.id
+
+
+def test_the_failed_review_cooldown_still_blocks_an_early_retry_and_then_allows_it(db, bootstrap):
+    concept, version = _concept(db)
+    _evidence(db, bootstrap.user, concept, version, at=rago(5))  # not due
+    _item(db, concept, title="One")
+    _item(db, concept, title="Two")
+    service = ReviewAttemptService(db)
+    attempt = service.start(bootstrap.user.id, concept.id).attempt
+    assert not service.complete(bootstrap.user.id, attempt.id, [0]).passed  # a voluntary review, failed
+
+    with pytest.raises(ReviewNotAvailableError) as raised:  # the cooldown applies to voluntary reviews too
+        service.start(bootstrap.user.id, concept.id)
+    assert raised.value.detail["reason"] == "COOLDOWN"
+
+    later = ReviewAttemptService(db, now=datetime.now(timezone.utc) + RETRY_COOLDOWN + timedelta(minutes=1))
+    retry = later.start(bootstrap.user.id, concept.id).attempt  # after the wait, still not due, and allowed
+    assert retry.id != attempt.id and later.complete(bootstrap.user.id, retry.id, [1]).passed
 
 
 def test_starting_an_unknown_concept_is_a_404(db, bootstrap):
@@ -634,7 +727,7 @@ def test_a_correct_answer_appends_canonical_evidence_and_clears_the_review(db, b
     assert evidence.score == {"raw": 1, "max": 1, "pct": 100}
     assert result.state.ladder == DEMONSTRATED
     assert not ({"review_due", "review_failed"} & result.state.overlays)
-    assert result.state.review.streak == 1 and result.state.review.interval_days == 360
+    assert result.state.review.successful_reviews == 1 and result.state.review.interval_days == 360
 
 
 def test_the_evidence_cites_the_version_frozen_at_start_even_if_the_concept_changes_meanwhile(db, bootstrap):
@@ -852,7 +945,7 @@ def test_one_users_reviews_never_change_anothers_state(db, bootstrap):
     _failed_review(db, bootstrap.user, concept, version, at=ago(3))
     assert "review_failed" in _state(db, bootstrap.user, concept).overlays
     theirs = _state(db, other, concept)
-    assert "review_failed" not in theirs.overlays and theirs.review.streak == 0 and theirs.review.latest_completed is None
+    assert "review_failed" not in theirs.overlays and theirs.review.successful_reviews == 0 and theirs.review.latest_completed is None
 
 
 def _dump(engine, exclude=()):
@@ -898,12 +991,25 @@ def test_reading_state_never_writes(db, bootstrap, engine):
 
 
 # =============================================================================
-# Today: the review section
+# Today: the review section (delivered prompts only) and the weekly quota
 # =============================================================================
 
 
 def _today(db, user, now=NOW, **kwargs):
     return StayAheadService(db, now=now).today(user.id, **kwargs)
+
+
+def _deliver(db, user, now=NOW):
+    """The one write path for prompt delivery (what POST /prompts/allocate calls)."""
+    return ReviewPromptService(db, now=now).allocate(user.id)
+
+
+def _prompts(db, now=NOW):
+    return ReviewPromptService(db, now=now)
+
+
+def _delivery_rows(db):
+    return db.execute(select(ReviewPromptDelivery).order_by(ReviewPromptDelivery.week_start, ReviewPromptDelivery.slot)).scalars().all()
 
 
 def _due_at(db, user, *, name, age, kind=ConceptKind.DEFINITIONAL, item=True):
@@ -914,10 +1020,28 @@ def _due_at(db, user, *, name, age, kind=ConceptKind.DEFINITIONAL, item=True):
     return concept, version
 
 
-def test_a_due_review_card_exposes_everything_the_contract_asks_for(db, bootstrap):
+def _review_section(db, user, now=NOW):
+    return _today(db, user, now=now).sections.review
+
+
+def test_today_shows_only_delivered_prompts_and_never_delivers_by_itself(db, bootstrap):
+    _due_at(db, bootstrap.user, name="Due one", age=200)
+    section = _review_section(db, bootstrap.user)
+    assert (section.total, section.items) == (0, [])  # due, but nothing has been delivered yet
+    assert section.allocation_pending is True and section.not_prompted == 1
+    assert section.quota["limit"] == 2 and section.quota["delivered"] == 0 and section.quota["remaining"] == 2
+    assert _delivery_rows(db) == []  # reading Today created nothing
+
+    result = _deliver(db, bootstrap.user)
+    assert result.new and len(_delivery_rows(db)) == 1
+    section = _review_section(db, bootstrap.user)
+    assert section.total == 1 and section.allocation_pending is False and section.not_prompted == 0
+
+
+def test_a_delivered_review_card_exposes_everything_the_contract_asks_for(db, bootstrap):
     concept, _ = _due_at(db, bootstrap.user, name="Tokens", age=190)
-    result = _today(db, bootstrap.user)
-    section = result.sections.review
+    _deliver(db, bootstrap.user)
+    section = _review_section(db, bootstrap.user)
     assert (section.total, section.shown) == (1, 1)
     card = section.items[0]
     assert card.id == f"REVIEW:{concept.id}" and card.kind == "REVIEW_DUE"
@@ -927,89 +1051,206 @@ def test_a_due_review_card_exposes_everything_the_contract_asks_for(db, bootstra
     assert "180 days" in card.what and "core Concept" in card.why
     assert card.baseline["evidence_type"] == "knowledge_check" and card.baseline["concept_version"] == 1
     assert card.baseline["recorded_at"] == ago(190)
-    assert card.interval["days"] == 180 and card.interval["streak"] == 0 and card.due_at == ago(10)
+    assert card.interval["days"] == 180 and card.interval["successful_reviews"] == 0 and card.due_at == ago(10)
     assert card.attempt is None
     assert card.action["kind"] == "start_review" and card.action["learning_item_id"]
+    assert card.prompt["slot"] == 1 and card.prompt["delivered_at"] == NOW
     assert {(r.type, r.role) for r in card.evidence_refs} == {("learning_evidence", "baseline"), ("concept_version", "baseline_version")}
     assert "SECRET-QUESTION-BODY" not in card.model_dump_json()  # the question text is never in Today
 
 
-def test_card_kinds_take_precedence_failed_then_changed_then_interval(db, bootstrap):
+def test_prompt_kinds_take_precedence_failed_then_changed_then_interval(db, bootstrap):
     failed, fv = _due_at(db, bootstrap.user, name="F failed", age=200)
-    _failed_review(db, bootstrap.user, failed, fv, at=ago(4))
+    _failed_review(db, bootstrap.user, failed, fv, at=ago(4) - timedelta(hours=20))  # cooldown long over
     changed, cv = _concept(db, name="C changed")
     _evidence(db, bootstrap.user, changed, cv, at=ago(20))
     _publish(db, changed, at=ago(3), severity=ChangeSeverity.MATERIAL, note="Rewritten.")
     _item(db, changed)
     _due_at(db, bootstrap.user, name="D due", age=200)
 
-    # The section shows at most two cards, so classify through the uncapped builder.
-    service = StayAheadService(db, now=NOW)
-    cards = {c.concept["name"]: c for c in service._review_cards(bootstrap.user.id, service._learned_concepts(bootstrap.user.id))}
-    assert cards["F failed"].kind == "REVIEW_FAILED"
-    assert "REVIEW_FAILED_LATEST" in cards["F failed"].reason_codes and "REVIEW_INTERVAL_ELAPSED" in cards["F failed"].reason_codes
+    # Classify through the uncapped candidate list (the section only shows what was delivered).
+    candidates = _prompts(db).candidates(bootstrap.user.id)
+    assert [(c.name, c.kind) for c in candidates] == [
+        ("F failed", "REVIEW_FAILED"), ("C changed", "CONCEPT_CHANGED_REVIEW"), ("D due", "REVIEW_DUE")]
+    assert "REVIEW_FAILED_LATEST" in candidates[0].state.review.reason_codes
+    assert candidates[1].state.review.reason_codes == ["REVIEW_ELIGIBLE_CORE", "REVIEW_CONCEPT_CHANGED"]
+
+    _deliver(db, bootstrap.user)  # two per week: the failed review, then the material change
+    cards = {c.concept["name"]: c for c in _review_section(db, bootstrap.user).items}
+    assert set(cards) == {"F failed", "C changed"}
     assert "still recorded as Demonstrated" in cards["F failed"].why
-    assert cards["C changed"].kind == "CONCEPT_CHANGED_REVIEW" and "Rewritten." in cards["C changed"].what
-    assert cards["C changed"].reason_codes == ["REVIEW_ELIGIBLE_CORE", "REVIEW_CONCEPT_CHANGED"]
-    assert cards["C changed"].material_changes[0]["version"] == 2
-    assert cards["D due"].kind == "REVIEW_DUE"
-    assert len(cards) == 3 and len({c.concept["id"] for c in cards.values()}) == 3  # one card per concept
+    assert "Rewritten." in cards["C changed"].what and cards["C changed"].material_changes[0]["version"] == 2
+    assert len({c.concept["id"] for c in cards.values()}) == len(cards)  # one card per concept
 
 
-def test_review_cards_are_ordered_by_visible_groups_and_capped_at_two_with_an_honest_total(db, bootstrap):
-    _, _ = _due_at(db, bootstrap.user, name="Older due", age=400)
+def test_at_most_two_new_prompts_per_week_and_a_third_due_concept_is_not_newly_prompted(db, bootstrap):
+    _due_at(db, bootstrap.user, name="Older due", age=400)
     _due_at(db, bootstrap.user, name="Newer due", age=250)
     failed, fv = _due_at(db, bootstrap.user, name="Failed", age=200)
-    _failed_review(db, bootstrap.user, failed, fv, at=ago(4))
-    section = _today(db, bootstrap.user).sections.review
-    assert (section.total, section.shown) == (3, 2)
+    _failed_review(db, bootstrap.user, failed, fv, at=ago(4) - timedelta(hours=20))
+
+    first = _deliver(db, bootstrap.user)
+    assert len(first.new) == 2 and [d.slot for d in first.delivered] == [1, 2]
+    section = _review_section(db, bootstrap.user)
     assert [c.concept["name"] for c in section.items] == ["Failed", "Older due"]  # failed first, then longest overdue
-    assert _today(db, bootstrap.user).model_dump_json() == _today(db, bootstrap.user).model_dump_json()  # deterministic
+    assert section.not_prompted == 1 and section.allocation_pending is False  # known, but not newly prompted
+    assert section.quota["remaining"] == 0
+
+    again = _deliver(db, bootstrap.user)  # the week is full: nothing more is delivered
+    assert again.new == [] and len(_delivery_rows(db)) == 2
+    assert {c.concept["name"] for c in _review_section(db, bootstrap.user).items} == {"Failed", "Older due"}
 
 
-def test_the_review_section_is_empty_for_ineligible_or_undemonstrated_concepts(db, bootstrap):
-    concept, version = _concept(db, core=False)
-    _evidence(db, bootstrap.user, concept, version, at=ago(400))
-    other, ov = _concept(db)
-    _evidence(db, bootstrap.user, other, ov, at=ago(400), passed=False)
-    section = _today(db, bootstrap.user).sections.review
-    assert (section.total, section.shown, section.items) == (0, 0, [])
-    _plan(db, bootstrap.user, concept)  # an active plan makes the first one eligible
-    assert _today(db, bootstrap.user).sections.review.total == 1
+def test_refreshing_today_and_repeating_allocation_never_consume_more_quota(db, bootstrap, engine):
+    for i in range(3):
+        _due_at(db, bootstrap.user, name=f"Due {i}", age=200 + i)
+    _deliver(db, bootstrap.user)
+    rows = [(r.id, r.concept_id, r.slot, r.delivered_at) for r in _delivery_rows(db)]
+    before = _dump(engine)
+    statements = []
+
+    def spy(conn, cursor, statement, parameters, context, executemany):
+        if statement.lstrip().split(None, 1)[0].upper() in {"INSERT", "UPDATE", "DELETE", "REPLACE", "CREATE", "DROP", "ALTER"}:
+            statements.append(statement)
+
+    event.listen(engine, "before_cursor_execute", spy)
+    try:
+        for _ in range(5):  # refresh Today repeatedly
+            _today(db, bootstrap.user)
+    finally:
+        event.remove(engine, "before_cursor_execute", spy)
+    assert statements == [] and _dump(engine) == before  # zero writes, nothing consumed
+
+    for _ in range(3):  # and repeating the allocation action is idempotent
+        assert _deliver(db, bootstrap.user).new == []
+    assert [(r.id, r.concept_id, r.slot, r.delivered_at) for r in _delivery_rows(db)] == rows
 
 
-def _only_card(db, user):
-    (card,) = _today(db, user).sections.review.items
-    return card
+def test_the_same_logical_prompt_is_never_counted_twice_in_a_week(db, bootstrap):
+    concept, _ = _due_at(db, bootstrap.user, name="Once", age=200)
+    _deliver(db, bootstrap.user)
+    v2 = _publish(db, concept, at=ago(1), severity=ChangeSeverity.MATERIAL)  # its reason changes to "changed"
+    _deliver(db, bootstrap.user)
+    _passed_review(db, bootstrap.user, concept, v2, at=ago(0.5))  # resolved...
+    _publish(db, concept, at=ago(0.1), severity=ChangeSeverity.MATERIAL)  # ...and due again the same week
+    assert ReviewPromptService(db, now=NOW).preview(bootstrap.user.id).delivered  # still known as delivered
+    _deliver(db, bootstrap.user)
+    rows = _delivery_rows(db)
+    assert len(rows) == 1 and rows[0].concept_id == concept.id and rows[0].slot == 1
+    assert ReviewPromptService(db, now=NOW).preview(bootstrap.user.id).delivered[0].id == rows[0].id
 
 
-def test_a_card_offers_no_action_when_no_reviewed_check_exists(db, bootstrap):
-    _due_at(db, bootstrap.user, name="No item", age=200, item=False)
-    card = _only_card(db, bootstrap.user)
-    assert card.action == {"kind": "unavailable", "reason": "NO_REVIEW_ITEM"}
+def test_a_delivered_prompt_keeps_its_slot_after_the_review_is_done_and_the_card_goes_away(db, bootstrap):
+    a, av = _due_at(db, bootstrap.user, name="A", age=400)
+    _due_at(db, bootstrap.user, name="B", age=300)
+    _due_at(db, bootstrap.user, name="C", age=250)
+    _deliver(db, bootstrap.user)
+    _passed_review(db, bootstrap.user, a, av, at=ago(0.5))  # A is reviewed, so it is no longer due
+    assert {c.concept["name"] for c in _review_section(db, bootstrap.user).items} == {"B"}  # no card for a resolved prompt
+    assert _deliver(db, bootstrap.user).new == []  # ...but its delivery still counts: C is not newly prompted
+    assert len(_delivery_rows(db)) == 2
 
 
-def test_a_card_offers_to_continue_an_in_progress_review(db, bootstrap):
+def test_a_concept_that_becomes_due_later_in_the_week_takes_the_remaining_slot(db, bootstrap):
+    first, _ = _due_at(db, bootstrap.user, name="First", age=300)
+    one = _deliver(db, bootstrap.user)
+    assert [d.concept_id for d in one.delivered] == [first.id] and [d.slot for d in one.delivered] == [1]
+    second, _ = _due_at(db, bootstrap.user, name="Second", age=200)  # becomes due after the first prompt
+    two = _deliver(db, bootstrap.user)
+    assert two.new == [second.id]  # only the new Concept is delivered; the first is untouched
+    assert [(d.concept_id, d.slot) for d in two.delivered] == [(first.id, 1), (second.id, 2)]
+    assert len(_delivery_rows(db)) == 2
+
+
+def test_the_next_week_can_deliver_again_when_still_relevant(db, bootstrap):
+    _due_at(db, bootstrap.user, name="Still due", age=400)
+    week_one = _deliver(db, bootstrap.user)
+    next_week = NOW + timedelta(days=7)
+    assert _review_section(db, bootstrap.user, now=next_week).quota["delivered"] == 0  # a fresh week
+    week_two = _deliver(db, bootstrap.user, now=next_week)
+    assert len(week_one.new) == 1 and len(week_two.new) == 1
+    rows = _delivery_rows(db)
+    assert len(rows) == 2 and rows[0].week_start != rows[1].week_start and [r.slot for r in rows] == [1, 1]
+    assert _review_section(db, bootstrap.user, now=next_week).total == 1
+
+
+def test_the_week_runs_monday_to_monday_utc():
+    from app.services.review_prompt_service import week_start_of
+
+    monday = datetime(2026, 9, 14, tzinfo=timezone.utc)
+    assert week_start_of(datetime(2026, 9, 14, 0, 0, 0, tzinfo=timezone.utc)) == monday
+    assert week_start_of(datetime(2026, 9, 20, 23, 59, 59, tzinfo=timezone.utc)) == monday  # Sunday night
+    assert week_start_of(datetime(2026, 9, 21, 0, 0, 0, tzinfo=timezone.utc)) == monday + timedelta(days=7)
+    assert week_start_of(datetime(2026, 9, 16, 12, tzinfo=timezone.utc)) == monday
+
+
+def test_one_users_quota_never_affects_anothers(db, bootstrap):
+    other = _second_user(db, bootstrap)
+    for i in range(3):
+        _due_at(db, bootstrap.user, name=f"Mine {i}", age=200 + i)
+        c, v = _concept(db, name=f"Theirs {i}")
+        _evidence(db, other, c, v, at=ago(200 + i))
+        _item(db, c)
+    assert len(_deliver(db, bootstrap.user).new) == 2
+    theirs = _deliver(db, other)
+    assert len(theirs.new) == 2 and all(d.user_id == other.id for d in theirs.delivered)
+    assert _review_section(db, bootstrap.user).quota["delivered"] == 2
+    assert {c.concept["name"] for c in _review_section(db, other).items} <= {"Theirs 0", "Theirs 1", "Theirs 2"}
+    assert {d.user_id for d in _delivery_rows(db)} == {bootstrap.user.id, other.id}
+    assert len([d for d in _delivery_rows(db) if d.user_id == other.id]) == 2
+
+
+def test_an_exhausted_weekly_quota_never_prevents_a_voluntary_review(db, bootstrap):
+    _due_at(db, bootstrap.user, name="One", age=400)
+    _due_at(db, bootstrap.user, name="Two", age=300)
+    third, _ = _due_at(db, bootstrap.user, name="Three", age=200)
+    early, ev = _concept(db, name="Early")
+    _evidence(db, bootstrap.user, early, ev, at=rago(3))  # not even due
+    _item(db, early)
+    real = datetime.now(timezone.utc)
+    _deliver(db, bootstrap.user, now=real)
+    assert _review_section(db, bootstrap.user, now=real).quota["remaining"] == 0
+
+    service = ReviewAttemptService(db)
+    for concept in (third, early):  # a never-prompted due Concept, and one that is not due at all
+        assert service.availability(bootstrap.user.id, concept.id).action == "start"
+        attempt = service.start(bootstrap.user.id, concept.id).attempt
+        assert service.complete(bootstrap.user.id, attempt.id, [1]).passed
+    assert len(_delivery_rows(db)) == 2  # reviewing consumed no prompt quota
+
+
+def test_only_reviews_that_can_actually_be_started_are_prompted(db, bootstrap):
+    _due_at(db, bootstrap.user, name="No item", age=400, item=False)
+    cooling, cv = _due_at(db, bootstrap.user, name="Cooling", age=300)
+    _failed_review(db, bootstrap.user, cooling, cv, at=NOW - timedelta(hours=1))
+    ready, _ = _due_at(db, bootstrap.user, name="Ready", age=200)
+    assert [c.name for c in _prompts(db).candidates(bootstrap.user.id)] == ["Ready"]
+    _deliver(db, bootstrap.user)
+    assert {d.concept_id for d in _delivery_rows(db)} == {ready.id}  # quota is not spent on unusable prompts
+
+
+def test_a_delivered_prompt_stays_visible_even_when_the_review_then_enters_cooldown(db, bootstrap):
+    concept, version = _due_at(db, bootstrap.user, name="Cooling", age=202)
+    _deliver(db, bootstrap.user)
+    failed = _failed_review(db, bootstrap.user, concept, version, at=NOW - timedelta(hours=1))
+    card = _review_section(db, bootstrap.user).items[0]
+    assert card.kind == "REVIEW_FAILED" and card.attempt["id"] == failed.id and card.attempt["status"] == "failed"
+    assert card.action["kind"] == "unavailable" and card.action["reason"] == "COOLDOWN"
+    assert card.action["available_after"] == NOW + timedelta(hours=11)
+    later = _review_section(db, bootstrap.user, now=NOW + timedelta(hours=11, minutes=30))  # cooldown over, same week
+    assert later.items[0].action["kind"] == "start_review"
+
+
+def test_a_delivered_prompt_offers_to_continue_an_in_progress_review(db, bootstrap):
     concept, _ = _due_at(db, bootstrap.user, name="Started", age=201)
+    _deliver(db, bootstrap.user)
     attempt = ReviewAttemptService(db, now=NOW).start(bootstrap.user.id, concept.id).attempt
-    card = _only_card(db, bootstrap.user)
+    card = _review_section(db, bootstrap.user).items[0]
     assert card.action["kind"] == "continue_review" and card.action["attempt_id"] == attempt.id
     assert card.attempt["status"] == "started" and card.attempt["id"] == attempt.id
 
 
-def test_a_card_after_a_failed_review_shows_the_attempt_and_the_wait(db, bootstrap):
-    concept, version = _due_at(db, bootstrap.user, name="Cooling", age=202)
-    failed = _failed_review(db, bootstrap.user, concept, version, at=NOW - timedelta(hours=1))
-    card = _only_card(db, bootstrap.user)
-    assert card.kind == "REVIEW_FAILED"
-    assert card.attempt["id"] == failed.id and card.attempt["status"] == "failed"
-    assert card.action["kind"] == "unavailable" and card.action["reason"] == "COOLDOWN"
-    assert card.action["available_after"] == NOW + timedelta(hours=11)
-    assert _today(db, bootstrap.user, now=NOW + timedelta(hours=12)).sections.review.items[0].action["kind"] == "start_review"
-
-
 def test_the_full_action_states_are_reachable(db, bootstrap):
-    """Cap-free check of each availability outcome through the service."""
     service = ReviewAttemptService(db, now=NOW)
     no_item, _ = _due_at(db, bootstrap.user, name="No item", age=200, item=False)
     assert service.availability(bootstrap.user.id, no_item.id).reason == "NO_REVIEW_ITEM"
@@ -1024,23 +1265,102 @@ def test_the_full_action_states_are_reachable(db, bootstrap):
     assert service.availability(bootstrap.user.id, "missing").reason == "NOT_FOUND"
 
 
+def test_the_review_section_is_empty_for_ineligible_or_undemonstrated_concepts(db, bootstrap):
+    concept, version = _concept(db, core=False)
+    _evidence(db, bootstrap.user, concept, version, at=ago(400))
+    _item(db, concept)
+    other, ov = _concept(db)
+    _evidence(db, bootstrap.user, other, ov, at=ago(400), passed=False)
+    _item(db, other)
+    _deliver(db, bootstrap.user)
+    section = _review_section(db, bootstrap.user)
+    assert (section.total, section.items, section.not_prompted, section.allocation_pending) == (0, [], 0, False)
+    _plan(db, bootstrap.user, concept)  # an active plan makes the first one eligible
+    _deliver(db, bootstrap.user)
+    assert _review_section(db, bootstrap.user).total == 1
+
+
 def test_another_users_review_state_never_appears_on_todays_review_section(db, bootstrap):
     other = _second_user(db, bootstrap)
     concept, version = _concept(db)
     _evidence(db, other, concept, version, at=ago(400))
     _item(db, concept)
-    assert _today(db, bootstrap.user).sections.review.total == 0
-    assert _today(db, other).sections.review.total == 1
+    _deliver(db, bootstrap.user)
+    _deliver(db, other)
+    assert _review_section(db, bootstrap.user).total == 0
+    assert _review_section(db, other).total == 1
 
 
 def test_the_review_section_does_not_change_the_existing_signal_sections(db, bootstrap):
     """4A semantics are frozen: a review-due concept adds review cards only."""
-    _, _ = _due_at(db, bootstrap.user, name="Quiet", age=200)
-    result = _today(db, bootstrap.user)
-    s = result.sections
+    _due_at(db, bootstrap.user, name="Quiet", age=200)
+    _deliver(db, bootstrap.user)
+    s = _today(db, bootstrap.user).sections
     assert all(section.total == 0 for section in (
         s.worth_revisiting, s.used_models_changed, s.watched_developments, s.experiments_to_rerun, s.concepts_changed))
     assert s.review.total == 1
+
+
+def test_the_database_caps_prompts_at_two_per_user_per_week(db, bootstrap):
+    a, _ = _concept(db)
+    b, _ = _concept(db)
+    c, _ = _concept(db)
+    week = datetime(2026, 9, 14, tzinfo=timezone.utc)
+
+    def add(concept, slot, *, when=week, user=None):
+        db.add(ReviewPromptDelivery(user_id=(user or bootstrap.user).id, concept_id=concept.id, week_start=when,
+                                    slot=slot, prompt_kind="REVIEW_DUE", delivered_at=NOW))
+
+    def refused(concept, slot, **kwargs):
+        add(concept, slot, **kwargs)
+        with pytest.raises(IntegrityError):
+            db.commit()
+        db.rollback()
+
+    add(a, 1)
+    add(b, 2)
+    db.commit()
+    refused(c, 3)  # a third delivery in a week cannot exist (slot is 1 or 2)
+    refused(c, 0)
+    refused(c, 1)  # slot 1 is taken this week
+    week_two = week + timedelta(days=7)
+    add(a, 1, when=week_two)
+    db.commit()
+    refused(a, 2, when=week_two)  # the same Concept twice in one week, even in a free slot
+    add(a, 1, when=week + timedelta(days=14))  # a new week starts fresh
+    add(c, 1, user=_second_user(db, bootstrap))  # and another user has their own quota
+    db.commit()
+    assert len(_delivery_rows(db)) == 5
+
+
+def test_concurrent_allocations_never_exceed_two_prompts(db, session_factory, bootstrap):
+    for i in range(4):
+        _due_at(db, bootstrap.user, name=f"Due {i}", age=400 - i)
+    base = datetime.now(timezone.utc)
+    barrier, results, errors = threading.Barrier(6), [], []
+
+    def worker():
+        session = session_factory()
+        try:
+            barrier.wait(timeout=10)
+            results.append(ReviewPromptService(session, now=base).allocate(bootstrap.user.id))
+        except Exception as exc:  # noqa: BLE001  # pragma: no cover - surfaced by the assertion below
+            errors.append(exc)
+        finally:
+            session.close()
+
+    threads = [threading.Thread(target=worker) for _ in range(6)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=60)
+    assert not errors, errors
+    db.expire_all()
+    rows = _delivery_rows(db)
+    assert len(rows) == 2 and sorted(r.slot for r in rows) == [1, 2]
+    assert len({r.concept_id for r in rows}) == 2
+    assert sum(len(r.new) for r in results) == 2  # exactly two newly delivered across every caller
+    assert all(len(r.delivered) == 2 for r in results)
 
 
 # =============================================================================
@@ -1123,7 +1443,10 @@ def test_today_get_with_review_data_is_read_only_and_private(client, auth_header
     _item(db, concept)
     _plan(db, bootstrap.user, concept)
     failed, fv = _due_core(db, bootstrap.user)
+    _item(db, failed)
     _failed_review(db, bootstrap.user, failed, fv, at=rago(2))
+    assert ReviewPromptService(db).allocate(bootstrap.user.id).new  # prompts were delivered earlier this week
+    db.expire_all()
     before = _dump(engine)
     statements = []
 
@@ -1139,13 +1462,14 @@ def test_today_get_with_review_data_is_read_only_and_private(client, auth_header
     assert response.status_code == 200, response.text
     assert statements == [] and _dump(engine) == before  # nothing moved: learner state, evidence, plans, Radar, MA8
     review = response.json()["sections"]["review"]
-    assert review["total"] == 2 and {c["kind"] for c in review["items"]} == {"REVIEW_DUE", "REVIEW_FAILED"}
+    assert review["quota"]["limit"] == 2 and "allocation_pending" in review and "not_prompted" in review
     assert "SECRET-QUESTION-BODY" not in response.text and "answer_key" not in response.text
     assert set(review["items"][0]["action"]) <= {"kind", "reason", "available_after", "learning_item_id", "attempt_id"}
 
 
 def test_no_score_or_ranking_fields_in_the_review_section(db, bootstrap):
     _due_at(db, bootstrap.user, name="A", age=200)
+    _deliver(db, bootstrap.user)
     payload = _today(db, bootstrap.user).model_dump(mode="json")["sections"]["review"]
 
     def keys(node):
@@ -1158,3 +1482,56 @@ def test_no_score_or_ranking_fields_in_the_review_section(db, bootstrap):
                 yield from keys(item)
 
     assert not ({"score", "priority", "rank", "ranking", "importance", "urgency"} & set(keys(payload)))
+
+
+def test_api_allocation_delivers_at_most_two_prompts_and_is_idempotent(client, auth_headers, db, bootstrap):
+    for i in range(3):
+        concept, _ = _due_core(db, bootstrap.user, name=f"Alloc {i}", evidence_age_days=400 - i)
+        _item(db, concept)
+    first = client.post("/learning-reviews/prompts/allocate", headers=auth_headers)
+    assert first.status_code == 200, first.text
+    body = first.json()
+    assert body["limit"] == 2 and body["new_count"] == 2 and len(body["delivered"]) == 2
+    assert [d["slot"] for d in body["delivered"]] == [1, 2] and all(d["new"] for d in body["delivered"])
+    again = client.post("/learning-reviews/prompts/allocate", headers=auth_headers).json()
+    assert again["new_count"] == 0 and not any(d["new"] for d in again["delivered"])
+    assert [d["concept_id"] for d in again["delivered"]] == [d["concept_id"] for d in body["delivered"]]
+    assert db.execute(select(func.count()).select_from(ReviewPromptDelivery)).scalar() == 2
+
+
+def test_api_allocation_requires_authentication_and_is_user_scoped(client, db, bootstrap, as_user):
+    assert client.post("/learning-reviews/prompts/allocate").status_code == 401
+    for i in range(2):
+        concept, _ = _due_core(db, bootstrap.user, name=f"Mine {i}")
+        _item(db, concept)
+    other = _second_user(db, bootstrap)
+    as_user(other)
+    theirs = client.post("/learning-reviews/prompts/allocate").json()
+    assert theirs["new_count"] == 0 and theirs["delivered"] == []  # nothing of the owner's is theirs
+    as_user(bootstrap.user)
+    assert client.post("/learning-reviews/prompts/allocate").json()["new_count"] == 2
+
+
+def test_the_quota_never_blocks_starting_a_review_through_the_api(client, auth_headers, db, bootstrap):
+    concepts = []
+    for i in range(3):
+        concept, _ = _due_core(db, bootstrap.user, name=f"Quota {i}", evidence_age_days=400 - i)
+        _item(db, concept)
+        concepts.append(concept)
+    client.post("/learning-reviews/prompts/allocate", headers=auth_headers)
+    delivered = {d.concept_id for d in db.execute(select(ReviewPromptDelivery)).scalars()}
+    unprompted = next(c for c in concepts if c.id not in delivered)
+    started = client.post("/learning-reviews", json={"concept_id": unprompted.id}, headers=auth_headers)
+    assert started.status_code == 201, started.text  # quota exhausted, yet a voluntary review starts
+
+
+def test_today_reports_pending_allocation_without_writing(client, auth_headers, db, bootstrap, engine):
+    concept, _ = _due_core(db, bootstrap.user)
+    _item(db, concept)
+    before = _dump(engine)
+    review = client.get("/stay-ahead/today", headers=auth_headers).json()["sections"]["review"]
+    assert review["allocation_pending"] is True and review["total"] == 0 and review["not_prompted"] == 1
+    assert _dump(engine) == before  # asking for Today did not deliver anything
+    client.post("/learning-reviews/prompts/allocate", headers=auth_headers)
+    review = client.get("/stay-ahead/today", headers=auth_headers).json()["sections"]["review"]
+    assert review["allocation_pending"] is False and review["total"] == 1 and review["quota"]["delivered"] == 1

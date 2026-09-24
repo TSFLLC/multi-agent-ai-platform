@@ -6,6 +6,14 @@ STARTED -> PASSED | FAILED and nothing else: which Concepts are due is derived
 by ``ReviewAssessor`` (through ``LearnerStateService``), and ``LearnerStateService``
 stays the only authority for the ladder.
 
+Permission versus prompting. REVIEW_DUE (and the weekly prompt quota in
+``review_prompt_service``) only decide what is *recommended*. They never decide
+whether a review is *allowed*: an eligible learner with a DEMONSTRATED Concept
+may start a review at any time. What does gate a start is the Concept's
+eligibility (core or in an active plan), the demonstrated-history requirement,
+a valid reviewed check item, the single in-progress attempt, and the 12-hour
+cooldown after a failed review (spec Sec 19.2).
+
 Successful-review evidence contract — a PASSED attempt is never enough:
 
 1. The attempt's item must satisfy the review evidence-quality contract
@@ -77,7 +85,6 @@ _UNAVAILABLE_MESSAGES = {
     "NOT_FOUND": "That Concept does not exist.",
     "NOT_DEMONSTRATED": "Only a Concept you have demonstrated can be reviewed.",
     "NOT_ELIGIBLE": "Reviews apply to core Concepts and Concepts in your active plan.",
-    "NOT_DUE": "This Concept is not due for review.",
     "COOLDOWN": "A retry is available after a short wait.",
     "NO_REVIEW_ITEM": "No reviewed check is available for this Concept yet.",
     "NO_VERSION": "This Concept has no published version to review against.",
@@ -176,7 +183,7 @@ class ReviewAttemptService:
     ) -> ReviewAvailability:
         """What the learner can do about this Concept right now. Read-only:
         the same decision ``start`` acts on, so a card never offers what the
-        API would refuse."""
+        API would refuse. Being due is NOT required — early review is allowed."""
         if self.db.get(Concept, concept_id) is None:
             return ReviewAvailability("unavailable", "NOT_FOUND")
         state = state or self._learner_state.state(user_id, concept_id, now=self._clock())
@@ -191,8 +198,6 @@ class ReviewAttemptService:
             return ReviewAvailability("unavailable", "NOT_DEMONSTRATED")
         if not review.eligible:
             return ReviewAvailability("unavailable", "NOT_ELIGIBLE")
-        if not (review.due or review.failed):
-            return ReviewAvailability("unavailable", "NOT_DUE")
         if review.cooldown_until is not None and self._clock() < review.cooldown_until:
             return ReviewAvailability("unavailable", "COOLDOWN", available_after=review.cooldown_until)
         if self._concepts.get_current_version(concept_id) is None:
@@ -242,7 +247,7 @@ class ReviewAttemptService:
             attempt = self.get(user_id, availability.attempt_id)
             return StartResult(attempt, self.item_for(attempt), created=False)
         if availability.action != "start":
-            reason = availability.reason or "NOT_DUE"
+            reason = availability.reason or "UNAVAILABLE"
             if reason == "NOT_FOUND":
                 raise NotFoundError(_UNAVAILABLE_MESSAGES[reason])
             raise ReviewNotAvailableError(

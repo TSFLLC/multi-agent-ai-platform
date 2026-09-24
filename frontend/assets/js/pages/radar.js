@@ -2,6 +2,7 @@ import { api } from "../api.js";
 import { el, mount, clear } from "../dom.js";
 import { formatDateTime, truncate } from "../format.js";
 import { navigate } from "../router.js";
+import { allocationPending } from "../stayAhead.js";
 import { stayAheadBlock, stayAheadUnavailable } from "./stayAhead.js";
 
 const LIMIT = 50;
@@ -195,7 +196,20 @@ function section(title, items, emptyText) {
 
 async function todayStayAhead() {
   try {
-    return stayAheadBlock(await api.get("/stay-ahead/today"));
+    let data = await api.get("/stay-ahead/today");
+    // Reading Today never delivers a review prompt. When the server says an
+    // allocation would deliver more (at most two per week), ask for it through
+    // its own explicit, idempotent action, then read again. A failure here is
+    // contained: Today still shows what it already has.
+    if (allocationPending(data)) {
+      try {
+        await api.post("/learning-reviews/prompts/allocate");
+        data = await api.get("/stay-ahead/today");
+      } catch (error) {
+        /* keep the data already loaded */
+      }
+    }
+    return stayAheadBlock(data);
   } catch (error) {
     return stayAheadUnavailable(error);
   }

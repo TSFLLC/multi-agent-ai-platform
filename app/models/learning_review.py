@@ -21,7 +21,7 @@ UNIQUE would misbehave with NULLs.
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, text
+from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, Integer, String, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -77,3 +77,40 @@ class ReviewAttempt(UUIDPrimaryKeyMixin, Base):
     )
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
     completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ReviewPromptDelivery(UUIDPrimaryKeyMixin, Base):
+    """One delivered review prompt — the persistence behind "at most two review
+    prompts per week" (spec Sec 22.2, AIL.4 acceptance criterion 2).
+
+    A delivery is the persisted, first-time surfacing of a review prompt for one
+    Concept to one user in one UTC calendar week (Monday 00:00 UTC start). It is
+    written only by the explicit allocation action
+    (``app.services.review_prompt_service``), never by recomputing or reading
+    Today, so refreshing Today cannot consume quota.
+
+    The weekly cap is enforced by the database, not only by the service: ``slot``
+    is 1 or 2 and unique per (user, week), so a third delivery in a week cannot
+    exist even under concurrent allocation; and a Concept is delivered at most
+    once per (user, week), so the same logical prompt is never counted twice. A
+    prompt affects proactive prompting only — it never gates whether a learner
+    may review.
+    """
+
+    __tablename__ = "review_prompt_deliveries"
+    __table_args__ = (
+        CheckConstraint("slot IN (1, 2)", name="ck_review_prompt_deliveries_slot"),
+        UniqueConstraint("user_id", "week_start", "slot", name="uq_review_prompt_deliveries_user_week_slot"),
+        UniqueConstraint(
+            "user_id", "concept_id", "week_start", name="uq_review_prompt_deliveries_user_concept_week"
+        ),
+    )
+
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    concept_id: Mapped[str] = mapped_column(ForeignKey("concepts.id", ondelete="CASCADE"), nullable=False)
+    week_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    slot: Mapped[int] = mapped_column(Integer, nullable=False)
+    # REVIEW_DUE | REVIEW_FAILED | CONCEPT_CHANGED_REVIEW — why it was prompted
+    # when it was delivered (the live card recomputes the current reason).
+    prompt_kind: Mapped[str] = mapped_column(String(40), nullable=False)
+    delivered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)

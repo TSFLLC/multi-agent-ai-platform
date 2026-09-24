@@ -33,7 +33,7 @@ globalThis.document = {
 
 const {
   STAY_AHEAD_SECTIONS, reviewActionModel, reviewCardModel, reviewOutcome, reviewReasonLabel, overlayLabel,
-  stayAheadModel, validateReviewSelection, allEmptyText,
+  stayAheadModel, validateReviewSelection, allEmptyText, reviewQuotaText, allocationPending,
 } = await import("../assets/js/stayAhead.js");
 const { reviewCard, stayAheadBlock } = await import("../assets/js/pages/stayAhead.js");
 
@@ -68,7 +68,7 @@ function card(overrides = {}) {
     concept: { id: "c-1", kind: "definitional", name: "Tokens", slug: "tokens" },
     learner_state: { ladder: "demonstrated", overlays: ["review_due"] },
     baseline: { evidence_id: "e-1", evidence_type: "knowledge_check", recorded_at: "2026-03-01T00:00:00Z", concept_version: 1 },
-    interval: { days: 180, base_days: 180, streak: 0, due_at: "2026-08-28T00:00:00Z" },
+    interval: { days: 180, base_days: 180, successful_reviews: 0, due_at: "2026-08-28T00:00:00Z" },
     material_changes: [],
     attempt: null,
     action: { kind: "start_review", learning_item_id: "i-1" },
@@ -159,7 +159,7 @@ test("card kinds, reasons and overlays use plain deterministic labels", () => {
   assert.equal(reviewReasonLabel("REVIEW_ELIGIBLE_PLAN"), "In your active plan");
   assert.equal(reviewReasonLabel("REVIEW_FAILED_LATEST"), "Latest review did not pass");
   assert.equal(overlayLabel("review_due"), "Review due");
-  const extended = reviewCardModel(card({ interval: { days: 360, base_days: 180, streak: 1, due_at: T } }));
+  const extended = reviewCardModel(card({ interval: { days: 360, base_days: 180, successful_reviews: 1, due_at: T } }));
   assert.equal(extended.interval, "Review interval: 360 days, extended after 1 successful review.");
 });
 
@@ -294,4 +294,31 @@ test("no user-facing review string scores, ranks or urges", () => {
   for (const word of ["score", "rank", "priority", "importance", "urgent", "must", "best", "#1"]) {
     assert.ok(!strings.includes(word), word);
   }
+});
+
+test("the weekly prompt quota is stated honestly and never as a limit on reviewing", () => {
+  assert.equal(reviewQuotaText(undefined), null);
+  assert.equal(reviewQuotaText({ quota: { limit: 2, delivered: 1, remaining: 1 }, not_prompted: 0 }), "Review prompts this week: 1 of 2.");
+  assert.equal(
+    reviewQuotaText({ quota: { limit: 2, delivered: 2, remaining: 0 }, not_prompted: 1 }),
+    "Review prompts this week: 2 of 2. 1 other due Concept is not prompted this week.",
+  );
+  assert.equal(
+    reviewQuotaText({ quota: { limit: 2, delivered: 2 }, not_prompted: 3 }),
+    "Review prompts this week: 2 of 2. 3 other due Concepts are not prompted this week.",
+  );
+  const text = reviewQuotaText({ quota: { limit: 2, delivered: 2 }, not_prompted: 3 }).toLowerCase();
+  for (const word of ["cannot", "can't", "not allowed", "blocked", "locked"]) assert.ok(!text.includes(word), word);
+});
+
+test("the review section shows the quota line, and only the server can say an allocation is pending", () => {
+  const section = { total: 1, shown: 1, items: [card()], quota: { limit: 2, delivered: 1, remaining: 1, week_start: T }, not_prompted: 1, allocation_pending: false };
+  const withQuota = { ...data(), sections: { ...data().sections, review: section } };
+  const block = stayAheadBlock(withQuota);
+  assert.match(block.textContent, /Review prompts this week: 1 of 2\. 1 other due Concept is not prompted this week\./);
+  assert.equal(allocationPending(withQuota), false);
+  assert.equal(allocationPending({ sections: { review: { allocation_pending: true } } }), true);
+  assert.equal(allocationPending({ sections: { review: { allocation_pending: "yes" } } }), false);
+  assert.equal(allocationPending(undefined), false);
+  assert.equal(allocationPending({ sections: {} }), false);
 });

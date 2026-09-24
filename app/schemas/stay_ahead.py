@@ -117,12 +117,22 @@ class StayAheadReviewCard(BaseModel):
     action: Dict[str, Any] = Field(default_factory=dict)
     evidence_refs: List[StayAheadEvidenceRef] = Field(default_factory=list)
     due_at: Optional[datetime] = None
+    # When this prompt was delivered (the persisted weekly delivery it rests on).
+    prompt: Optional[Dict[str, Any]] = None
 
 
 class StayAheadReviewSection(BaseModel):
+    """Only prompts already DELIVERED this week are cards. ``quota`` and
+    ``not_prompted`` describe the weekly limit; ``allocation_pending`` says whether
+    the explicit allocation action would deliver more (Today GET itself never
+    writes)."""
+
     total: int
     shown: int
     items: List[StayAheadReviewCard]
+    quota: Dict[str, Any] = Field(default_factory=dict)
+    not_prompted: int = 0
+    allocation_pending: bool = False
 
 
 class StayAheadSections(BaseModel):

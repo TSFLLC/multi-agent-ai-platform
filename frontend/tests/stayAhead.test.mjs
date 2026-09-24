@@ -313,3 +313,67 @@ test("Today reads Stay ahead with a single GET and never posts", async () => {
   assert.equal(calls.filter((c) => c === "/stay-ahead/today").length, 1);
   assert.ok(methods.every((m) => m === "GET"));
 });
+
+// -- AIL.4B: prompt allocation is a separate, explicit action, never part of reading Today --
+
+function reviewData(pending) {
+  const base = data();
+  return {
+    ...base,
+    sections: {
+      ...base.sections,
+      review: { total: 0, shown: 0, items: [], quota: { limit: 2, delivered: 0, remaining: 2, week_start: T }, not_prompted: 1, allocation_pending: pending },
+    },
+  };
+}
+
+function sequencedFetch(steps) {
+  const calls = [];
+  globalThis.fetch = async (path, options) => {
+    const method = options?.method || "GET";
+    calls.push(`${method} ${path}`);
+    const step = steps.find((s) => s.match(method, path)) || { status: 404, body: { error: { message: "not found" } } };
+    const body = typeof step.body === "function" ? step.body(calls) : step.body;
+    return { ok: (step.status || 200) === 200, statusText: "x", text: async () => JSON.stringify(body) };
+  };
+  return calls;
+}
+
+test("Today asks for prompt allocation only when the server says it is pending, then re-reads", async () => {
+  let delivered = false;
+  const calls = sequencedFetch([
+    { match: (m, p) => m === "GET" && p === "/stay-ahead/today", body: () => (delivered ? reviewData(false) : reviewData(true)) },
+    { match: (m, p) => m === "POST" && p === "/learning-reviews/prompts/allocate", body: () => { delivered = true; return { new_count: 1 }; } },
+    { match: (m, p) => m === "GET" && p.startsWith("/radar/developments"), body: [] },
+  ]);
+  const root = new FakeNode("div");
+  await renderToday(root);
+  assert.deepEqual(calls.filter((c) => c.includes("stay-ahead") || c.includes("learning-reviews")), [
+    "GET /stay-ahead/today", "POST /learning-reviews/prompts/allocate", "GET /stay-ahead/today",
+  ]);
+  assert.equal(calls.filter((c) => c.startsWith("POST")).length, 1);
+});
+
+test("Today never posts when nothing is pending, however often it is refreshed", async () => {
+  const calls = sequencedFetch([
+    { match: (m, p) => m === "GET" && p === "/stay-ahead/today", body: reviewData(false) },
+    { match: (m, p) => m === "GET" && p.startsWith("/radar/developments"), body: [] },
+  ]);
+  for (let i = 0; i < 3; i += 1) await renderToday(new FakeNode("div"));
+  assert.equal(calls.filter((c) => c.startsWith("POST")).length, 0);
+  assert.equal(calls.filter((c) => c === "GET /stay-ahead/today").length, 3);
+});
+
+test("a failed allocation never hides Today: the data already loaded is shown", async () => {
+  const calls = sequencedFetch([
+    { match: (m, p) => m === "GET" && p === "/stay-ahead/today", body: reviewData(true) },
+    { match: (m, p) => m === "POST", status: 500, body: { error: { message: "allocation failed" } } },
+    { match: (m, p) => m === "GET" && p.startsWith("/radar/developments"), body: [] },
+  ]);
+  const root = new FakeNode("div");
+  await renderToday(root);
+  assert.equal(calls.filter((c) => c.startsWith("POST")).length, 1);
+  assert.equal(calls.filter((c) => c === "GET /stay-ahead/today").length, 1); // no re-read after a failed allocation
+  assert.match(root.textContent, /Stay ahead/);
+  assert.doesNotMatch(root.textContent, /could not be loaded/);
+});

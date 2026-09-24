@@ -154,7 +154,13 @@ export function cardModel(signal, eyebrow) {
 export function sectionModel(config, section) {
   const build = config.cardType === "review" ? reviewCardModel : (item) => cardModel(item, config.eyebrow);
   const items = (section?.items || []).map(build);
-  return { ...config, total: Number(section?.total || 0), countText: sectionCountText(section), cards: items };
+  return {
+    ...config,
+    total: Number(section?.total || 0),
+    countText: sectionCountText(section),
+    cards: items,
+    quotaText: config.cardType === "review" ? reviewQuotaText(section) : null,
+  };
 }
 
 export function stayAheadModel(data) {
@@ -200,7 +206,6 @@ const REVIEW_KIND_LABELS = {
 
 const REVIEW_UNAVAILABLE = {
   NO_REVIEW_ITEM: "No reviewed check is available for this Concept yet.",
-  NOT_DUE: "This Concept is not due for review.",
   NOT_ELIGIBLE: "Reviews apply to core Concepts and Concepts in your active plan.",
   NOT_DEMONSTRATED: "Only a Concept you have demonstrated can be reviewed.",
   NO_VERSION: "This Concept has no published version to review against.",
@@ -245,7 +250,8 @@ export function reviewCardModel(card) {
     ? `Based on your ${String(card.baseline.evidence_type || "evidence").replaceAll("_", " ")} from ${whenText(card.baseline.recorded_at)}` +
       (card.baseline.concept_version ? ` (Concept version ${card.baseline.concept_version}).` : ".")
     : null;
-  const streak = card.interval?.streak ? `, extended after ${card.interval.streak} successful review${card.interval.streak === 1 ? "" : "s"}` : "";
+  const done = card.interval?.successful_reviews;
+  const extended = done ? `, extended after ${done} successful review${done === 1 ? "" : "s"}` : "";
   return {
     id: card.id,
     kind: card.kind,
@@ -261,7 +267,7 @@ export function reviewCardModel(card) {
       overlays: (card.learner_state?.overlays || []).map(overlayLabel),
     },
     baseline,
-    interval: card.interval?.days ? `Review interval: ${card.interval.days} days${streak}.` : null,
+    interval: card.interval?.days ? `Review interval: ${card.interval.days} days${extended}.` : null,
     attempt: attemptText(card.attempt),
     action: reviewActionModel(card.action),
   };
@@ -282,4 +288,25 @@ export function reviewOutcome(result) {
     message: result?.message || (result?.passed ? "Recorded." : "Not quite."),
     note: "Reload Today to see your updated review list.",
   };
+}
+
+// At most two review prompts are delivered per UTC week. This only says how many
+// have been delivered; it never claims more than the server reported, and being
+// out of prompts never means a review is not allowed.
+export function reviewQuotaText(section) {
+  const quota = section?.quota;
+  if (!quota || !quota.limit) return null;
+  const delivered = Number(quota.delivered || 0);
+  const others = Number(section?.not_prompted || 0);
+  const parts = [`Review prompts this week: ${delivered} of ${quota.limit}.`];
+  if (others > 0) {
+    parts.push(`${others} other due Concept${others === 1 ? " is" : "s are"} not prompted this week.`);
+  }
+  return parts.join(" ");
+}
+
+// True only when the server says an explicit allocation would deliver more.
+// Today itself never delivers a prompt; this is what lets the client ask.
+export function allocationPending(data) {
+  return data?.sections?.review?.allocation_pending === true;
 }

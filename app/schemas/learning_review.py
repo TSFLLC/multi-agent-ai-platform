@@ -60,3 +60,18 @@ class ReviewCompleteRead(BaseModel):
     replay: bool
     learner_state: ReviewLearnerStateRead
     message: str
+
+
+class ReviewPromptRead(BaseModel):
+    concept_id: str
+    slot: int
+    prompt_kind: str
+    delivered_at: datetime
+    new: bool  # delivered by THIS call (False for one delivered earlier this week)
+
+
+class ReviewPromptAllocationRead(BaseModel):
+    week_start: datetime
+    limit: int
+    delivered: List[ReviewPromptRead]
+    new_count: int

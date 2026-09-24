@@ -42,8 +42,8 @@ must report COMPLETED, and — because the engine claims an Agent Run terminal
 COMPLETED before it completes its Task Run — every slot's Agent Run(s) must be
 ``AgentRunStatus.COMPLETED`` with a recorded model snapshot.
 
-AIL.4B adds the ``review`` section (REVIEW_DUE / REVIEW_FAILED cards) from the
-learner-state overlays; the five families above are unchanged. A Concept can
+AIL.4B adds the ``review`` section (REVIEW_DUE / REVIEW_FAILED cards for prompts
+already delivered this week — GET never delivers, see ``review_prompt_service``); the five families above are unchanged. A Concept can
 therefore appear both in WORTH_REVISITING (a recorded change) and in the review
 section (a review is due) — different questions, deliberately not deduplicated.
 
@@ -138,7 +138,8 @@ from app.services.learner_state_service import (
 )
 from app.services.radar_service import derive_verification
 from app.services.review_attempt_service import ReviewAttemptService
-from app.services.review_retention_service import ReviewReasonCode
+from app.services.review_prompt_service import PromptPreview, ReviewPromptService
+from app.services.review_retention_service import ReviewReasonCode, prompt_sort_key
 
 DEFAULT_WINDOW_DAYS = 30
 MAX_WINDOW_DAYS = 90
@@ -150,8 +151,6 @@ SECTION_CAPS = {
     "watched_developments": 5,
     "experiments_to_rerun": 3,
     "concepts_changed": 5,
-    # AIL.4B: at most two review cards shown; the total is always reported.
-    "review": 2,
 }
 
 # Evidence a WATCHed Development can gain that counts as a change. Community
@@ -316,7 +315,7 @@ class StayAheadService:
                     absorbed.setdefault(cid, []).append(self._as_reason(item.signal))
 
         worth = self._worth_revisiting(learned, absorbed)
-        review_cards = self._review_cards(user_id, learned)
+        review_cards, prompts = self._review_cards(user_id, learned)
 
         def section(key: str, items: List[StayAheadSignal]) -> StayAheadSection:
             ordered = items if key == "worth_revisiting" else self._by_recency(items)
@@ -335,8 +334,16 @@ class StayAheadService:
                 concepts_changed=section("concepts_changed", [i.signal for i in standalone["concepts_changed"]]),
                 review=StayAheadReviewSection(
                     total=len(review_cards),
-                    shown=min(len(review_cards), SECTION_CAPS["review"]),
-                    items=review_cards[: SECTION_CAPS["review"]],
+                    shown=len(review_cards),
+                    items=review_cards,
+                    quota={
+                        "limit": prompts.limit,
+                        "delivered": len(prompts.delivered),
+                        "remaining": max(0, prompts.limit - len(prompts.delivered)),
+                        "week_start": _aware(prompts.week_start),
+                    },
+                    not_prompted=prompts.not_prompted,
+                    allocation_pending=prompts.allocation_pending,
                 ),
             ),
         )
@@ -1157,19 +1164,28 @@ class StayAheadService:
 
     # -- AIL.4B: review section ------------------------------------------------------
 
-    def _review_cards(self, user_id: str, learned: Dict[str, LearnerConceptState]) -> List[StayAheadReviewCard]:
-        """One card per Concept that is REVIEW_DUE or REVIEW_FAILED, straight
-        from the learner-state overlays (``LearnerStateService`` stays the
-        authority; nothing is recomputed or written here). A Concept gets a
-        single card: a failed latest review takes precedence over a material
-        change, which takes precedence over an elapsed interval."""
+    def _review_cards(
+        self, user_id: str, learned: Dict[str, LearnerConceptState]
+    ) -> Tuple[List[StayAheadReviewCard], PromptPreview]:
+        """One card per Concept whose review prompt has been DELIVERED this week
+        and that is still REVIEW_DUE or REVIEW_FAILED, straight from the
+        learner-state overlays (``LearnerStateService`` stays the authority).
+
+        Strictly read-only: prompt delivery is written only by the explicit
+        allocation action (``ReviewPromptService.allocate``), never here, so
+        recomputing or refreshing Today cannot consume the weekly quota. A
+        Concept gets a single card: a failed latest review takes precedence
+        over a material change, which takes precedence over an elapsed
+        interval."""
+        prompts = ReviewPromptService(self.db, now=self.now).preview(user_id, learned=learned)
+        delivered = {d.concept_id: d for d in prompts.delivered}
         candidates = [
             (concept_id, state)
             for concept_id, state in sorted(learned.items())
-            if state.review is not None and (state.review.failed or state.review.due)
+            if concept_id in delivered and state.review is not None and (state.review.failed or state.review.due)
         ]
         if not candidates:
-            return []
+            return [], prompts
         names = self._concept_names({cid for cid, _ in candidates})
         reviews = ReviewAttemptService(self.db, now=self.now)
         cards: List[StayAheadReviewCard] = []
@@ -1202,7 +1218,7 @@ class StayAheadService:
                 title = f"Review due: “{name}”"
                 what = f"Your review interval for this Concept ({review.interval_days} days) has elapsed."
                 extended = (
-                    f", extended after {_plural(review.streak, 'successful review')}" if review.streak else ""
+                    f", extended after {_plural(review.successful_reviews, 'successful review')}" if review.successful_reviews else ""
                 )
                 why = (
                     f"Your latest evidence for this {review.kind} Concept is from {_day(review.baseline.recorded_at)}. "
@@ -1262,7 +1278,7 @@ class StayAheadService:
                     interval={
                         "days": review.interval_days,
                         "base_days": review.base_interval_days,
-                        "streak": review.streak,
+                        "successful_reviews": review.successful_reviews,
                         "due_at": review.due_at,
                     },
                     material_changes=[
@@ -1282,20 +1298,19 @@ class StayAheadService:
                     action=action,
                     evidence_refs=refs,
                     due_at=review.due_at,
+                    prompt={
+                        "delivered_at": _aware(delivered[concept_id].delivered_at),
+                        "week_start": _aware(delivered[concept_id].week_start),
+                        "slot": delivered[concept_id].slot,
+                    },
                 )
             )
-        # Presentation order only, on visible fields: failed reviews first, then
-        # material changes, then elapsed intervals; within a group the longest
-        # overdue first, then name. No score is computed.
-        group = {"REVIEW_FAILED": 0, "CONCEPT_CHANGED_REVIEW": 1, "REVIEW_DUE": 2}
-        return sorted(
-            cards,
-            key=lambda c: (
-                group[c.kind],
-                _aware(c.due_at).timestamp() if c.due_at else float("inf"),
-                c.concept["name"].lower(),
-                c.id,
-            ),
+        # Presentation order only, on visible fields (the same order the allocator
+        # uses): failed reviews first, then material changes, then elapsed
+        # intervals; within a group the longest overdue first, then name. No score.
+        return (
+            sorted(cards, key=lambda c: prompt_sort_key(c.kind, c.due_at, c.concept["name"], c.concept["id"])),
+            prompts,
         )
 
     # -- WORTH_REVISITING (rollup) --------------------------------------------------

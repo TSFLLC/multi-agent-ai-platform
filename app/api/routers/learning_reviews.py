@@ -18,10 +18,13 @@ from app.schemas.learning_review import (
     ReviewCompleteRequest,
     ReviewItemRead,
     ReviewLearnerStateRead,
+    ReviewPromptAllocationRead,
+    ReviewPromptRead,
     ReviewStartRead,
     ReviewStartRequest,
 )
 from app.services.review_attempt_service import ReviewAttemptService, choice_spec
+from app.services.review_prompt_service import ReviewPromptService
 
 router = APIRouter(prefix="/learning-reviews", tags=["learning-reviews"])
 
@@ -51,6 +54,32 @@ def _item_read(item):
         options=spec["options"],
         multiple=spec["multiple"],
     )  # the answer key is never returned
+
+
+@router.post("/prompts/allocate", response_model=ReviewPromptAllocationRead)
+def allocate_review_prompts(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """Deliver the review prompts this user's week still has room for (at most
+    two per UTC week). This is the ONE write path for prompt delivery; Today
+    GET never writes. Idempotent: calling it again, or refreshing Today, delivers
+    nothing further for a Concept already delivered this week or once the week
+    is full. It never affects whether a review may be started."""
+    result = ReviewPromptService(db).allocate(user.id)
+    new = set(result.new)
+    return ReviewPromptAllocationRead(
+        week_start=result.week_start,
+        limit=result.limit,
+        delivered=[
+            ReviewPromptRead(
+                concept_id=d.concept_id,
+                slot=d.slot,
+                prompt_kind=d.prompt_kind,
+                delivered_at=d.delivered_at,
+                new=d.concept_id in new,
+            )
+            for d in result.delivered
+        ],
+        new_count=len(result.new),
+    )
 
 
 @router.post("", response_model=ReviewStartRead, status_code=201)

@@ -17,9 +17,10 @@ Rules (frozen AIL.4B contract):
   Qualifying = not a self-report, ``passed is True``, not demo data, not
   superseded.
 * Interval: by Concept kind (definitional 180 days, mechanism 120, operational
-  90, architectural 120), doubled after each successful review in the current
-  streak, capped at 365 days. The streak is the run of successful reviews since
-  the latest failed review. ``Concept.freshness_days`` is not used.
+  90, architectural 120), doubled after EACH qualifying successful review,
+  capped at 365 days. Every qualifying successful review of the Concept counts,
+  and a failed review never erases or resets that count: it may derive
+  REVIEW_FAILED, nothing more. ``Concept.freshness_days`` is not used.
 * REVIEW_DUE: eligible AND (interval elapsed OR a material ConceptVersion newer
   than the version the baseline evidence cites has been published).
 * REVIEW_FAILED: DEMONSTRATED and the latest completed review attempt failed.
@@ -82,10 +83,10 @@ def _aware(value: Optional[datetime]) -> Optional[datetime]:
     return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
 
 
-def interval_days_for(kind: ConceptKind, streak: int) -> int:
-    """Base interval doubled once per successful review in the streak, capped."""
+def interval_days_for(kind: ConceptKind, successful_reviews: int) -> int:
+    """Base interval doubled once per qualifying successful review, capped."""
     days = BASE_INTERVAL_DAYS[kind]
-    for _ in range(max(0, streak)):
+    for _ in range(max(0, successful_reviews)):
         days *= 2
         if days >= MAX_INTERVAL_DAYS:
             return MAX_INTERVAL_DAYS
@@ -134,7 +135,7 @@ class ReviewAssessment:
     baseline: Optional[ReviewBaseline]
     base_interval_days: int
     interval_days: int
-    streak: int
+    successful_reviews: int  # every qualifying successful review; a failure never resets it
     due_at: Optional[datetime]
     interval_elapsed: bool
     material_changes: List[Dict[str, Any]]
@@ -207,13 +208,11 @@ class ReviewAssessor:
         latest_completed = completed[-1] if completed else None
         active = next((a for a in reversed(attempts) if a.status == ReviewAttemptStatus.STARTED), None)
 
-        streak = 0
-        for attempt in reversed(completed):
-            if attempt.status == ReviewAttemptStatus.FAILED:
-                break
-            streak += 1
+        # Every qualifying successful review counts. A failed review is not a
+        # reason to forget the successes before it.
+        successful_reviews = sum(1 for a in completed if a.status == ReviewAttemptStatus.PASSED)
         base_days = BASE_INTERVAL_DAYS[concept.kind]
-        interval_days = interval_days_for(concept.kind, streak)
+        interval_days = interval_days_for(concept.kind, successful_reviews)
 
         qualifying = [e for e in evidence if evidence_qualifies(e)]
         versions = list(
@@ -308,7 +307,7 @@ class ReviewAssessor:
             baseline=baseline,
             base_interval_days=base_days,
             interval_days=interval_days,
-            streak=streak,
+            successful_reviews=successful_reviews,
             due_at=due_at,
             interval_elapsed=interval_elapsed,
             material_changes=material_changes,
@@ -320,3 +319,32 @@ class ReviewAssessor:
             cooldown_until=cooldown_until,
             reason_codes=reason_codes,
         )
+
+
+# -- presentation kind and order, shared by Today cards and prompt allocation ------------
+#
+# One definition, so the card a learner sees and the prompt the allocator chooses
+# can never disagree. Presentation only: a visible group and visible dates, no score.
+
+_KIND_GROUP = {"REVIEW_FAILED": 0, "CONCEPT_CHANGED_REVIEW": 1, "REVIEW_DUE": 2}
+
+
+def review_kind(review: ReviewAssessment) -> str:
+    """A failed latest review takes precedence over a material change, which
+    takes precedence over an elapsed interval."""
+    if review.failed:
+        return "REVIEW_FAILED"
+    if ReviewReasonCode.REVIEW_CONCEPT_CHANGED.value in review.due_reasons:
+        return "CONCEPT_CHANGED_REVIEW"
+    return "REVIEW_DUE"
+
+
+def prompt_sort_key(kind: str, due_at: Optional[datetime], name: str, concept_id: str):
+    """Failed reviews first, then material changes, then elapsed intervals;
+    within a group the longest overdue first, then name, then id."""
+    return (
+        _KIND_GROUP[kind],
+        _aware(due_at).timestamp() if due_at else float("inf"),
+        name.lower(),
+        concept_id,
+    )
