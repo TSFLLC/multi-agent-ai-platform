@@ -341,6 +341,7 @@ class AgentRunRole(str, enum.Enum):
     REVIEWER = "reviewer"
     REPAIR = "repair"
     EVALUATOR = "evaluator"
+    PROFESSOR = "professor"
 
 
 class ReviewDecision(str, enum.Enum):
