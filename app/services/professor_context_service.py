@@ -303,7 +303,11 @@ class ProfessorContextAssembler:
             ProfessorProvenanceKind.LEARNING_RECORD,
             data=today_data,
         )
-        facts["today_signal_count"] = sum(len(section.items) for section in today.sections.model_dump(mode="python").values() if isinstance(section, dict) and "items" in section)
+        facts["today_signal_count"] = sum(
+            len(section["items"])
+            for section in today.sections.model_dump(mode="python").values()
+            if isinstance(section, dict) and "items" in section
+        )
         plan = sorted(self._plans.get_plan(user_id), key=lambda item: (item.position, item.id))
         candidate = next((item for item in plan if _value(item.state) in {"planned", "proposed"}), None)
         if candidate is None:

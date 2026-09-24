@@ -26,22 +26,30 @@ from app.models.learning_review import ReviewAttempt, ReviewPromptDelivery
 from app.models.radar import Claim, ClaimCreationMethod, ClaimStatus, ClaimType, Development
 from app.models.tasks import TaskRun
 from app.schemas.professor import (
+    ProfessorAssertionKind,
     ProfessorAttachment,
     ProfessorAttachmentType,
+    ProfessorClaimProvenance,
     ProfessorContext,
     ProfessorContextRecord,
     ProfessorContextRequest,
     ProfessorEvidenceReference,
-    ProfessorClaimProvenance,
-    ProfessorProvenanceReference,
-    ProfessorAssertionKind,
     ProfessorGroundedAssertion,
     ProfessorIntent,
     ProfessorProvenanceKind,
+    ProfessorProvenanceReference,
     ProfessorResponse,
     ProfessorSuggestedAction,
     ProfessorTarget,
     ProfessorTargetType,
+)
+from app.schemas.stay_ahead import (
+    StayAheadFamily,
+    StayAheadReviewSection,
+    StayAheadSection,
+    StayAheadSections,
+    StayAheadSignal,
+    StayAheadToday,
 )
 from app.services.concept_graph_service import ConceptGraphService
 from app.services.learning_evidence_service import LearningEvidenceService
@@ -332,9 +340,45 @@ def test_concept_context_is_user_scoped_and_read_only(db, bootstrap):
     assert version.id in {record.ref_id for record in context.records if record.ref_type == "concept_version"}
 
 
+def test_next_context_counts_today_items_from_collection_values(db, bootstrap, monkeypatch):
+    now = datetime.now(timezone.utc)
+    signal = StayAheadSignal(
+        id="today-signal",
+        family=StayAheadFamily.WORTH_REVISITING,
+        title="Review a concept",
+        what_changed="A concept is ready to revisit.",
+        why="It is part of the learner's current context.",
+        reason_codes=[],
+        changed_at=now,
+    )
+    today = StayAheadToday(
+        generated_at=now,
+        window_days=7,
+        window_start=now,
+        sections=StayAheadSections(
+            worth_revisiting=StayAheadSection(total=1, shown=1, items=[signal]),
+            used_models_changed=StayAheadSection(total=0, shown=0, items=[]),
+            watched_developments=StayAheadSection(total=0, shown=0, items=[]),
+            experiments_to_rerun=StayAheadSection(total=0, shown=0, items=[]),
+            concepts_changed=StayAheadSection(total=0, shown=0, items=[]),
+            review=StayAheadReviewSection(total=0, shown=0, items=[]),
+        ),
+    )
+    monkeypatch.setattr("app.services.professor_context_service.StayAheadService.today", lambda self, user_id: today)
+
+    context = ProfessorContextAssembler(db).assemble(
+        bootstrap.user.id,
+        ProfessorContextRequest(intent=ProfessorIntent.WHAT_SHOULD_I_LEARN_NEXT),
+    )
+
+    assert context.deterministic_facts["today_signal_count"] == 1
+    assert len(context.records) <= 150
+    assert any(record.ref_type == "today" for record in context.records)
+
+
 def test_professor_context_and_validation_do_not_mutate_protected_domains(db, bootstrap):
     concept = make_concept(db, slug="professor-snapshot-concept")
-    version = make_published_version(db, concept)
+    make_published_version(db, concept)
     development = Development(
         title="Snapshot development",
         development_type="release",
