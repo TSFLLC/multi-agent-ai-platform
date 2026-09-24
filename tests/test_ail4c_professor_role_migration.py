@@ -77,6 +77,21 @@ def test_professor_role_upgrade_preserves_rows_and_integrity(db_path):
     engine.dispose()
 
 
+def test_upgrade_recovers_known_stale_sqlite_batch_table(db_path):
+    command.upgrade(_cfg(), PREVIOUS_HEAD)
+    engine = _engine(db_path)
+    with engine.begin() as conn:
+        conn.exec_driver_sql("CREATE TABLE _alembic_tmp_agent_runs (id VARCHAR(36) NOT NULL)")
+    engine.dispose()
+
+    command.upgrade(_cfg(), NEW_HEAD)
+    engine = _engine(db_path)
+    with engine.begin() as conn:
+        assert conn.execute(text("SELECT name FROM sqlite_master WHERE name = '_alembic_tmp_agent_runs'")).scalar_one_or_none() is None
+        assert conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == NEW_HEAD
+        _clean(conn)
+    engine.dispose()
+
 def test_professor_role_downgrade_refuses_without_relabeling(db_path):
     command.upgrade(_cfg(), NEW_HEAD)
     engine = _engine(db_path)

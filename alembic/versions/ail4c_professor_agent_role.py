@@ -27,6 +27,17 @@ def _role_enum(*values):
 
 def upgrade() -> None:
     bind = op.get_bind()
+    # SQLite batch DDL is non-transactional. If a hosted process is killed
+    # after creating Alembic's temporary table but before the rename, a retry
+    # must remove only that known intermediate object. The canonical table
+    # must still exist; otherwise refuse to guess or discard data.
+    table_names = set(sa.inspect(bind).get_table_names())
+    if "_alembic_tmp_agent_runs" in table_names:
+        if "agent_runs" not in table_names:
+            raise RuntimeError(
+                "Cannot recover agent_runs migration: canonical agent_runs table is missing."
+            )
+        op.drop_table("_alembic_tmp_agent_runs")
     existing = _role_checks(bind)
     with op.batch_alter_table("agent_runs", schema=None) as batch_op:
         if "agentrunrole" in existing:
