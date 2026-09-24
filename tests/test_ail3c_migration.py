@@ -69,10 +69,10 @@ def _pragma_clean(conn) -> None:
 
 
 def test_single_alembic_head():
-    # AIL.3C's revision is no longer the tip (AIL.4B sits directly above it),
-    # but the chain is still linear with exactly one head.
+    # AIL.3C is below the frozen AIL.4B revision and the authorized AIL.4C
+    # role migration; the chain remains linear with exactly one current head.
     script = ScriptDirectory.from_config(_cfg())
-    assert script.get_heads() == ["ail4b_review_attempts"]
+    assert script.get_heads() == ["ail4c_professor_agent_role"]
     assert script.get_revision("ail4b_review_attempts").down_revision == HEAD
 
 

@@ -105,8 +105,9 @@ def _other_table_sql(conn) -> dict:
 
 def test_single_linear_head_above_ail3c():
     script = ScriptDirectory.from_config(_cfg())
-    assert script.get_heads() == [HEAD]
+    assert script.get_heads() == ["ail4c_professor_agent_role"]
     assert script.get_revision(HEAD).down_revision == BASE
+    assert script.get_revision("ail4c_professor_agent_role").down_revision == HEAD
 
 
 def test_upgrade_is_purely_additive_and_keeps_existing_data(db_path):
