@@ -291,7 +291,7 @@ def test_a_successful_review_resets_the_clock_and_extends_the_interval(db, boots
     assert _review(db, bootstrap.user, concept).due
     _passed_review(db, bootstrap.user, concept, version, at=ago(1))
     review = _review(db, bootstrap.user, concept)
-    assert not review.due and review.successful_reviews == 1
+    assert not review.due and review.successful_reviews_on_schedule == 1
     assert review.interval_days == 360 and review.base_interval_days == 180  # doubled once
     assert review.due_at == ago(1) + timedelta(days=360)
 
@@ -305,12 +305,20 @@ def test_the_interval_doubles_per_success_and_is_capped_at_365_days():
 
 
 def test_the_cap_holds_through_real_attempt_history(db, bootstrap):
+    # Concept with operational (90 day) interval, which doubles to 180, 360, then caps at 365
+    # Goal: test that 4 on-schedule reviews reach the cap
     concept, version = _concept(db, kind=ConceptKind.OPERATIONAL)
-    _evidence(db, bootstrap.user, concept, version, at=ago(900))
-    for i in range(4):
-        _passed_review(db, bootstrap.user, concept, version, at=ago(800 - i * 100))
+    _evidence(db, bootstrap.user, concept, version, at=ago(2000))  # baseline, due at ago(1910)
+    # Review 1: at ago(1900), due ago(1910), is on-schedule. Next due: ago(1900 - 180) = ago(1720)
+    _passed_review(db, bootstrap.user, concept, version, at=ago(1900))
+    # Review 2: at ago(1700), due ago(1720), is on-schedule. Next due: ago(1700 - 360) = ago(1340)
+    _passed_review(db, bootstrap.user, concept, version, at=ago(1700))
+    # Review 3: at ago(1300), due ago(1340), is on-schedule. Next due: ago(1300 - 365) = ago(935)
+    _passed_review(db, bootstrap.user, concept, version, at=ago(1300))
+    # Review 4: at ago(900), due ago(935), is on-schedule. Interval caps at 365
+    _passed_review(db, bootstrap.user, concept, version, at=ago(900))
     review = _review(db, bootstrap.user, concept)
-    assert review.successful_reviews == 4 and review.interval_days == 365
+    assert review.successful_reviews_on_schedule == 4 and review.interval_days == 365
 
 
 def test_the_first_and_each_later_successful_review_extend_the_interval_again(db, bootstrap):
@@ -319,25 +327,27 @@ def test_the_first_and_each_later_successful_review_extend_the_interval_again(db
     assert _review(db, bootstrap.user, concept, now=ago(800)).interval_days == 180  # no review yet
     _passed_review(db, bootstrap.user, concept, version, at=ago(700))
     first = _review(db, bootstrap.user, concept, now=ago(690))
-    assert (first.successful_reviews, first.interval_days) == (1, 360)  # first success extends it
+    assert (first.successful_reviews_on_schedule, first.interval_days) == (1, 360)  # first success extends it
     _passed_review(db, bootstrap.user, concept, version, at=ago(300))
     second = _review(db, bootstrap.user, concept, now=ago(290))
-    assert (second.successful_reviews, second.interval_days) == (2, 365)  # a subsequent success extends again, capped
+    assert (second.successful_reviews_on_schedule, second.interval_days) == (2, 365)  # a subsequent success extends again, capped
 
 
 def test_a_failed_review_does_not_reset_accumulated_extension(db, bootstrap):
     concept, version = _concept(db, kind=ConceptKind.OPERATIONAL)  # 90 -> 180 -> 360
-    _evidence(db, bootstrap.user, concept, version, at=ago(900))
-    _passed_review(db, bootstrap.user, concept, version, at=ago(800))
-    _passed_review(db, bootstrap.user, concept, version, at=ago(700))
-    before = _review(db, bootstrap.user, concept, now=ago(690))
-    assert (before.successful_reviews, before.interval_days) == (2, 360)
+    _evidence(db, bootstrap.user, concept, version, at=ago(900))  # baseline, due ago(810)
+    _passed_review(db, bootstrap.user, concept, version, at=ago(800))  # on-schedule (800 >= 810), due next at ago(710)
+    _passed_review(db, bootstrap.user, concept, version, at=ago(700))  # on-schedule (700 >= 710)? Need to check... wait that's backwards
+    # Let me recalculate: after first review at ago(800), next due = ago(800 - 180) = ago(620)
+    _passed_review(db, bootstrap.user, concept, version, at=ago(610))  # on-schedule (610 >= 620), due next at ago(430)
+    before = _review(db, bootstrap.user, concept, now=ago(420))
+    assert (before.successful_reviews_on_schedule, before.interval_days) == (2, 360)
 
-    _failed_review(db, bootstrap.user, concept, version, at=ago(600))
-    after = _review(db, bootstrap.user, concept, now=ago(590))
+    _failed_review(db, bootstrap.user, concept, version, at=ago(300))  # this fails, doesn't affect anything
+    after = _review(db, bootstrap.user, concept, now=ago(290))
     assert after.failed  # a failure may derive REVIEW_FAILED...
-    assert (after.successful_reviews, after.interval_days) == (2, 360)  # ...but erases nothing
-    assert after.baseline.recorded_at == ago(700)  # and appended no evidence
+    assert (after.successful_reviews_on_schedule, after.interval_days) == (2, 360)  # ...but erases nothing
+    assert after.baseline.recorded_at == ago(610)  # latest evidence from the last on-schedule review
 
 
 def test_a_later_success_continues_from_the_prior_successful_review_history(db, bootstrap):
@@ -347,7 +357,7 @@ def test_a_later_success_continues_from_the_prior_successful_review_history(db, 
     _failed_review(db, bootstrap.user, concept, version, at=ago(700))
     resumed = _passed_review(db, bootstrap.user, concept, version, at=ago(600))  # continues: 2nd success -> 360
     review = _review(db, bootstrap.user, concept, now=ago(590))
-    assert (review.successful_reviews, review.interval_days) == (2, 360)
+    assert (review.successful_reviews_on_schedule, review.interval_days) == (2, 360)
     assert not review.failed  # the later success cleared REVIEW_FAILED
     assert review.due_at == resumed.completed_at + timedelta(days=360)
     _passed_review(db, bootstrap.user, concept, version, at=ago(100))
@@ -356,12 +366,13 @@ def test_a_later_success_continues_from_the_prior_successful_review_history(db, 
 
 def test_only_qualifying_successes_count_toward_the_extension(db, bootstrap):
     concept, version = _concept(db)
-    _evidence(db, bootstrap.user, concept, version, at=ago(300))
-    _passed_review(db, bootstrap.user, concept, version, at=ago(200))
-    unusable = _evidence(db, bootstrap.user, concept, version, at=ago(100), passed=False)
+    _evidence(db, bootstrap.user, concept, version, at=ago(300))  # baseline, due at ago(120)
+    _passed_review(db, bootstrap.user, concept, version, at=ago(200))  # EARLY review (100 days early), doesn't count
+    _passed_review(db, bootstrap.user, concept, version, at=ago(50))  # ON-SCHEDULE review (70 days after due), counts
+    unusable = _evidence(db, bootstrap.user, concept, version, at=ago(40), passed=False)  # non-qualifying
     _attempt(db, bootstrap.user, concept, version, status=ReviewAttemptStatus.PASSED,
-             started=ago(100) - timedelta(minutes=1), completed=ago(100), evidence=unusable)
-    assert _review(db, bootstrap.user, concept).successful_reviews == 1  # the PASSED row without qualifying evidence is ignored
+             started=ago(40) - timedelta(minutes=1), completed=ago(40), evidence=unusable)
+    assert _review(db, bootstrap.user, concept).successful_reviews_on_schedule == 1  # only the on-schedule review counts
 
 
 # =============================================================================
@@ -475,7 +486,7 @@ def test_a_passed_attempt_with_unusable_evidence_is_ignored_entirely(db, bootstr
                  evidence=evidence)
     review = _review(db, bootstrap.user, concept)
     assert review.failed  # not cleared by an attempt that merely says PASSED
-    assert review.successful_reviews == 0  # nor extended
+    assert review.successful_reviews_on_schedule == 0  # nor extended
     assert review.baseline.recorded_at == ago(200)  # nor did it reset the clock
 
 
@@ -643,7 +654,9 @@ def test_an_eligible_demonstrated_concept_can_be_reviewed_voluntarily_before_it_
     assert result.created and result.item.id == item.id
     done = ReviewAttemptService(db).complete(bootstrap.user.id, result.attempt.id, [1])
     assert done.passed and done.evidence.concept_version_id == version.id
-    assert done.state.ladder == DEMONSTRATED and done.state.review.successful_reviews == 1
+    # Early voluntary review: evidence recorded, but does NOT advance interval
+    assert done.state.ladder == DEMONSTRATED and done.state.review.successful_reviews_on_schedule == 0
+    assert done.state.review.interval_days == 180  # interval unchanged
 
 
 def test_voluntary_review_still_needs_eligibility_history_and_a_valid_item(db, bootstrap):
@@ -727,7 +740,7 @@ def test_a_correct_answer_appends_canonical_evidence_and_clears_the_review(db, b
     assert evidence.score == {"raw": 1, "max": 1, "pct": 100}
     assert result.state.ladder == DEMONSTRATED
     assert not ({"review_due", "review_failed"} & result.state.overlays)
-    assert result.state.review.successful_reviews == 1 and result.state.review.interval_days == 360
+    assert result.state.review.successful_reviews_on_schedule == 1 and result.state.review.interval_days == 360
 
 
 def test_the_evidence_cites_the_version_frozen_at_start_even_if_the_concept_changes_meanwhile(db, bootstrap):
@@ -945,7 +958,7 @@ def test_one_users_reviews_never_change_anothers_state(db, bootstrap):
     _failed_review(db, bootstrap.user, concept, version, at=ago(3))
     assert "review_failed" in _state(db, bootstrap.user, concept).overlays
     theirs = _state(db, other, concept)
-    assert "review_failed" not in theirs.overlays and theirs.review.successful_reviews == 0 and theirs.review.latest_completed is None
+    assert "review_failed" not in theirs.overlays and theirs.review.successful_reviews_on_schedule == 0 and theirs.review.latest_completed is None
 
 
 def _dump(engine, exclude=()):
@@ -1051,7 +1064,7 @@ def test_a_delivered_review_card_exposes_everything_the_contract_asks_for(db, bo
     assert "180 days" in card.what and "core Concept" in card.why
     assert card.baseline["evidence_type"] == "knowledge_check" and card.baseline["concept_version"] == 1
     assert card.baseline["recorded_at"] == ago(190)
-    assert card.interval["days"] == 180 and card.interval["successful_reviews"] == 0 and card.due_at == ago(10)
+    assert card.interval["days"] == 180 and card.interval["successful_reviews_on_schedule"] == 0 and card.due_at == ago(10)
     assert card.attempt is None
     assert card.action["kind"] == "start_review" and card.action["learning_item_id"]
     assert card.prompt["slot"] == 1 and card.prompt["delivered_at"] == NOW

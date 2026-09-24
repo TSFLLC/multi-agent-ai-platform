@@ -83,10 +83,13 @@ def _aware(value: Optional[datetime]) -> Optional[datetime]:
     return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
 
 
-def interval_days_for(kind: ConceptKind, successful_reviews: int) -> int:
-    """Base interval doubled once per qualifying successful review, capped."""
+def interval_days_for(kind: ConceptKind, successful_reviews_on_schedule: int) -> int:
+    """Base interval doubled once per ON-SCHEDULE qualifying successful review, capped.
+
+    Only reviews completed at or after their due date advance the interval.
+    Early voluntary reviews create evidence but do not extend spacing."""
     days = BASE_INTERVAL_DAYS[kind]
-    for _ in range(max(0, successful_reviews)):
+    for _ in range(max(0, successful_reviews_on_schedule)):
         days *= 2
         if days >= MAX_INTERVAL_DAYS:
             return MAX_INTERVAL_DAYS
@@ -135,7 +138,7 @@ class ReviewAssessment:
     baseline: Optional[ReviewBaseline]
     base_interval_days: int
     interval_days: int
-    successful_reviews: int  # every qualifying successful review; a failure never resets it
+    successful_reviews_on_schedule: int  # only on-schedule reviews advance the interval
     due_at: Optional[datetime]
     interval_elapsed: bool
     material_changes: List[Dict[str, Any]]
@@ -208,12 +211,7 @@ class ReviewAssessor:
         latest_completed = completed[-1] if completed else None
         active = next((a for a in reversed(attempts) if a.status == ReviewAttemptStatus.STARTED), None)
 
-        # Every qualifying successful review counts. A failed review is not a
-        # reason to forget the successes before it.
-        successful_reviews = sum(1 for a in completed if a.status == ReviewAttemptStatus.PASSED)
-        base_days = BASE_INTERVAL_DAYS[concept.kind]
-        interval_days = interval_days_for(concept.kind, successful_reviews)
-
+        # Build baseline first (needed for on-schedule calculation)
         qualifying = [e for e in evidence if evidence_qualifies(e)]
         versions = list(
             self.db.execute(
@@ -232,6 +230,39 @@ class ReviewAssessor:
                 concept_version_id=latest.concept_version_id,
                 concept_version=max(cited) if cited else None,
             )
+
+        # Count only ON-SCHEDULE successful reviews (completed at or after due date)
+        # for interval advancement. Early reviews don't accelerate the spacing.
+        # Check each review against the due date from the PREVIOUS evidence (initial baseline or last on-schedule review).
+        successful_on_schedule = 0
+        # Find the earliest (original) qualifying evidence as the initial baseline
+        original_evidence_at = min(
+            (e for e in qualifying), key=lambda e: (_aware(e.created_at), e.id)
+        ).created_at if qualifying else None
+        original_evidence_at = _aware(original_evidence_at) if original_evidence_at else None
+        prev_evidence_at = original_evidence_at
+
+        for attempt in completed:
+            if attempt.status != ReviewAttemptStatus.PASSED:
+                continue
+            linked = by_evidence_id.get(attempt.resulting_learning_evidence_id or "")
+            if linked is None or not evidence_qualifies(linked):
+                continue
+            # Calculate the due date based on the previous evidence and interval doubling
+            if prev_evidence_at is not None:
+                # The interval for this due date is based on how many ON-SCHEDULE reviews happened before
+                current_interval = BASE_INTERVAL_DAYS[concept.kind] * (2 ** successful_on_schedule)
+                if current_interval > MAX_INTERVAL_DAYS:
+                    current_interval = MAX_INTERVAL_DAYS
+                prev_due_at = prev_evidence_at + timedelta(days=current_interval)
+                # Check if this review was on-schedule
+                if _aware(attempt.completed_at) >= prev_due_at:
+                    successful_on_schedule += 1
+                    # After on-schedule review, next due date calculation is from this review
+                    prev_evidence_at = _aware(attempt.completed_at)
+
+        base_days = BASE_INTERVAL_DAYS[concept.kind]
+        interval_days = interval_days_for(concept.kind, successful_on_schedule)
 
         eligible_via: List[str] = []
         if concept.is_core:
@@ -307,7 +338,7 @@ class ReviewAssessor:
             baseline=baseline,
             base_interval_days=base_days,
             interval_days=interval_days,
-            successful_reviews=successful_reviews,
+            successful_reviews_on_schedule=successful_on_schedule,
             due_at=due_at,
             interval_elapsed=interval_elapsed,
             material_changes=material_changes,

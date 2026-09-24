@@ -1218,7 +1218,7 @@ class StayAheadService:
                 title = f"Review due: “{name}”"
                 what = f"Your review interval for this Concept ({review.interval_days} days) has elapsed."
                 extended = (
-                    f", extended after {_plural(review.successful_reviews, 'successful review')}" if review.successful_reviews else ""
+                    f", extended after {_plural(review.successful_reviews_on_schedule, 'successful review')}" if review.successful_reviews_on_schedule else ""
                 )
                 why = (
                     f"Your latest evidence for this {review.kind} Concept is from {_day(review.baseline.recorded_at)}. "
@@ -1278,7 +1278,7 @@ class StayAheadService:
                     interval={
                         "days": review.interval_days,
                         "base_days": review.base_interval_days,
-                        "successful_reviews": review.successful_reviews,
+                        "successful_reviews_on_schedule": review.successful_reviews_on_schedule,
                         "due_at": review.due_at,
                     },
                     material_changes=[
