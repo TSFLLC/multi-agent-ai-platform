@@ -188,14 +188,7 @@ class ExperimentLearningQualificationService:
             ).scalar_one_or_none()
             if agent_run is None:
                 return None
-            evaluation = self.db.execute(
-                select(EvaluationRun)
-                .where(
-                    EvaluationRun.subject_agent_run_id == agent_run.id,
-                    EvaluationRun.evaluation_definition_version_id == definition_id,
-                )
-                .order_by(EvaluationRun.created_at.desc())
-            ).scalars().first()
+            evaluation = ExperimentExecutionService(self.db).latest_evaluation(agent_run.id, definition_id)
             if evaluation is None or evaluation.status != EvaluationRunStatus.COMPLETED:
                 return None
             evaluations.append(evaluation)

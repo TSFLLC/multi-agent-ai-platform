@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from app.db.enums import EvaluationRunStatus, ExperimentStatus, ExperimentType, TaskRunStatus
 from app.errors import ConflictError, NotFoundError
 from app.models.artifacts_eval import ComparisonCandidate, ComparisonRun
-from app.models.evaluation_runs import EvaluationRun
+from app.models.evaluation_runs import EvaluationCriterionResult, EvaluationRun
 from app.models.execution import ModelCall
 from app.models.lab import (
     EvalSetVersionTask,
@@ -230,6 +230,18 @@ class ExperimentExecutionService:
             return "PARTIAL", runs
         return "COMPLETED" if completed else "FAILED", runs
 
+    def latest_evaluation(self, agent_run_id: str, definition_id: str) -> Optional[EvaluationRun]:
+        """The authoritative MA6 EvaluationRun for a slot's Agent Run: the
+        latest one on the experiment's configured definition version."""
+        return self.db.execute(
+            select(EvaluationRun)
+            .where(
+                EvaluationRun.subject_agent_run_id == agent_run_id,
+                EvaluationRun.evaluation_definition_version_id == definition_id,
+            )
+            .order_by(EvaluationRun.created_at.desc())
+        ).scalars().first()
+
     def _evaluation_state(self, experiment: Experiment, runs: List[TaskRun]) -> str:
         definition_id = (experiment.config_snapshot or {}).get("evaluation_definition_version_id")
         if not definition_id:
@@ -244,14 +256,7 @@ class ExperimentExecutionService:
             if agent_run is None:
                 statuses.append("PENDING")
                 continue
-            evaluation = self.db.execute(
-                select(EvaluationRun)
-                .where(
-                    EvaluationRun.subject_agent_run_id == agent_run.id,
-                    EvaluationRun.evaluation_definition_version_id == definition_id,
-                )
-                .order_by(EvaluationRun.created_at.desc())
-            ).scalars().first()
+            evaluation = self.latest_evaluation(agent_run.id, definition_id)
             statuses.append(evaluation.status.value.upper() if evaluation else "PENDING")
         if not statuses:
             return "PENDING"
@@ -333,6 +338,42 @@ class ExperimentExecutionService:
             ))
         return {"experiment_id": experiment.id, "results": [o.__dict__ for o in outcomes]}
 
+    def evaluation_findings(self, experiment: Experiment) -> dict:
+        """Read-only tally of the canonical MA6 findings per candidate label.
+
+        Nothing is stored or copied: rows are counted on read from the same
+        authoritative EvaluationRun the qualification service uses. There is no
+        score, rank, winner or interpretation; ``total`` is each candidate's own
+        denominator (findings actually recorded), and ``runs_evaluated`` of
+        ``runs`` says how many of its runs have a completed evaluation."""
+        definition_id = (experiment.config_snapshot or {}).get("evaluation_definition_version_id")
+        rows = self.db.execute(
+            select(ExperimentTaskRun, AgentRun)
+            .join(TaskRun, TaskRun.id == ExperimentTaskRun.task_run_id)
+            .join(AgentRun, AgentRun.task_run_id == TaskRun.id)
+            .where(ExperimentTaskRun.experiment_id == experiment.id)
+        ).all()
+        candidates: dict = {}
+        for slot, agent_run in rows:
+            row = candidates.setdefault(slot.label, {
+                "label": slot.label, "runs": 0, "runs_evaluated": 0,
+                "met": 0, "partial": 0, "not_met": 0, "not_applicable": 0, "total": 0,
+            })
+            row["runs"] += 1
+            evaluation = self.latest_evaluation(agent_run.id, definition_id) if definition_id else None
+            if evaluation is None or evaluation.status != EvaluationRunStatus.COMPLETED:
+                continue
+            row["runs_evaluated"] += 1
+            for (finding,) in self.db.execute(
+                select(EvaluationCriterionResult.finding).where(EvaluationCriterionResult.evaluation_run_id == evaluation.id)
+            ):
+                row[finding.value] += 1
+                row["total"] += 1
+        return {
+            "evaluation_required": bool(definition_id),
+            "candidates": sorted(candidates.values(), key=lambda item: item["label"]),
+        }
+
     def read(self, user_id: str, experiment_id: str) -> dict:
         experiment = self.refresh(self._owned(user_id, experiment_id))
         state = self._state_summary(experiment)
@@ -371,4 +412,4 @@ class ExperimentExecutionService:
         cost_kind = "UNKNOWN" if unknown_cost or not has_calls else ("ESTIMATED" if estimated_cost else "KNOWN")
         experiment_read = LabService(self.db).experiment_read(experiment)
         experiment_read.update(state)
-        return {"experiment": experiment_read, "progress": {"total": len(items), "completed": sum(i["status"] == "completed" for i in items), "failed": sum(i["status"] == "failed" for i in items), "cancelled": sum(i["status"] == "cancelled" for i in items), "tokens_in": total_in, "tokens_out": total_out, "cost_kind": cost_kind, "cost": str(total_cost) if cost_kind != "UNKNOWN" else None, **state}, "runs": items}
+        return {"experiment": experiment_read, "progress": {"total": len(items), "completed": sum(i["status"] == "completed" for i in items), "failed": sum(i["status"] == "failed" for i in items), "cancelled": sum(i["status"] == "cancelled" for i in items), "tokens_in": total_in, "tokens_out": total_out, "cost_kind": cost_kind, "cost": str(total_cost) if cost_kind != "UNKNOWN" else None, **state}, "runs": items, "evaluation_findings": self.evaluation_findings(experiment)}

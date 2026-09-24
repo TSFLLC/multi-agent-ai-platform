@@ -12,6 +12,11 @@ export const CONCLUSION_OPTIONS = [
 ];
 
 export const CONCLUSION_TEXT_MAX = 4000;
+export const CONCLUSION_PLACEHOLDER = "Choose…";
+export const NO_CONCLUSION_TEXT = "No conclusion saved yet.";
+// Human Conclusion and Learning Evidence are separate records: a conclusion can
+// be written or changed at any time, including after counting toward learning.
+export const CONCLUSION_INTRO = "Your conclusion is your own reading of the results, saved on its own. It is separate from your learning evidence, so you can write or change it at any time, even after counting this experiment. It never has to name a winner and it does not change the evaluation.";
 
 // Ordered hierarchy of the results page. There is deliberately no Professor
 // entry: no canonical Professor exists, so nothing here may pretend one does.
@@ -152,27 +157,51 @@ export function evaluationView(experiment) {
   return { status, headline, detail };
 }
 
-// Execution facts per candidate label (status and tokens). Not a ranking.
-export function differencesView(runs) {
-  const byLabel = new Map();
-  for (const run of runs || []) {
-    const row = byLabel.get(run.label) || {
-      label: run.label, runs: 0, completed: 0, failed: 0, cancelled: 0, tokens_in: 0, tokens_out: 0,
-    };
-    row.runs += 1;
-    if (run.status === "completed") row.completed += 1;
-    if (run.status === "failed") row.failed += 1;
-    if (run.status === "cancelled") row.cancelled += 1;
-    row.tokens_in += Number(run.tokens_in || 0);
-    row.tokens_out += Number(run.tokens_out || 0);
-    byLabel.set(run.label, row);
+// Candidates are labelled model-N / agent-N / repetition-N by the execution
+// service, where N is the 1-based position of that model / agent version.
+export function candidateName(label, experiment) {
+  const text = String(label || "");
+  const model = /^model-(\d+)$/.exec(text);
+  if (model) return experiment?.models?.[Number(model[1]) - 1]?.name || `Model ${model[1]}`;
+  const agent = /^agent-(\d+)$/.exec(text);
+  if (agent) return `Agent version ${agent[1]}`;
+  const repetition = /^repetition-(\d+)$/.exec(text);
+  if (repetition) return `Repetition ${repetition[1]}`;
+  return text || "Candidate";
+}
+
+export const FINDING_LABELS = [
+  ["met", "Met"],
+  ["partial", "Partly met"],
+  ["not_met", "Not met"],
+  ["not_applicable", "Not applicable"],
+];
+
+// A projection of the canonical MA6 finding counts the results API returns.
+// Counts and denominators are shown exactly as given: no score, no ranking,
+// no "better" or "best", and nothing is inferred.
+export function findingsView(data) {
+  const findings = data?.evaluation_findings;
+  const experiment = data?.experiment;
+  const note = "These are evaluation findings for each candidate. They are not a ranking, and no winner is chosen.";
+  if (!findings?.evaluation_required) {
+    return { available: false, candidates: [], message: "This experiment was not evaluated, so there are no findings to compare.", note };
   }
-  const rows = [...byLabel.values()].sort((a, b) => String(a.label).localeCompare(String(b.label)));
-  return {
-    rows,
-    comparable: rows.length > 1,
-    note: "These are what each candidate did (status and tokens), not a ranking.",
-  };
+  const candidates = (findings.candidates || []).map((candidate) => ({
+    name: candidateName(candidate.label, experiment),
+    label: candidate.label,
+    evaluated: `${candidate.runs_evaluated} of ${candidate.runs} runs evaluated`,
+    hasFindings: candidate.total > 0,
+    cells: FINDING_LABELS.map(([key, label]) => ({ key, label, count: candidate[key] || 0, of: candidate.total })),
+  }));
+  if (!candidates.some((candidate) => candidate.hasFindings)) {
+    return { available: false, candidates, message: "Findings appear once the evaluation has completed.", note };
+  }
+  return { available: true, candidates, message: "", note };
+}
+
+export function conceptLabel(experiment) {
+  return experiment?.concept?.name || (experiment?.concept_id ? "A Concept (name unavailable)" : "");
 }
 
 export function nextSteps(experiment, qualification) {
@@ -187,8 +216,4 @@ export function nextSteps(experiment, qualification) {
     steps.push({ label: "See what is new for you on Today", href: "#/ail/today" });
   }
   return steps;
-}
-
-export function conceptName(concepts, conceptId) {
-  return (concepts || []).find((concept) => concept.id === conceptId)?.name || "Selected Concept";
 }

@@ -59,6 +59,11 @@ class ExperimentModelSelection(BaseModel):
     provider_model_snapshot_id: str
 
 
+class ExperimentModelRead(ExperimentModelSelection):
+    # Display name from the existing Model registry (canonical_model_id); read-only.
+    name: Optional[str] = None
+
+
 class ExperimentCreate(BaseModel):
     experiment_type: ExperimentType
     hypothesis: Optional[str] = Field(default=None, max_length=4000)
@@ -86,6 +91,7 @@ class ExperimentRead(BaseModel):
     development_id: Optional[str] = None
     concept_id: Optional[str] = None
     concept_version_id: Optional[str] = None
+    concept: Optional[dict] = None
     conclusion: Optional[dict] = None
     learning_item_id: Optional[str] = None
     repetitions: int
@@ -95,7 +101,7 @@ class ExperimentRead(BaseModel):
     cost_estimate_kind: CostEstimateKind
     budget_id: Optional[str] = None
     agent_version_ids: List[str]
-    models: List[ExperimentModelSelection]
+    models: List[ExperimentModelRead]
     frozen_at: Optional[datetime] = None
     created_at: datetime
 

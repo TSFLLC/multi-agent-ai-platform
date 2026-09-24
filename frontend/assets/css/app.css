@@ -1112,3 +1112,6 @@ button.link:hover:not(:disabled) { background: none; color: #8fb0ff; }
 .lab-concept-results { list-style: none; padding: 0; }
 .success-text { color: var(--free); }
 .error-text { color: var(--danger); }
+.lab-run-details { margin-top: 8px; }
+.lab-run-details summary { cursor: pointer; color: var(--accent); }
+.lab-no-conclusion { color: var(--text-muted); font-style: italic; }

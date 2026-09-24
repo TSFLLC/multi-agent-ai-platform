@@ -461,10 +461,12 @@ class LabService:
             .order_by(ExperimentAgentVersion.position)
         ).scalars())
         models = list(self.db.execute(
-            select(ExperimentModel.model_id, ExperimentModel.provider_model_snapshot_id)
+            select(ExperimentModel.model_id, ExperimentModel.provider_model_snapshot_id, Model.canonical_model_id)
+            .join(Model, Model.id == ExperimentModel.model_id)
             .where(ExperimentModel.experiment_id == experiment.id)
             .order_by(ExperimentModel.position)
         ).all())
+        concept = self.db.get(Concept, experiment.concept_id) if experiment.concept_id else None
         return {
             "id": experiment.id,
             "user_id": experiment.user_id,
@@ -475,6 +477,7 @@ class LabService:
             "development_id": experiment.development_id,
             "concept_id": experiment.concept_id,
             "concept_version_id": experiment.concept_version_id,
+            "concept": {"id": concept.id, "name": concept.name, "slug": concept.slug} if concept else None,
             "conclusion": (
                 {
                     "type": experiment.conclusion_type,
@@ -492,7 +495,10 @@ class LabService:
             "cost_estimate_kind": experiment.cost_estimate_kind,
             "budget_id": experiment.budget_id,
             "agent_version_ids": agent_ids,
-            "models": [{"model_id": model_id, "provider_model_snapshot_id": snapshot_id} for model_id, snapshot_id in models],
+            "models": [
+                {"model_id": model_id, "provider_model_snapshot_id": snapshot_id, "name": name}
+                for model_id, snapshot_id, name in models
+            ],
             "frozen_at": experiment.frozen_at,
             "created_at": experiment.created_at,
         }

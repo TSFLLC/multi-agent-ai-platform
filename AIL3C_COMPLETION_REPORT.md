@@ -34,10 +34,16 @@ Every item below has an executable test in `tests/test_ail3c_learning_api.py` (3
 - **Count toward learning.** The button appears only when the qualification is READY and is never called on render. Every other state shows a plain-language reason and no button. An already-counted experiment shows its state and locks the Concept.
 - **Concept picker.** It uses the existing `GET /radar/concepts` and `PUT .../concept`.
 - **Radar origin.** A read-only link, shown only when `development_id` is set.
-- **Evaluation.** Status only. No criteria counts or denominators appear, because the results payload carries none.
+- **Evaluation.** Status only.
+- **Where they differed.** Read-only per-candidate counts of the canonical MA6 findings (met / partly met / not met / not applicable), each shown against its own denominator. `GET /lab/experiments/{id}/results` returns them in `evaluation_findings`. They are counted on read from the same authoritative EvaluationRun the qualification service uses; nothing is stored or copied, and there is no score, ranking or winner. They appear only for the owner of the experiment.
+- **Names.** The experiment read carries the bound Concept (`concept: {id, name, slug}`) and each model's name (from the Model registry), so nothing depends on a search list. Candidate labels model-N map to those names by position.
+- **Run details** are behind a collapsed native expander; the aggregate counts and token/cost status stay visible.
+- **Conclusion empty state.** The selector starts on "Choose…" with "No conclusion saved yet." and explains that a conclusion is separate from learning evidence, so it can be written or changed even after counting.
 - **No Professor control.** No canonical Professor exists, so none is rendered.
 
-Tests: `frontend/tests/labLearning.test.mjs` (14 tests, using a small fake DOM), and the full frontend suite (384 passed). The live API flow was also exercised against a disposable, fully migrated database.
+Tests: `frontend/tests/labLearning.test.mjs` (23 tests, using a small fake DOM), and the full frontend suite (393 passed). The live API flow was also exercised against a disposable, fully migrated database.
+
+Note: the existing AIL.3B `read()` settles the derived experiment status (running to completed) on the first GET after evaluation finishes. That is unchanged existing behavior; no GET writes a conclusion, Concept, Learning Evidence, learner state, Radar or Learning Plan row.
 
 ## Deferred
 

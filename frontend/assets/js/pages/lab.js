@@ -1,14 +1,18 @@
 import { api } from "../api.js";
 import { el, mount } from "../dom.js";
 import {
+  CONCLUSION_INTRO,
   CONCLUSION_OPTIONS,
+  CONCLUSION_PLACEHOLDER,
+  NO_CONCLUSION_TEXT,
   RESULT_SECTIONS,
+  candidateName,
   canConclude,
-  conceptName,
+  conceptLabel,
   conclusionSummary,
   countedMessage,
-  differencesView,
   evaluationView,
+  findingsView,
   nextSteps,
   qualificationView,
   validateConclusionDraft,
@@ -126,14 +130,15 @@ function inlineStatus(text = "", isError = false) {
 
 function testedSection({ data, development }) {
   const experiment = data.experiment || {};
+  const names = (experiment.models || []).map((model) => model.name || "Unnamed model");
   const facts = [
-    `${(experiment.models || []).length} model(s)`,
     `${(experiment.agent_version_ids || []).length} agent version(s)`,
     `${experiment.repetitions || 1} repetition(s)`,
   ].join(" · ");
   return section("tested", "What I tested", [
     el("p", {}, [typeLabel(experiment.experiment_type)]),
     experiment.hypothesis ? el("p", {}, [`My question: ${experiment.hypothesis}`]) : null,
+    names.length ? el("p", { "data-models": names.join("|") }, [`Models: ${names.join(", ")}`]) : null,
     el("p", { class: "muted" }, [facts]),
     experiment.development_id
       ? el("p", { class: "muted", "data-origin": "radar" }, [
@@ -147,15 +152,16 @@ function testedSection({ data, development }) {
 function happenedSection({ data }) {
   const progress = data.progress || {};
   const runItems = (data.runs || []).map((run) => el("li", {}, [
-    `Task ${run.task_position + 1}, repetition ${run.repetition}, ${run.label}: ${statusLabel(run.status)}`,
-    run.model_id ? ` · model ${run.model_id}` : "",
+    `Task ${run.task_position + 1}, repetition ${run.repetition}, ${candidateName(run.label, data.experiment)}: ${statusLabel(run.status)}`,
     run.tokens_in || run.tokens_out ? ` · ${run.tokens_in} in / ${run.tokens_out} out tokens` : "",
   ]));
   return section("happened", "What happened", [
     el("p", {}, [`Status: ${overallLabel(data.experiment)}`]),
     el("p", {}, [`${progress.completed || 0} completed, ${progress.failed || 0} failed, ${progress.cancelled || 0} cancelled of ${progress.total || 0} runs.`]),
     el("p", {}, [`Tokens: ${progress.tokens_in || 0} input / ${progress.tokens_out || 0} output · Cost: ${progress.cost_kind || "UNKNOWN"}${progress.cost ? ` (${progress.cost})` : ""}`]),
-    runItems.length ? el("ul", {}, runItems) : message("No execution evidence has been recorded yet."),
+    runItems.length
+      ? el("details", { class: "lab-run-details" }, [el("summary", {}, [`View run details (${runItems.length})`]), el("ul", {}, runItems)])
+      : message("No execution evidence has been recorded yet."),
   ]);
 }
 
@@ -168,15 +174,14 @@ function evaluationSection({ data }) {
 }
 
 function differedSection({ data }) {
-  const view = differencesView(data.runs);
-  const rows = view.rows.map((row) => el("li", {}, [
-    `${row.label}: ${row.completed} of ${row.runs} runs completed`,
-    row.failed ? `, ${row.failed} failed` : "",
-    row.cancelled ? `, ${row.cancelled} cancelled` : "",
-    ` · ${row.tokens_in} in / ${row.tokens_out} out tokens`,
+  const view = findingsView(data);
+  const rows = view.candidates.filter((candidate) => candidate.hasFindings).map((candidate) => el("li", { "data-candidate": candidate.label }, [
+    el("strong", {}, [candidate.name]),
+    ` (${candidate.evaluated}): `,
+    candidate.cells.map((cell) => `${cell.label} ${cell.count} of ${cell.of}`).join(" · "),
   ]));
   return section("differed", "Where they differed", [
-    view.comparable ? el("ul", {}, rows) : message("There is only one candidate here, so there is nothing to compare."),
+    view.available ? el("ul", {}, rows) : message(view.message),
     el("p", { class: "muted" }, [view.note]),
   ]);
 }
@@ -191,15 +196,18 @@ function conclusionSection({ data }, handlers) {
       saved.text ? el("p", {}, [saved.text]) : null,
       el("p", { class: "muted" }, [saved.note]),
     ]));
+  } else {
+    children.push(el("p", { class: "lab-no-conclusion" }, [NO_CONCLUSION_TEXT]));
   }
   if (!canConclude(experiment)) {
     children.push(message("You can write your conclusion once the experiment has finished and there are results to read."));
     return section("conclusion", "My conclusion", children);
   }
-  const chosen = experiment.conclusion?.type || "inconclusive";
-  const select = el("select", { "aria-label": "How would you describe the result?" }, CONCLUSION_OPTIONS.map((option) => el("option", {
-    value: option.value, selected: option.value === chosen,
-  }, [option.label])));
+  const chosen = experiment.conclusion?.type || "";
+  const select = el("select", { "aria-label": "How would you describe the result?" }, [
+    el("option", { value: "", selected: chosen === "" }, [CONCLUSION_PLACEHOLDER]),
+    ...CONCLUSION_OPTIONS.map((option) => el("option", { value: option.value, selected: option.value === chosen }, [option.label])),
+  ]);
   select.value = chosen;
   const textarea = el("textarea", { rows: "3", maxlength: "4000", "aria-label": "Your conclusion in your own words" }, [experiment.conclusion?.text || ""]);
   const status = inlineStatus(handlers.notice?.conclusion || "");
@@ -220,7 +228,7 @@ function conclusionSection({ data }, handlers) {
     }
   });
   children.push(
-    el("p", { class: "muted" }, ["Your conclusion is your own reading of the results. Choosing one never has to name a winner, and it does not change the evaluation."]),
+    el("p", { class: "muted" }, [CONCLUSION_INTRO]),
     el("label", {}, ["How would you describe the result?", select]),
     el("label", {}, ["In your own words (optional)", textarea]),
     el("div", { class: "lab-actions" }, [save]),
@@ -229,7 +237,7 @@ function conclusionSection({ data }, handlers) {
   return section("conclusion", "My conclusion", children);
 }
 
-function countSection({ data, qualification, concepts, conceptResults }, handlers) {
+function countSection({ data, qualification, conceptResults }, handlers) {
   const experiment = data.experiment || {};
   const view = qualificationView(qualification);
   const children = [
@@ -242,7 +250,7 @@ function countSection({ data, qualification, concepts, conceptResults }, handler
   if (handlers.notice?.count) children.push(el("p", { class: "success-text", role: "status" }, [handlers.notice.count]));
 
   const conceptLine = experiment.concept_id
-    ? `Concept: ${conceptName(concepts, experiment.concept_id)}`
+    ? `Concept: ${conceptLabel(experiment)}`
     : "No Concept chosen yet.";
   children.push(el("p", { "data-concept": experiment.concept_id || "" }, [conceptLine]));
   if (view.counted) {
@@ -318,7 +326,6 @@ export async function renderExperimentDetail(root, params) {
   mount(root, message("Loading experiment results…"));
   const id = encodeURIComponent(params.id);
   const notice = {};
-  let concepts = [];
   let conceptResults = [];
 
   async function load() {
@@ -334,7 +341,7 @@ export async function renderExperimentDetail(root, params) {
 
   async function show() {
     try {
-      const state = { ...(await load()), concepts, conceptResults };
+      const state = { ...(await load()), conceptResults };
       const handlers = {
         notice,
         saveConclusion: async ({ type, text }) => {
@@ -345,7 +352,6 @@ export async function renderExperimentDetail(root, params) {
         searchConcepts: async (query) => {
           const trimmed = query && query.trim();
           conceptResults = await api.get(`/radar/concepts?limit=25${trimmed ? `&q=${encodeURIComponent(trimmed)}` : ""}`);
-          concepts = [...concepts, ...conceptResults.filter((c) => !concepts.some((known) => known.id === c.id))];
           await show();
         },
         bindConcept: async (conceptId) => {

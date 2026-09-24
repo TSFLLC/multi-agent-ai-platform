@@ -658,3 +658,145 @@ def test_conclusion_and_count_do_not_mutate_radar_or_learning_plan(client, auth_
 
     assert _snapshot_tables(db) == before
     assert client.get(f"/lab/experiments/{experiment.id}", headers=auth_headers).json()["development_id"] == development.id
+
+
+# -- Read contract: names and canonical MA6 finding counts -------------------
+
+
+def _results(client, auth_headers, experiment):
+    response = client.get(f"/lab/experiments/{experiment.id}/results", headers=auth_headers)
+    assert response.status_code == 200
+    return response.json()
+
+
+def _candidates(payload):
+    return {c["label"]: c for c in payload["evaluation_findings"]["candidates"]}
+
+
+def _all_keys(value, found=None):
+    found = set() if found is None else found
+    if isinstance(value, dict):
+        for key, item in value.items():
+            found.add(str(key).lower())
+            _all_keys(item, found)
+    elif isinstance(value, list):
+        for item in value:
+            _all_keys(item, found)
+    return found
+
+
+def test_experiment_read_returns_the_bound_concept_name_and_model_names(client, auth_headers, db, bootstrap):
+    experiment, _, concept, _ = _finished(db, bootstrap)
+    results = _results(client, auth_headers, experiment)["experiment"]
+    assert results["concept"] == {"id": concept.id, "name": concept.name, "slug": concept.slug}
+    assert [m["name"] for m in results["models"]] == ["lab/c-a", "lab/c-b"]  # position order = model-1, model-2
+
+    plain = client.get(f"/lab/experiments/{experiment.id}", headers=auth_headers).json()
+    assert plain["concept"]["name"] == concept.name
+    assert [m["name"] for m in plain["models"]] == ["lab/c-a", "lab/c-b"]
+
+
+def test_experiment_without_a_concept_reads_concept_none(client, auth_headers, db, bootstrap):
+    experiment, *_ = _finished(db, bootstrap, concept=False)
+    assert _results(client, auth_headers, experiment)["experiment"]["concept"] is None
+
+
+def test_findings_are_counted_per_candidate_from_canonical_ma6_rows(client, auth_headers, db, bootstrap):
+    experiment, *_ = _finished(db, bootstrap, findings=[MET, NOT_MET] * 6)
+    payload = _results(client, auth_headers, experiment)
+    assert payload["evaluation_findings"]["evaluation_required"] is True
+    candidates = _candidates(payload)
+    first, second = candidates["model-1"], candidates["model-2"]
+    assert (first["runs"], first["runs_evaluated"], first["met"], first["not_met"], first["partial"], first["total"]) == (6, 6, 6, 0, 0, 6)
+    assert (second["runs"], second["runs_evaluated"], second["met"], second["not_met"], second["partial"], second["total"]) == (6, 6, 0, 6, 0, 6)
+
+
+def test_partial_and_not_applicable_are_counted_separately(client, auth_headers, db, bootstrap):
+    experiment, *_ = _finished(db, bootstrap, findings=[PARTIAL, NOT_APPLICABLE] * 6)
+    candidates = _candidates(_results(client, auth_headers, experiment))
+    assert (candidates["model-1"]["partial"], candidates["model-1"]["not_applicable"], candidates["model-1"]["total"]) == (6, 0, 6)
+    assert (candidates["model-2"]["partial"], candidates["model-2"]["not_applicable"], candidates["model-2"]["total"]) == (0, 6, 6)
+
+
+def test_denominators_reflect_only_completed_evaluations(client, auth_headers, db, bootstrap):
+    experiment, *_ = _finished(db, bootstrap, only={0, 1, 2})  # slots: model-1, model-2, model-1
+    candidates = _candidates(_results(client, auth_headers, experiment))
+    assert (candidates["model-1"]["runs"], candidates["model-1"]["runs_evaluated"], candidates["model-1"]["total"]) == (6, 2, 2)
+    assert (candidates["model-2"]["runs"], candidates["model-2"]["runs_evaluated"], candidates["model-2"]["total"]) == (6, 1, 1)
+
+
+@pytest.mark.parametrize("status", [EvaluationRunStatus.RUNNING, EvaluationRunStatus.FAILED])
+def test_unfinished_or_failed_evaluations_contribute_no_findings(client, auth_headers, db, bootstrap, status):
+    experiment, *_ = _finished(db, bootstrap, status=status, with_results=True)
+    for candidate in _results(client, auth_headers, experiment)["evaluation_findings"]["candidates"]:
+        assert candidate["runs_evaluated"] == 0 and candidate["total"] == 0
+
+
+def test_unevaluated_experiment_reports_zero_findings_not_an_error(client, auth_headers, db, bootstrap):
+    experiment, *_ = _finished(db, bootstrap, evaluated=False)
+    payload = _results(client, auth_headers, experiment)
+    assert all(c["total"] == 0 and c["runs_evaluated"] == 0 for c in payload["evaluation_findings"]["candidates"])
+
+
+def test_findings_projection_never_scores_ranks_or_names_a_winner(client, auth_headers, db, bootstrap):
+    experiment, *_ = _finished(db, bootstrap, findings=[MET, NOT_MET] * 6)
+    keys = _all_keys(_results(client, auth_headers, experiment)["evaluation_findings"])
+    assert keys <= {"evaluation_required", "candidates", "label", "runs", "runs_evaluated", "met", "partial", "not_met", "not_applicable", "total"}
+    assert not {k for k in keys if any(w in k for w in ("winner", "rank", "score", "best", "prefer", "percent"))}
+
+
+def test_reading_findings_leaves_ma6_rows_and_learner_state_untouched(client, auth_headers, db, bootstrap):
+    experiment, _, concept, _ = _finished(db, bootstrap, findings=[MET, NOT_MET] * 6)
+
+    def ma6():
+        return (
+            db.execute(text("SELECT * FROM evaluation_runs ORDER BY id")).fetchall(),
+            db.execute(text("SELECT * FROM evaluation_criterion_results ORDER BY id")).fetchall(),
+        )
+
+    before = ma6()
+    _results(client, auth_headers, experiment)
+    assert ma6() == before
+    assert LearnerStateService(db).state(bootstrap.user.id, concept.id).ladder == NOT_STARTED
+
+
+def test_another_user_cannot_read_an_experiment_or_its_findings(client, db, bootstrap, as_user):
+    experiment, *_ = _finished(db, bootstrap, findings=[MET, NOT_MET] * 6)
+    intruder = make_user(db, email="reader@example.com")
+    db.commit()
+    as_user(intruder)
+    for suffix in ("/results", ""):
+        response = client.get(f"/lab/experiments/{experiment.id}{suffix}")
+        assert response.status_code == 404
+        assert "not_met" not in response.text and "evaluation_findings" not in response.text
+
+
+def test_get_requests_never_mutate_conclusion_concept_evidence_learner_state_radar_or_plan(client, auth_headers, db, bootstrap):
+    development = Development(title="Origin", development_type="capability_change", candidate_key="origin-dev-2")
+    db.add(development)
+    db.commit()
+    experiment, _, concept, _ = _finished(db, bootstrap, development_id=development.id)
+
+    def frozen():
+        return {
+            "experiment": db.execute(text(
+                "SELECT id, status, concept_id, concept_version_id, conclusion_type, conclusion_text, concluded_at FROM experiments"
+            )).fetchall(),
+            "evidence": db.execute(text("SELECT * FROM learning_evidence")).fetchall(),
+            "tables": _snapshot_tables(db),
+            "ladder": LearnerStateService(db).state(bootstrap.user.id, concept.id).ladder,
+        }
+
+    # AIL.3B's read() settles the derived lifecycle status (running -> completed once
+    # evaluation finishes). That is existing behavior and not one of the guarded
+    # writes, so let it settle once; every later GET must then change nothing at all.
+    client.get(f"/lab/experiments/{experiment.id}/results", headers=auth_headers)
+    db.expire_all()
+    before = frozen()
+    for suffix in ("", "/results", "/learning-qualification"):
+        assert client.get(f"/lab/experiments/{experiment.id}{suffix}", headers=auth_headers).status_code == 200
+    assert client.get("/lab/experiments", headers=auth_headers).status_code == 200
+    assert client.get("/radar/concepts", headers=auth_headers).status_code == 200
+    db.expire_all()
+    assert frozen() == before
+    assert before["ladder"] == NOT_STARTED and before["evidence"] == []
