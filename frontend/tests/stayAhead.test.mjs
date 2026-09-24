@@ -19,6 +19,8 @@ class FakeNode {
   setAttribute(key, value) { this.attrs[key] = String(value); }
   addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); }
   appendChild(child) { this.children.push(child); return child; }
+  get firstChild() { return this.children[0] || null; }
+  removeChild(child) { this.children = this.children.filter((c) => c !== child); return child; }
   get textContent() { return this.children.map((child) => child.textContent).join(""); }
 }
 globalThis.document = {
@@ -91,11 +93,12 @@ function data(overrides = {}) {
   };
 }
 
-test("the block has exactly the five agreed sections in fixed order", () => {
+test("the block has the agreed sections in fixed order (AIL.4B adds Review second)", () => {
   assert.deepEqual(
     STAY_AHEAD_SECTIONS.map((s) => s.title),
     [
       "Worth revisiting",
+      "Review",
       "Models that changed since they were used",
       "Watched developments with updates",
       "Experiments worth rerunning",
@@ -104,7 +107,7 @@ test("the block has exactly the five agreed sections in fixed order", () => {
   );
   assert.deepEqual(
     STAY_AHEAD_SECTIONS.map((s) => s.key),
-    ["worth_revisiting", "used_models_changed", "watched_developments", "experiments_to_rerun", "concepts_changed"],
+    ["worth_revisiting", "review", "used_models_changed", "watched_developments", "experiments_to_rerun", "concepts_changed"],
   );
 });
 

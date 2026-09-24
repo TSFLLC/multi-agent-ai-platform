@@ -97,12 +97,41 @@ class StayAheadSection(BaseModel):
     items: List[StayAheadSignal]
 
 
+class StayAheadReviewCard(BaseModel):
+    """AIL.4B: one Concept the user previously demonstrated that is worth
+    reviewing again. Every field is a recorded fact or a fixed template; there
+    is no score, and the card offers a link/action, never runs one."""
+
+    id: str
+    kind: str  # REVIEW_DUE | REVIEW_FAILED | CONCEPT_CHANGED_REVIEW
+    title: str
+    what: str
+    why: str
+    reason_codes: List[str]
+    concept: Dict[str, Any]
+    learner_state: Dict[str, Any]
+    baseline: Optional[Dict[str, Any]] = None
+    interval: Dict[str, Any] = Field(default_factory=dict)
+    material_changes: List[Dict[str, Any]] = Field(default_factory=list)
+    attempt: Optional[Dict[str, Any]] = None
+    action: Dict[str, Any] = Field(default_factory=dict)
+    evidence_refs: List[StayAheadEvidenceRef] = Field(default_factory=list)
+    due_at: Optional[datetime] = None
+
+
+class StayAheadReviewSection(BaseModel):
+    total: int
+    shown: int
+    items: List[StayAheadReviewCard]
+
+
 class StayAheadSections(BaseModel):
     worth_revisiting: StayAheadSection
     used_models_changed: StayAheadSection
     watched_developments: StayAheadSection
     experiments_to_rerun: StayAheadSection
     concepts_changed: StayAheadSection
+    review: StayAheadReviewSection
 
 
 class StayAheadToday(BaseModel):

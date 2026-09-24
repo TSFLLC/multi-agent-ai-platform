@@ -42,7 +42,15 @@ class LearningEvidenceService:
         on_demo_data: bool = False,
         ref_type: EvidenceRefType = EvidenceRefType.NONE,
         ref_id: Optional[str] = None,
+        commit: bool = True,
     ) -> LearningEvidence:
+        """Append one evidence row — the single canonical write path.
+
+        ``commit=False`` (AIL.4B) only flushes, so a caller that must make the
+        evidence and another row atomic (a review attempt and its resulting
+        evidence) can commit or roll both back together. Nothing else about
+        the row, the validation, or its append-only nature differs.
+        """
         evidence = LearningEvidence(
             user_id=user_id,
             concept_id=concept_id,
@@ -60,8 +68,11 @@ class LearningEvidenceService:
             created_at=_utcnow(),
         )
         self.db.add(evidence)
-        self.db.commit()
-        self.db.refresh(evidence)
+        if commit:
+            self.db.commit()
+            self.db.refresh(evidence)
+        else:
+            self.db.flush()
         return evidence
 
     def list_evidence(self, user_id: str, *, concept_id: Optional[str] = None) -> List[LearningEvidence]:

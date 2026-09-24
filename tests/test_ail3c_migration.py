@@ -68,7 +68,11 @@ def _pragma_clean(conn) -> None:
 
 
 def test_single_alembic_head():
-    assert ScriptDirectory.from_config(_cfg()).get_heads() == [HEAD]
+    # AIL.3C's revision is no longer the tip (AIL.4B sits directly above it),
+    # but the chain is still linear with exactly one head.
+    script = ScriptDirectory.from_config(_cfg())
+    assert script.get_heads() == ["ail4b_review_attempts"]
+    assert script.get_revision("ail4b_review_attempts").down_revision == HEAD
 
 
 def test_populated_upgrade_downgrade_reupgrade(db_path):
@@ -79,7 +83,7 @@ def test_populated_upgrade_downgrade_reupgrade(db_path):
         _insert_evidence(conn, "pre-existing", "agent_run", "run-1")
     engine.dispose()
 
-    command.upgrade(_cfg(), "head")
+    command.upgrade(_cfg(), HEAD)
 
     engine = _engine(db_path)
     with engine.begin() as conn:
@@ -97,14 +101,14 @@ def test_populated_upgrade_downgrade_reupgrade(db_path):
 
     # Downgrade is refused while experiment-backed evidence exists, changing nothing.
     with pytest.raises(RuntimeError, match="experiment-backed"):
-        command.downgrade(_cfg(), "-1")
+        command.downgrade(_cfg(), BASE)
     engine = _engine(db_path)
     with engine.begin() as conn:
         assert conn.execute(text("SELECT COUNT(*) FROM learning_evidence WHERE ref_type = 'experiment'")).scalar() == 1
         conn.execute(text("DELETE FROM learning_evidence WHERE id = 'exp-ev-1'"))
     engine.dispose()
 
-    command.downgrade(_cfg(), "-1")
+    command.downgrade(_cfg(), BASE)
     engine = _engine(db_path)
     with engine.begin() as conn:
         columns = {row[1] for row in conn.execute(text("PRAGMA table_info(experiments)"))}
@@ -118,7 +122,7 @@ def test_populated_upgrade_downgrade_reupgrade(db_path):
         _insert_evidence(conn, "exp-ev-2", "experiment", "experiment-1")
     engine.dispose()
 
-    command.upgrade(_cfg(), "head")
+    command.upgrade(_cfg(), HEAD)
     engine = _engine(db_path)
     with engine.begin() as conn:
         assert conn.execute(text("SELECT COUNT(*) FROM learning_evidence WHERE id = 'pre-existing'")).scalar() == 1
@@ -128,7 +132,7 @@ def test_populated_upgrade_downgrade_reupgrade(db_path):
 
 
 def test_partial_unique_index_is_enforced_only_for_experiment_refs(db_path):
-    command.upgrade(_cfg(), "head")
+    command.upgrade(_cfg(), HEAD)
     engine = _engine(db_path)
     with engine.begin() as conn:
         _seed_learner(conn)

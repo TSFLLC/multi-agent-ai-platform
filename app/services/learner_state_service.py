@@ -11,10 +11,11 @@ independently — spec Sec 18.2):
 
     NOT_STARTED -> EXPOSED -> UNDERSTOOD -> PRACTICED -> DEMONSTRATED
 
-Overlays this service computes: SELF_REPORTED, CHANGED. REVIEW_DUE and
-REVIEW_FAILED are explicitly deferred to AIL.4 (spec Sec 35) — they need
-freshness/interval and review-attempt bookkeeping this slice does not
-own; nothing here or in the schema blocks adding them later.
+Overlays this service computes: SELF_REPORTED, CHANGED, and (AIL.4B)
+REVIEW_DUE and REVIEW_FAILED. The two review overlays are derived on read by
+``app.services.review_retention_service.ReviewAssessor`` from evidence this
+service has already loaded plus review attempts; they are overlays only and
+never change the ladder computed here (spec Sec 18.2, 22).
 
 ``evidence_requirements`` schema (a rule payload, not a relationship —
 spec Sec 24.4/10.5.5), used only by DEMONSTRATED:
@@ -37,13 +38,15 @@ never DEMONSTRATED).
 """
 
 from dataclasses import dataclass, field
-from typing import List, Optional, Set, Tuple
+from datetime import datetime, timezone
+from typing import Any, List, Optional, Set, Tuple
 
 from app.db.enums import ConceptKind, EvidenceType, GradingMode, QuestionOrigin
 from app.models.concepts import ConceptVersion
 from app.models.learner import LearningEvidence
 from app.services.concept_graph_service import ConceptGraphService
 from app.services.learning_evidence_service import LearningEvidenceService
+from app.services.review_retention_service import REVIEW_DUE, REVIEW_FAILED, ReviewAssessor
 
 NOT_STARTED = "not_started"
 EXPOSED = "exposed"
@@ -63,6 +66,9 @@ class LearnerConceptState:
     ladder: str
     overlays: Set[str] = field(default_factory=set)
     evidence: List[LearningEvidence] = field(default_factory=list)
+    # AIL.4B: the read-only retention assessment behind the review overlays
+    # (None only for an unknown Concept). Never used to compute the ladder.
+    review: Optional[Any] = None
 
     def is_at_least(self, level: str) -> bool:
         return _LADDER_ORDER.index(self.ladder) >= _LADDER_ORDER.index(level)
@@ -102,8 +108,9 @@ class LearnerStateService:
         self.db = db
         self._concepts = ConceptGraphService(db)
         self._evidence = LearningEvidenceService(db)
+        self._review = ReviewAssessor(db)
 
-    def state(self, user_id: str, concept_id: str) -> LearnerConceptState:
+    def state(self, user_id: str, concept_id: str, *, now: Optional[datetime] = None) -> LearnerConceptState:
         evidence = self._evidence.list_evidence(user_id, concept_id=concept_id)
         graded = [e for e in evidence if e.evidence_type != EvidenceType.SELF_REPORT]
 
@@ -125,10 +132,26 @@ class LearnerStateService:
         if ladder == DEMONSTRATED and self._changed_since(evidence, version):
             overlays.add(CHANGED)
 
-        return LearnerConceptState(concept_id=concept_id, ladder=ladder, overlays=overlays, evidence=evidence)
+        # AIL.4B overlays: derived, never persisted, never touching the ladder.
+        review = self._review.assess(
+            user_id,
+            concept_id,
+            demonstrated=ladder == DEMONSTRATED,
+            evidence=evidence,
+            now=now or datetime.now(timezone.utc),
+        )
+        if review is not None:
+            if review.due:
+                overlays.add(REVIEW_DUE)
+            if review.failed:
+                overlays.add(REVIEW_FAILED)
 
-    def states_for_concepts(self, user_id: str, concept_ids: List[str]) -> dict:
-        return {cid: self.state(user_id, cid) for cid in concept_ids}
+        return LearnerConceptState(
+            concept_id=concept_id, ladder=ladder, overlays=overlays, evidence=evidence, review=review
+        )
+
+    def states_for_concepts(self, user_id: str, concept_ids: List[str], *, now: Optional[datetime] = None) -> dict:
+        return {cid: self.state(user_id, cid, now=now) for cid in concept_ids}
 
     # -- Ladder rules (spec Sec 18.2) ----------------------------------------
 

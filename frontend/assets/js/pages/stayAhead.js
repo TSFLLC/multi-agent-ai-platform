@@ -1,6 +1,14 @@
-import { el } from "../dom.js";
+import { api } from "../api.js";
+import { clear, el } from "../dom.js";
 import { formatDateTime } from "../format.js";
-import { STAY_AHEAD_INTRO, allEmptyText, stayAheadModel } from "../stayAhead.js";
+import {
+  REVIEW_INTRO,
+  STAY_AHEAD_INTRO,
+  allEmptyText,
+  reviewOutcome,
+  stayAheadModel,
+  validateReviewSelection,
+} from "../stayAhead.js";
 
 function chips(labels) {
   return labels.length
@@ -43,11 +51,133 @@ export function stayAheadCard(card) {
   ]);
 }
 
+// -- AIL.4B review card ------------------------------------------------------------------
+
+const defaultReviewApi = {
+  start: (conceptId) => api.post("/learning-reviews", { concept_id: conceptId }),
+  complete: (attemptId, selected) => api.post(`/learning-reviews/${encodeURIComponent(attemptId)}/complete`, { selected }),
+};
+
+function errorText(error, fallback) {
+  return (error && error.message) || fallback;
+}
+
+// The whole review runs inside the card, and only after the user clicks. Each
+// step is one explicit request: start (POST), then submit the answer (POST).
+function reviewPanel(area, card, reviewApi) {
+  const show = (...nodes) => {
+    clear(area);
+    nodes.filter(Boolean).forEach((node) => area.appendChild(node));
+  };
+
+  const showResult = (result) => {
+    const outcome = reviewOutcome(result);
+    show(
+      el("div", { class: `stay-ahead-review-result ${outcome.passed ? "passed" : "not-passed"}` }, [
+        el("p", {}, outcome.message),
+        el("p", { class: "hint" }, outcome.note),
+      ]),
+    );
+  };
+
+  const showQuestion = (started) => {
+    const item = started.item;
+    if (!item) {
+      show(el("p", { class: "hint" }, "This review has no question to show right now."));
+      return;
+    }
+    const selected = new Set();
+    const message = el("p", { class: "hint stay-ahead-review-message" }, "");
+    const submit = el("button", { class: "primary small", disabled: true }, "Submit answer");
+    const inputs = item.options.map((option, index) => {
+      const input = el("input", {
+        type: item.multiple ? "checkbox" : "radio",
+        name: `review-${started.attempt.id}`,
+        value: String(index),
+        onchange: () => {
+          if (!item.multiple) selected.clear();
+          if (input.checked) selected.add(index);
+          else selected.delete(index);
+          submit.disabled = validateReviewSelection(item, selected) !== null;
+        },
+      });
+      return el("label", { class: "stay-ahead-review-option" }, [input, ` ${option}`]);
+    });
+    submit.onclick = async () => {
+      const problem = validateReviewSelection(item, selected);
+      if (problem) {
+        message.textContent = problem;
+        return;
+      }
+      submit.disabled = true;
+      try {
+        showResult(await reviewApi.complete(started.attempt.id, [...selected].sort((a, b) => a - b)));
+      } catch (error) {
+        message.textContent = errorText(error, "Your answer could not be submitted.");
+        submit.disabled = false;
+      }
+    };
+    show(
+      el("div", { class: "stack stay-ahead-review-question" }, [
+        el("strong", {}, item.title),
+        item.body_md ? el("p", {}, item.body_md) : null,
+        item.multiple ? el("p", { class: "hint" }, "Choose every answer that applies.") : null,
+        el("div", { class: "stack" }, inputs),
+        submit,
+        message,
+      ]),
+    );
+  };
+
+  const begin = async () => {
+    show(el("p", { class: "hint" }, "Starting your review…"));
+    try {
+      showQuestion(await reviewApi.start(card.conceptId));
+    } catch (error) {
+      show(el("p", { class: "error-banner" }, errorText(error, "The review could not be started.")), startButton());
+    }
+  };
+
+  const startButton = () =>
+    el("button", { class: "primary small", onclick: begin }, card.action.label);
+
+  return { begin, startButton };
+}
+
+export function reviewCard(card, { reviewApi = defaultReviewApi } = {}) {
+  const area = el("div", { class: "stay-ahead-review-action" }, []);
+  const panel = reviewPanel(area, card, reviewApi);
+  if (card.action.kind === "unavailable") {
+    area.appendChild(el("p", { class: "hint stay-ahead-review-unavailable" }, card.action.message));
+  } else {
+    area.appendChild(panel.startButton());
+  }
+  return el("article", { class: `card radar-card compact stay-ahead-card stay-ahead-review ${card.kind.toLowerCase()}` }, [
+    el("div", { class: "row between" }, [
+      el("div", { class: "eyebrow" }, card.kindLabel),
+      el("div", { class: "row" }, [
+        el("span", { class: "badge badge-neutral" }, `Your record: ${card.learnerState.label}`),
+        ...card.learnerState.overlays.map((label) => el("span", { class: "badge badge-neutral" }, label)),
+      ]),
+    ]),
+    el("h3", {}, card.title),
+    el("p", { class: "stay-ahead-what" }, [el("strong", {}, "What changed: "), card.what]),
+    el("p", { class: "stay-ahead-why" }, [el("strong", {}, "Why you are seeing this: "), card.why]),
+    chips(card.reasons),
+    card.baseline ? el("p", { class: "hint stay-ahead-baseline" }, card.baseline) : null,
+    card.interval ? el("p", { class: "hint stay-ahead-interval" }, card.interval) : null,
+    card.attempt ? el("p", { class: "hint stay-ahead-attempt" }, card.attempt) : null,
+    area,
+  ]);
+}
+
 function sectionView(section) {
+  const render = section.cardType === "review" ? reviewCard : stayAheadCard;
   return el("section", { class: "stack today-section stay-ahead-section" }, [
     el("div", { class: "row between" }, [el("h2", {}, section.title), el("span", { class: "hint" }, section.countText)]),
+    section.cardType === "review" && section.cards.length ? el("p", { class: "hint" }, REVIEW_INTRO) : null,
     section.cards.length
-      ? el("div", { class: "stack" }, section.cards.map(stayAheadCard))
+      ? el("div", { class: "stack" }, section.cards.map((card) => render(card)))
       : el("p", { class: "hint stay-ahead-empty" }, section.empty),
   ]);
 }

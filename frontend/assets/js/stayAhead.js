@@ -16,6 +16,14 @@ export const STAY_AHEAD_SECTIONS = [
     eyebrow: "Worth revisiting",
   },
   {
+    key: "review",
+    title: "Review",
+    intro: "Concepts you have already demonstrated that are worth checking again.",
+    empty: "Nothing you have demonstrated is due for review.",
+    eyebrow: "Review",
+    cardType: "review",
+  },
+  {
     key: "used_models_changed",
     title: "Models that changed since they were used",
     intro: "Models from your own Personal Lab experiments, or used in opted-in projects you can access, whose catalog record has changed since they were last used. Each card says which of the two it is.",
@@ -144,7 +152,8 @@ export function cardModel(signal, eyebrow) {
 }
 
 export function sectionModel(config, section) {
-  const items = (section?.items || []).map((item) => cardModel(item, config.eyebrow));
+  const build = config.cardType === "review" ? reviewCardModel : (item) => cardModel(item, config.eyebrow);
+  const items = (section?.items || []).map(build);
   return { ...config, total: Number(section?.total || 0), countText: sectionCountText(section), cards: items };
 }
 
@@ -159,4 +168,118 @@ export function stayAheadModel(data) {
 
 export function allEmptyText(windowDays) {
   return `Nothing you have learned, tested, used or watched has a recorded change in the last ${windowDays} days.`;
+}
+
+// -- AIL.4B: the review section ---------------------------------------------------------
+//
+// A review card says which Concept, where it stands (ladder + overlay), why a
+// review is due, what it is based on, what happened last, and what the user
+// can do. The only action is an explicit click; nothing here starts, grades or
+// records anything by itself, and nothing is scored or ranked.
+
+const REVIEW_REASON_LABELS = {
+  REVIEW_ELIGIBLE_CORE: "Core Concept",
+  REVIEW_ELIGIBLE_PLAN: "In your active plan",
+  REVIEW_INTERVAL_ELAPSED: "Review interval elapsed",
+  REVIEW_CONCEPT_CHANGED: "Concept changed materially",
+  REVIEW_FAILED_LATEST: "Latest review did not pass",
+};
+
+const OVERLAY_LABELS = {
+  review_due: "Review due",
+  review_failed: "Latest review needs attention",
+  changed: "Concept changed",
+  self_reported: "Self-reported",
+};
+
+const REVIEW_KIND_LABELS = {
+  REVIEW_DUE: "Review due",
+  REVIEW_FAILED: "Latest review needs attention",
+  CONCEPT_CHANGED_REVIEW: "Concept changed; review recommended",
+};
+
+const REVIEW_UNAVAILABLE = {
+  NO_REVIEW_ITEM: "No reviewed check is available for this Concept yet.",
+  NOT_DUE: "This Concept is not due for review.",
+  NOT_ELIGIBLE: "Reviews apply to core Concepts and Concepts in your active plan.",
+  NOT_DEMONSTRATED: "Only a Concept you have demonstrated can be reviewed.",
+  NO_VERSION: "This Concept has no published version to review against.",
+};
+
+export const REVIEW_INTRO = "Concepts you have already demonstrated that are worth checking again. A review is one short question. It is only ever started by you, and a failed review never changes what your record says you have demonstrated.";
+
+export function overlayLabel(overlay) {
+  return OVERLAY_LABELS[overlay] || String(overlay || "").replaceAll("_", " ");
+}
+
+export function reviewReasonLabel(code) {
+  return REVIEW_REASON_LABELS[code] || String(code || "").replaceAll("_", " ").toLowerCase();
+}
+
+function whenText(value) {
+  if (!value) return "an unknown date";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "an unknown date" : date.toISOString().slice(0, 10);
+}
+
+export function reviewActionModel(action) {
+  const kind = action?.kind || "unavailable";
+  if (kind === "start_review") return { kind, label: "Start review", message: null };
+  if (kind === "continue_review") return { kind, label: "Continue review", message: null };
+  if (action?.reason === "COOLDOWN") {
+    return { kind: "unavailable", label: null, message: `You can try again after ${whenText(action.available_after)}.` };
+  }
+  return { kind: "unavailable", label: null, message: REVIEW_UNAVAILABLE[action?.reason] || "A review is not available right now." };
+}
+
+function attemptText(attempt) {
+  if (!attempt) return null;
+  if (attempt.status === "started") return `A review is in progress (started ${whenText(attempt.started_at)}).`;
+  if (attempt.status === "failed") return `Your latest review did not pass (${whenText(attempt.completed_at)}).`;
+  if (attempt.status === "passed") return `Your latest review passed (${whenText(attempt.completed_at)}).`;
+  return null;
+}
+
+export function reviewCardModel(card) {
+  const baseline = card.baseline
+    ? `Based on your ${String(card.baseline.evidence_type || "evidence").replaceAll("_", " ")} from ${whenText(card.baseline.recorded_at)}` +
+      (card.baseline.concept_version ? ` (Concept version ${card.baseline.concept_version}).` : ".")
+    : null;
+  const streak = card.interval?.streak ? `, extended after ${card.interval.streak} successful review${card.interval.streak === 1 ? "" : "s"}` : "";
+  return {
+    id: card.id,
+    kind: card.kind,
+    kindLabel: REVIEW_KIND_LABELS[card.kind] || "Review",
+    title: card.title,
+    what: card.what,
+    why: card.why,
+    reasons: (card.reason_codes || []).map(reviewReasonLabel),
+    conceptId: card.concept?.id,
+    conceptName: card.concept?.name,
+    learnerState: {
+      label: ladderLabel(card.learner_state?.ladder),
+      overlays: (card.learner_state?.overlays || []).map(overlayLabel),
+    },
+    baseline,
+    interval: card.interval?.days ? `Review interval: ${card.interval.days} days${streak}.` : null,
+    attempt: attemptText(card.attempt),
+    action: reviewActionModel(card.action),
+  };
+}
+
+// Client-side echo of the server's rules, only to avoid a pointless request;
+// the server still validates and is authoritative.
+export function validateReviewSelection(item, selected) {
+  const chosen = [...(selected || [])];
+  if (!chosen.length) return "Choose an answer before submitting.";
+  if (!item?.multiple && chosen.length !== 1) return "This question takes exactly one answer.";
+  return null;
+}
+
+export function reviewOutcome(result) {
+  return {
+    passed: Boolean(result?.passed),
+    message: result?.message || (result?.passed ? "Recorded." : "Not quite."),
+    note: "Reload Today to see your updated review list.",
+  };
 }

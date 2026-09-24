@@ -642,3 +642,16 @@ class SnapshotChangeKind(str, enum.Enum):
 class ProjectKind(str, enum.Enum):
     STANDARD = "standard"
     SYSTEM_AIL = "system_ail"
+
+
+# --- AIL.4B review & retention ------------------------------------------------
+
+
+class ReviewAttemptStatus(str, enum.Enum):
+    """Lifecycle of one review attempt. Deliberately only these three: there
+    is no dismissed/snoozed state in AIL.4B, and STARTED is the only
+    non-terminal one."""
+
+    STARTED = "started"
+    PASSED = "passed"
+    FAILED = "failed"

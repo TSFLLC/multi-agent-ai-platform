@@ -1111,7 +1111,10 @@ def test_no_schema_change_and_no_later_slice_tables():
     from alembic.config import Config
     from alembic.script import ScriptDirectory
 
-    heads = ScriptDirectory.from_config(Config("alembic.ini")).get_heads()
-    assert heads == ["ail3c_experiment_conclusion"]
+    script = ScriptDirectory.from_config(Config("alembic.ini"))
+    # AIL.4B (a later slice) is the only migration after AIL.3C: AIL.4A itself
+    # added none, so the revision directly above 3C is 4B's, not a 4A one.
+    assert script.get_heads() == ["ail4b_review_attempts"]
+    assert script.get_revision("ail4b_review_attempts").down_revision == "ail3c_experiment_conclusion"
     tables = set(Base.metadata.tables)
-    assert not tables & {"review_attempts", "interest_rules", "opportunities", "stay_ahead_signals", "signal_dismissals"}
+    assert not tables & {"interest_rules", "opportunities", "stay_ahead_signals", "signal_dismissals"}

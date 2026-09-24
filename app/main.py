@@ -26,6 +26,7 @@ from app.api.routers import (
     events,
     internal,
     lab,
+    learning_reviews,
     model_explorer,
     model_intelligence,
     models,
@@ -190,6 +191,7 @@ for router in (
     events.router,
     internal.router,
     lab.router,
+    learning_reviews.router,
 ):
     app.include_router(router)
 

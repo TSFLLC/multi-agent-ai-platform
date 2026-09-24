@@ -42,6 +42,11 @@ must report COMPLETED, and — because the engine claims an Agent Run terminal
 COMPLETED before it completes its Task Run — every slot's Agent Run(s) must be
 ``AgentRunStatus.COMPLETED`` with a recorded model snapshot.
 
+AIL.4B adds the ``review`` section (REVIEW_DUE / REVIEW_FAILED cards) from the
+learner-state overlays; the five families above are unchanged. A Concept can
+therefore appear both in WORTH_REVISITING (a recorded change) and in the review
+section (a review is due) — different questions, deliberately not deduplicated.
+
 Deferred limitation — ``triage_decisions.revisit_condition``. The repository
 validates only ``kind`` for it and defines no shape or evaluation semantics
 (no ``verification_at_least`` level, no ``attention_state`` threshold, no date
@@ -113,6 +118,8 @@ from app.schemas.stay_ahead import (
     StayAheadLink,
     StayAheadReason,
     StayAheadReasonCode,
+    StayAheadReviewCard,
+    StayAheadReviewSection,
     StayAheadSection,
     StayAheadSections,
     StayAheadSignal,
@@ -130,6 +137,8 @@ from app.services.learner_state_service import (
     LearnerStateService,
 )
 from app.services.radar_service import derive_verification
+from app.services.review_attempt_service import ReviewAttemptService
+from app.services.review_retention_service import ReviewReasonCode
 
 DEFAULT_WINDOW_DAYS = 30
 MAX_WINDOW_DAYS = 90
@@ -141,6 +150,8 @@ SECTION_CAPS = {
     "watched_developments": 5,
     "experiments_to_rerun": 3,
     "concepts_changed": 5,
+    # AIL.4B: at most two review cards shown; the total is always reported.
+    "review": 2,
 }
 
 # Evidence a WATCHed Development can gain that counts as a change. Community
@@ -305,6 +316,7 @@ class StayAheadService:
                     absorbed.setdefault(cid, []).append(self._as_reason(item.signal))
 
         worth = self._worth_revisiting(learned, absorbed)
+        review_cards = self._review_cards(user_id, learned)
 
         def section(key: str, items: List[StayAheadSignal]) -> StayAheadSection:
             ordered = items if key == "worth_revisiting" else self._by_recency(items)
@@ -321,6 +333,11 @@ class StayAheadService:
                 watched_developments=section("watched_developments", [i.signal for i in standalone["watched_developments"]]),
                 experiments_to_rerun=section("experiments_to_rerun", [i.signal for i in standalone["experiments_to_rerun"]]),
                 concepts_changed=section("concepts_changed", [i.signal for i in standalone["concepts_changed"]]),
+                review=StayAheadReviewSection(
+                    total=len(review_cards),
+                    shown=min(len(review_cards), SECTION_CAPS["review"]),
+                    items=review_cards[: SECTION_CAPS["review"]],
+                ),
             ),
         )
 
@@ -994,7 +1011,7 @@ class StayAheadService:
         ).scalars().all()
         learned: Dict[str, LearnerConceptState] = {}
         for concept_id in sorted(concept_ids):
-            state = self._learner_state.state(user_id, concept_id)
+            state = self._learner_state.state(user_id, concept_id, now=self.now)
             if state.ladder != NOT_STARTED:
                 learned[concept_id] = state
         return learned
@@ -1137,6 +1154,149 @@ class StayAheadService:
                 )
             )
         return items
+
+    # -- AIL.4B: review section ------------------------------------------------------
+
+    def _review_cards(self, user_id: str, learned: Dict[str, LearnerConceptState]) -> List[StayAheadReviewCard]:
+        """One card per Concept that is REVIEW_DUE or REVIEW_FAILED, straight
+        from the learner-state overlays (``LearnerStateService`` stays the
+        authority; nothing is recomputed or written here). A Concept gets a
+        single card: a failed latest review takes precedence over a material
+        change, which takes precedence over an elapsed interval."""
+        candidates = [
+            (concept_id, state)
+            for concept_id, state in sorted(learned.items())
+            if state.review is not None and (state.review.failed or state.review.due)
+        ]
+        if not candidates:
+            return []
+        names = self._concept_names({cid for cid, _ in candidates})
+        reviews = ReviewAttemptService(self.db, now=self.now)
+        cards: List[StayAheadReviewCard] = []
+        for concept_id, state in candidates:
+            review = state.review
+            info = names.get(concept_id)
+            if info is None:
+                continue
+            name = info["name"]
+            if review.failed:
+                kind = "REVIEW_FAILED"
+                title = f"Your latest review of “{name}” needs attention"
+                what = "Your most recent review of this Concept did not pass."
+                why = (
+                    "It is still recorded as Demonstrated — a failed review never changes that. "
+                    "This is a prompt to review it again."
+                )
+            elif ReviewReasonCode.REVIEW_CONCEPT_CHANGED.value in review.due_reasons:
+                kind = "CONCEPT_CHANGED_REVIEW"
+                latest = max(review.material_changes, key=lambda c: c["version"])
+                note = f": {latest['change_note']}" if latest["change_note"] else "."
+                title = f"“{name}” changed; a review is recommended"
+                what = f"Version {latest['version']} was published as a material change{note}"
+                why = (
+                    f"You demonstrated this Concept against version {review.baseline.concept_version or '?'}. "
+                    "A review checks that you still hold it as it is now."
+                )
+            else:
+                kind = "REVIEW_DUE"
+                title = f"Review due: “{name}”"
+                what = f"Your review interval for this Concept ({review.interval_days} days) has elapsed."
+                extended = (
+                    f", extended after {_plural(review.streak, 'successful review')}" if review.streak else ""
+                )
+                why = (
+                    f"Your latest evidence for this {review.kind} Concept is from {_day(review.baseline.recorded_at)}. "
+                    f"The interval is {review.base_interval_days} days{extended}, and it has passed."
+                )
+            eligibility = "core Concept" if "core" in review.eligible_via else "Concept in your active plan"
+            if not review.failed:
+                why += f" It is reviewed because it is a {eligibility}."
+
+            attempt_view = review.active_attempt or review.latest_completed
+            availability = reviews.availability(user_id, concept_id, state=state)
+            action: Dict[str, Any] = {"kind": {"start": "start_review", "continue": "continue_review"}.get(
+                availability.action, "unavailable"
+            )}
+            if availability.reason:
+                action["reason"] = availability.reason
+            if availability.available_after:
+                action["available_after"] = availability.available_after
+            if availability.learning_item_id:
+                action["learning_item_id"] = availability.learning_item_id
+            if availability.attempt_id:
+                action["attempt_id"] = availability.attempt_id
+
+            refs: List[StayAheadEvidenceRef] = []
+            if review.baseline is not None:
+                refs.append(StayAheadEvidenceRef(type="learning_evidence", id=review.baseline.evidence_id, role="baseline"))
+                refs.append(
+                    StayAheadEvidenceRef(
+                        type="concept_version", id=review.baseline.concept_version_id, role="baseline_version"
+                    )
+                )
+            for change in review.material_changes:
+                refs.append(StayAheadEvidenceRef(type="concept_version", id=change["concept_version_id"], role="new_material_version"))
+            if attempt_view is not None:
+                refs.append(StayAheadEvidenceRef(type="review_attempt", id=attempt_view.id, role="attempt"))
+
+            cards.append(
+                StayAheadReviewCard(
+                    id=f"REVIEW:{concept_id}",
+                    kind=kind,
+                    title=title,
+                    what=what,
+                    why=why,
+                    reason_codes=list(review.reason_codes),
+                    concept={"id": concept_id, "kind": review.kind, **info},
+                    learner_state={"ladder": state.ladder, "overlays": sorted(state.overlays)},
+                    baseline=(
+                        {
+                            "evidence_id": review.baseline.evidence_id,
+                            "evidence_type": review.baseline.evidence_type,
+                            "recorded_at": review.baseline.recorded_at,
+                            "concept_version": review.baseline.concept_version,
+                        }
+                        if review.baseline is not None
+                        else None
+                    ),
+                    interval={
+                        "days": review.interval_days,
+                        "base_days": review.base_interval_days,
+                        "streak": review.streak,
+                        "due_at": review.due_at,
+                    },
+                    material_changes=[
+                        {**c, "published_at": c["published_at"].isoformat() if c["published_at"] else None}
+                        for c in review.material_changes
+                    ],
+                    attempt=(
+                        {
+                            "id": attempt_view.id,
+                            "status": attempt_view.status,
+                            "started_at": attempt_view.started_at,
+                            "completed_at": attempt_view.completed_at,
+                        }
+                        if attempt_view is not None
+                        else None
+                    ),
+                    action=action,
+                    evidence_refs=refs,
+                    due_at=review.due_at,
+                )
+            )
+        # Presentation order only, on visible fields: failed reviews first, then
+        # material changes, then elapsed intervals; within a group the longest
+        # overdue first, then name. No score is computed.
+        group = {"REVIEW_FAILED": 0, "CONCEPT_CHANGED_REVIEW": 1, "REVIEW_DUE": 2}
+        return sorted(
+            cards,
+            key=lambda c: (
+                group[c.kind],
+                _aware(c.due_at).timestamp() if c.due_at else float("inf"),
+                c.concept["name"].lower(),
+                c.id,
+            ),
+        )
 
     # -- WORTH_REVISITING (rollup) --------------------------------------------------
 

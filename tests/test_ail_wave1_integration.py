@@ -38,8 +38,9 @@ def test_final_chain_is_linear_and_has_one_head():
 
     script = ScriptDirectory.from_config(_cfg())
     assert [head.revision for head in script.get_revisions("heads")] == [
-        "ail3c_experiment_conclusion"
+        "ail4b_review_attempts"
     ]
+    assert script.get_revision("ail4b_review_attempts").down_revision == "ail3c_experiment_conclusion"
     assert script.get_revision("8c3f6b2e9d14").down_revision == "5e1d8a4c7b30"
     assert script.get_revision("ef873dac62a1").down_revision == "8c3f6b2e9d14"
     assert script.get_revision("0f87701fabff").down_revision == "ef873dac62a1"
