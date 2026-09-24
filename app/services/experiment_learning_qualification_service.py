@@ -15,6 +15,7 @@ evidence requirements.
 from typing import Dict, List, Optional, Tuple
 from sqlalchemy import and_, select
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 
 from app.db.enums import EvaluationFinding, EvaluationRunStatus, EvidenceRefType, EvidenceType, ExperimentStatus, ExperimentType, GradingMode
 from app.models.lab import Experiment, ExperimentTaskRun
@@ -134,19 +135,28 @@ class ExperimentLearningQualificationService:
 
         # Create evidence: experiment-backed evidence is LAB type with EXPERIMENT ref_type
         # passed is derived from canonical platform evidence, grader is DETERMINISTIC
-        evidence = self.evidence_service.record_evidence(
-            user_id=user_id,
-            concept_id=experiment.concept_id,
-            concept_version_id=experiment.concept_version_id,  # Use frozen version
-            evidence_type=EvidenceType.LAB,  # Hands-on platform evidence
-            grader=GradingMode.DETERMINISTIC,  # Platform-verified execution
-            score=None,  # Experiments don't have scores; evaluation results are in MA6
-            passed=passed,  # Derived from canonical evaluation evidence
-            ref_type=EvidenceRefType.EXPERIMENT,
-            ref_id=experiment_id,
-        )
-
-        return evidence, "Learning evidence recorded"
+        try:
+            evidence = self.evidence_service.record_evidence(
+                user_id=user_id,
+                concept_id=experiment.concept_id,
+                concept_version_id=experiment.concept_version_id,  # Use frozen version
+                evidence_type=EvidenceType.LAB,  # Hands-on platform evidence
+                grader=GradingMode.DETERMINISTIC,  # Platform-verified execution
+                score=None,  # Experiments don't have scores; evaluation results are in MA6
+                passed=passed,  # Derived from canonical evaluation evidence
+                ref_type=EvidenceRefType.EXPERIMENT,
+                ref_id=experiment_id,
+            )
+            return evidence, "Learning evidence recorded"
+        except IntegrityError:
+            # Concurrent request created evidence first; return it
+            # Database-level uniqueness constraint prevents duplicates
+            self.db.rollback()
+            existing = self._find_experiment_evidence(user_id, experiment_id)
+            if existing:
+                return existing, "Evidence already recorded for this experiment (concurrent creation)"
+            # Shouldn't reach here if constraint is properly configured
+            raise
 
     def _get_experiment_or_raise(self, user_id: str, experiment_id: str) -> Experiment:
         """Fetch experiment with authorization check."""

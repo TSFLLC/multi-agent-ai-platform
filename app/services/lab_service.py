@@ -320,6 +320,15 @@ class LabService:
         concept = self.db.get(Concept, data.concept_id) if data.concept_id else None
         if data.concept_id and concept is None:
             raise NotFoundError("Concept not found.")
+
+        # Freeze current ConceptVersion at experiment creation for learning provenance
+        concept_version = None
+        if concept:
+            from app.services.concept_graph_service import ConceptGraphService
+            concept_version = ConceptGraphService(self.db).get_current_version(concept.id)
+            if not concept_version:
+                raise ConflictError(f"Concept {concept.id} has no current published version")
+
         if data.learning_item_id and self.db.get(LearningItem, data.learning_item_id) is None:
             raise NotFoundError("Learning Item not found.")
 
@@ -350,6 +359,7 @@ class LabService:
             eval_set_version_id=version.id,
             development_id=development.id if development else None,
             concept_id=concept.id if concept else None,
+            concept_version_id=concept_version.id if concept_version else None,
             learning_item_id=data.learning_item_id,
             repetitions=data.repetitions,
             config_snapshot={**data.config, "repetitions": data.repetitions, "execution_enabled": False},
