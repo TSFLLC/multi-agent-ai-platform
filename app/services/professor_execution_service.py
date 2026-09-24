@@ -348,6 +348,11 @@ class ProfessorExecutionService:
         versions receive the correction without mutating an immutable Agent
         Version or introducing a migration.
         """
+        if settings.environment == "staging" and settings.professor_staging_provider_model_id:
+            return {
+                "mode": "manual",
+                "manual_provider_model_id": settings.professor_staging_provider_model_id,
+            }
         policy = dict(agent_version.model_policy or {})
         required = dict(policy.get("required_capabilities") or {})
         required.setdefault("structured_output_support", True)

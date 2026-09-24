@@ -5,6 +5,7 @@ from decimal import Decimal
 
 import pytest
 
+from app.config import settings
 from app.errors import NotFoundError
 from app.models.observability import ExecutionEvent
 from app.providers.base import InvokeResponse, ProviderConnectionError
@@ -57,6 +58,29 @@ def _response():
             "attachment_references": [],
         }
     )
+
+
+def test_professor_staging_pin_uses_registry_provider_model_id_only(monkeypatch):
+    monkeypatch.setattr(settings, "environment", "staging")
+    monkeypatch.setattr(settings, "professor_staging_provider_model_id", "registry-provider-model-id")
+
+    policy = ProfessorExecutionService._professor_model_policy(
+        type("AgentVersionStub", (), {"model_policy": {"mode": "auto", "auto_policy": "prefer_free"}})()
+    )
+
+    assert policy == {"mode": "manual", "manual_provider_model_id": "registry-provider-model-id"}
+
+
+def test_professor_pin_is_inactive_without_staging_configuration(monkeypatch):
+    monkeypatch.setattr(settings, "environment", "local")
+    monkeypatch.setattr(settings, "professor_staging_provider_model_id", "registry-provider-model-id")
+
+    policy = ProfessorExecutionService._professor_model_policy(
+        type("AgentVersionStub", (), {"model_policy": {"mode": "auto", "auto_policy": "prefer_free"}})()
+    )
+
+    assert policy["mode"] == "auto"
+    assert policy["auto_policy"] == "prefer_free"
 
 
 def test_professor_execution_uses_normal_lineage_and_model_policy(db, bootstrap, monkeypatch):

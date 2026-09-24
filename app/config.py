@@ -176,6 +176,10 @@ class Settings(BaseSettings):
     # deliberately configurable rather than commercial pricing policy.
     professor_max_context_chars: int = 80_000
     professor_max_output_tokens: int = 1_200
+    # Staging-only AIL.4C UAT pin. This is a Model Registry
+    # ``provider_models.id`` configured outside the application; leaving it
+    # unset preserves the normal Professor AUTO/MA8 policy.
+    professor_staging_provider_model_id: Optional[str] = None
 
     @field_validator("log_level")
     @classmethod
