@@ -635,6 +635,11 @@ class AgentExecutionService:
             max_tokens=(ctx.task.requirements or {}).get("_professor_max_output_tokens")
             if ctx.agent_version.role == "professor"
             else None,
+            response_format=(
+                {"type": "json_object"}
+                if ctx.agent_version.role == "professor" and resolved.model.structured_output_support is True
+                else None
+            ),
         )
 
         try:

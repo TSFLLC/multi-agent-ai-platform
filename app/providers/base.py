@@ -81,6 +81,7 @@ class InvokeRequest:
     system_prompt: Optional[str] = None
     timeout_seconds: float = 60.0
     max_tokens: Optional[int] = None
+    response_format: Optional[Dict[str, Any]] = None
 
 
 @dataclass

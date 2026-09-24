@@ -171,6 +171,7 @@ class ProfessorExecutionService:
             },
             agent_run_role=AgentRunRole.PROFESSOR,
             budget_id=budget_id,
+            model_policy_override=self._professor_model_policy(agent_version),
             enqueue=False,
         )
         agent_run = self.db.execute(
@@ -246,6 +247,7 @@ class ProfessorExecutionService:
             frozen_task_snapshot={"title": task.title, "description": task.description, "requirements": requirements},
             agent_run_role=AgentRunRole.PROFESSOR,
             budget_id=budget_id,
+            model_policy_override=self._professor_model_policy(agent_version),
             enqueue=False,
         )
         agent_run = self.db.execute(select(AgentRun).where(AgentRun.task_run_id == task_run.id)).scalar_one()
@@ -303,7 +305,17 @@ class ProfessorExecutionService:
                 role="professor",
                 description=agent.description,
                 prompt_version_id=prompt.id,
-                model_policy={"mode": "auto", "auto_policy": "prefer_free"},
+                model_policy={
+                    "mode": "auto",
+                    "auto_policy": "prefer_free",
+                    "required_capabilities": {"structured_output_support": True},
+                    # A high reasoning tier is a poor fit for this bounded
+                    # structured response. Unknown remains eligible so the
+                    # existing registry can be used before capability data is
+                    # enriched; response_format is only sent when support is
+                    # explicitly confirmed.
+                    "excluded_capabilities": {"reasoning_tier": ["high"]},
+                },
                 context_policy={"source": "ail_professor_context", "max_context_chars": settings.professor_max_context_chars},
                 budget_policy={"max_output_tokens": settings.professor_max_output_tokens},
                 status=VersionStatus.ACTIVE,
@@ -327,6 +339,23 @@ class ProfessorExecutionService:
     @staticmethod
     def _professor_prompt() -> str:
         return """You are AI Professor. Use only the supplied AIL context. Return only the bounded JSON Professor response contract. Never invent evidence or IDs. Preserve conflict groups and the learner's conclusion. AI explanations are not canonical evidence. All actions are advisory. Never claim mastery or change learning, review, experiment, Radar, or plan state. Do not reveal hidden reasoning."""
+
+    @staticmethod
+    def _professor_model_policy(agent_version: AgentVersion) -> dict:
+        """Carry the registered policy forward with Professor constraints.
+
+        This is a run-level snapshot, so existing published Professor
+        versions receive the correction without mutating an immutable Agent
+        Version or introducing a migration.
+        """
+        policy = dict(agent_version.model_policy or {})
+        required = dict(policy.get("required_capabilities") or {})
+        required.setdefault("structured_output_support", True)
+        excluded = dict(policy.get("excluded_capabilities") or {})
+        excluded.setdefault("reasoning_tier", ["high"])
+        policy["required_capabilities"] = required
+        policy["excluded_capabilities"] = excluded
+        return policy
 
     @staticmethod
     def _default_question(intent: ProfessorIntent) -> str:
@@ -388,10 +417,11 @@ class ProfessorExecutionService:
         )
 
     def _validate_artifact(self, artifact: Artifact, requirements: dict) -> ProfessorResponse:
-        payload = json.loads(self._read_artifact(artifact))
-        fenced = _JSON_FENCE.match(self._read_artifact(artifact).strip())
+        text = self._read_artifact(artifact).strip()
+        fenced = _JSON_FENCE.match(text)
         if fenced:
-            payload = json.loads(fenced.group(1))
+            text = fenced.group(1).strip()
+        payload = json.loads(text)
         response = ProfessorResponse.model_validate(payload)
         context = ProfessorContext.model_validate(requirements[PROFESSOR_CONTEXT_KEY])
         return validate_professor_response(response, context)

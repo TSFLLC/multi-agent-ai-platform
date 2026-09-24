@@ -103,6 +103,7 @@ class ExclusionReason(str, enum.Enum):
     MANUAL_MODEL_INVALID = "MANUAL_MODEL_INVALID"  # manual policy with no model id
     POLICY_INVALID = "POLICY_INVALID"  # malformed model policy
     NO_ELIGIBLE_MODEL = "NO_ELIGIBLE_MODEL"  # auto policy found nothing eligible
+    CAPABILITY_UNSUPPORTED = "CAPABILITY_UNSUPPORTED"  # model lacks a required capability
 
 
 class RoutingError(Exception):
@@ -273,6 +274,29 @@ def _policy_exclusions(
     raise ValueError(f"Unknown RouterFreePolicy: {policy!r}")  # pragma: no cover - closed enum
 
 
+def _capability_exclusions(model: Model, policy: Dict[str, Any]) -> List[ExclusionReason]:
+    """Apply normalized Model Registry capability constraints.
+
+    Explicitly unsupported values do not satisfy a required capability.
+    Unknown values remain unknown so older/manual registry entries are not
+    silently reclassified; the caller only enables provider enforcement when
+    support is explicitly confirmed.
+    """
+    required = policy.get("required_capabilities") or {}
+    excluded = policy.get("excluded_capabilities") or {}
+    for key, expected in required.items():
+        actual = getattr(model, key, None)
+        allowed = expected if isinstance(expected, list) else [expected]
+        if actual is not None and actual not in allowed:
+            return [ExclusionReason.CAPABILITY_UNSUPPORTED]
+    for key, forbidden in excluded.items():
+        actual = getattr(model, key, None)
+        values = forbidden if isinstance(forbidden, list) else [forbidden]
+        if actual in values:
+            return [ExclusionReason.CAPABILITY_UNSUPPORTED]
+    return []
+
+
 def _verdict(
     provider_model: ProviderModel,
     model: Model,
@@ -342,7 +366,7 @@ def route(
                 failure_code=ExclusionReason.MANUAL_MODEL_INVALID,
             )
             raise ModelUnavailableError(message, code=decision.failure_code, decision=decision)
-        return route_manual(db, provider_model_id)
+        return route_manual(db, provider_model_id, policy=policy)
 
     if mode == ModelSelectionMode.AUTO.value:
         auto_policy_value = policy.get("auto_policy")
@@ -362,7 +386,7 @@ def route(
                 failure_code=ExclusionReason.POLICY_INVALID,
             )
             raise ModelUnavailableError(message, code=decision.failure_code, decision=decision)
-        return route_auto(db, free_policy, context=context)
+        return route_auto(db, free_policy, context=context, model_policy=policy)
 
     message = f"model_policy mode must be 'manual' or 'auto' (got {mode!r})."
     decision = RoutingDecision(
@@ -374,7 +398,9 @@ def route(
     raise ModelUnavailableError(message, code=decision.failure_code, decision=decision)
 
 
-def route_manual(db: Session, provider_model_id: str) -> RoutingDecision:
+def route_manual(
+    db: Session, provider_model_id: str, *, policy: Optional[Dict[str, Any]] = None
+) -> RoutingDecision:
     """Validate an operator-chosen provider model. Never substitutes: an
     ineligible manual choice fails with its reason."""
 
@@ -410,6 +436,8 @@ def route_manual(db: Session, provider_model_id: str) -> RoutingDecision:
 
     classification = classify_pricing(provider_model.cost_input_per_mtok, provider_model.cost_output_per_mtok)
     reasons = _catalog_exclusions(provider_model, model, provider)
+    if not reasons:
+        reasons.extend(_capability_exclusions(model, policy or {}))
     verdict = _verdict(provider_model, model, provider, classification, reasons)
     if ExclusionReason.MODEL_INACTIVE in reasons:
         fail(
@@ -424,6 +452,12 @@ def route_manual(db: Session, provider_model_id: str) -> RoutingDecision:
             f"Provider model {provider_model_id} ({model.canonical_model_id!r} via {provider.name!r}) "
             "is currently unavailable.",
             ExclusionReason.PROVIDER_MODEL_UNAVAILABLE,
+            verdict,
+        )
+    if ExclusionReason.CAPABILITY_UNSUPPORTED in reasons:
+        fail(
+            f"Model {model.canonical_model_id!r} does not satisfy the requested capabilities.",
+            ExclusionReason.CAPABILITY_UNSUPPORTED,
             verdict,
         )
 
@@ -462,7 +496,10 @@ def _all_candidates(db: Session) -> List[Tuple[ProviderModel, Model, Provider, P
 
 
 def route_auto(
-    db: Session, policy: RouterFreePolicy, context: Optional[RoutingContext] = None
+    db: Session,
+    policy: RouterFreePolicy,
+    context: Optional[RoutingContext] = None,
+    model_policy: Optional[Dict[str, Any]] = None,
 ) -> RoutingDecision:
     """Deterministic auto selection under a FREE_ONLY/PREFER_FREE/ANY policy,
     optionally reordered by MA8.2 evidence inside that policy's boundary."""
@@ -472,6 +509,8 @@ def route_auto(
     for item in _all_candidates(db):
         provider_model, model, provider, classification = item
         reasons = _catalog_exclusions(provider_model, model, provider)
+        if not reasons:
+            reasons = _capability_exclusions(model, model_policy or {})
         if not reasons:
             catalog_eligible_count += 1
             reasons = _policy_exclusions(policy, classification)

@@ -52,6 +52,8 @@ class ModelPolicy(BaseModel):
     mode: ModelSelectionMode = ModelSelectionMode.MANUAL
     manual_provider_model_id: Optional[str] = None
     auto_policy: Optional[RouterFreePolicy] = None
+    required_capabilities: Optional[dict] = None
+    excluded_capabilities: Optional[dict] = None
 
     @model_validator(mode="after")
     def _require_fields_for_mode(self) -> "ModelPolicy":
