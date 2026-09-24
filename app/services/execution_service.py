@@ -175,7 +175,9 @@ class AgentExecutionService:
                     exc.category,
                 )
                 if attempt_number >= settings.max_agent_run_attempts:
-                    self._finalize_failed(ctx, category=exc.category, message=exc.message)
+                    self._finalize_failed(
+                        ctx, category=exc.category, message=exc.message, status_code=exc.status_code
+                    )
                     return
                 continue
             except ExecutionAborted:
@@ -641,6 +643,8 @@ class AgentExecutionService:
                 else None
             ),
         )
+        professor_call = ctx.agent_version.role == "professor"
+        response_format_json_object_sent = request.response_format == {"type": "json_object"}
 
         try:
             response = self._invoke(adapter, request)
@@ -648,14 +652,29 @@ class AgentExecutionService:
             if not self._cas_model_call(
                 model_call,
                 status=ModelCallStatus.ERROR if exc.category != "provider_timeout" else ModelCallStatus.TIMEOUT,
-                error={"category": exc.category, "message": exc.message},
+                error={
+                    "category": exc.category,
+                    "message": exc.message,
+                    "status_code": exc.status_code,
+                },
                 completed_at=_utcnow(),
             ):
                 raise self._superseded(ctx, "provider failure") from exc
             self._event(
                 ctx,
                 "model_call.failed",
-                decision_summary=exc.message,
+                decision_summary=self._professor_call_metadata(
+                    ctx,
+                    resolved,
+                    request,
+                    attempt.attempt_number,
+                    response_format_json_object_sent=response_format_json_object_sent,
+                    provider_http_status=exc.status_code,
+                    cost_status="not_recorded",
+                    error_category=exc.category,
+                )
+                if professor_call
+                else exc.message,
                 error={"category": exc.category, "message": exc.message},
             )
             self.governor.release(reservation)
@@ -665,10 +684,14 @@ class AgentExecutionService:
                     attempt,
                     status=AgentRunAttemptStatus.FAILED,
                     ended_at=_utcnow(),
-                    error={"category": exc.category, "message": exc.message},
+                    error={
+                        "category": exc.category,
+                        "message": exc.message,
+                        "status_code": exc.status_code,
+                    },
                 ):
                     raise self._superseded(ctx, "retryable failure") from exc
-                raise _RetryableFailure(exc.category, exc.message) from exc
+                raise _RetryableFailure(exc.category, exc.message, status_code=exc.status_code) from exc
 
             self._finalize_failed(ctx, category=exc.category, message=exc.message, attempt=attempt)
             raise ExecutionAborted(exc.message) from exc
@@ -701,7 +724,20 @@ class AgentExecutionService:
             tokens_out=response.tokens_out,
             cost=actual_cost.amount,
             latency_ms=response.latency_ms,
-            decision_summary=f"cost={actual_cost.amount} estimated={actual_cost.is_estimated}",
+            decision_summary=(
+                self._professor_call_metadata(
+                    ctx,
+                    resolved,
+                    request,
+                    attempt.attempt_number,
+                    response_format_json_object_sent=response_format_json_object_sent,
+                    response=response,
+                    cost_status="estimated" if actual_cost.is_estimated else "actual_or_verified_free",
+                    cost_value=str(actual_cost.amount),
+                )
+                if professor_call
+                else f"cost={actual_cost.amount} estimated={actual_cost.is_estimated}"
+            ),
         )
 
         self.governor.settle(reservation, actual_amount=actual_cost.amount)
@@ -1012,13 +1048,51 @@ class AgentExecutionService:
         try:
             return adapter.invoke(request)
         except ProviderAuthenticationError as exc:
-            raise _CategorizedProviderError("provider_authentication_error", str(exc)) from exc
+            raise _CategorizedProviderError(
+                "provider_authentication_error", str(exc), status_code=exc.status_code
+            ) from exc
         except ProviderTimeoutError as exc:
-            raise _CategorizedProviderError("provider_timeout", str(exc)) from exc
+            raise _CategorizedProviderError("provider_timeout", str(exc), status_code=getattr(exc, "status_code", None)) from exc
         except ProviderInvalidResponseError as exc:
-            raise _CategorizedProviderError("provider_invalid_response", str(exc)) from exc
+            raise _CategorizedProviderError("provider_invalid_response", str(exc), status_code=getattr(exc, "status_code", None)) from exc
         except ProviderConnectionError as exc:
-            raise _CategorizedProviderError("provider_connection_error", str(exc)) from exc
+            raise _CategorizedProviderError("provider_connection_error", str(exc), status_code=exc.status_code) from exc
+
+    @staticmethod
+    def _professor_call_metadata(
+        ctx,
+        resolved,
+        request,
+        attempt_number,
+        *,
+        response_format_json_object_sent,
+        provider_http_status=None,
+        response=None,
+        cost_status=None,
+        cost_value=None,
+        error_category=None,
+    ) -> str:
+        metadata = {
+            "telemetry": "professor_model_call_v1",
+            "registry_model_id": resolved.model.canonical_model_id,
+            "provider_model_identifier": resolved.provider_model.provider_model_id,
+            "structured_output_support": resolved.model.structured_output_support,
+            "response_format_json_object_sent": response_format_json_object_sent,
+            "configured_max_tokens": request.max_tokens,
+            "provider_http_status": provider_http_status if response is None else response.provider_http_status,
+            "finish_reason": None if response is None else response.finish_reason,
+            "input_tokens": None if response is None else response.tokens_in,
+            "output_tokens": None if response is None else response.tokens_out,
+            "total_tokens": None if response is None else response.tokens_total,
+            "final_content_type": None if response is None else type(response.text).__name__,
+            "final_content_length": None if response is None else len(response.text),
+            "retry_attempt": attempt_number,
+            "cost_status": cost_status,
+            "cost_value": cost_value,
+        }
+        if error_category is not None:
+            metadata["error_category"] = error_category
+        return json.dumps(metadata, sort_keys=True, separators=(",", ":"))
 
     def _actual_cost(self, resolved: ResolvedModel, response) -> "_CostResult":
         if response.cost_amount is not None:
@@ -1082,17 +1156,26 @@ class AgentExecutionService:
         self.db.commit()
 
     def _finalize_failed(
-        self, ctx: _Context, *, category: str, message: str, attempt: Optional[AgentRunAttempt] = None
+        self,
+        ctx: _Context,
+        *,
+        category: str,
+        message: str,
+        attempt: Optional[AgentRunAttempt] = None,
+        status_code: Optional[int] = None,
     ) -> bool:
         """Returns False (and writes nothing more) when the Agent Run was
         already terminal -- finalized elsewhere, e.g. recovered as interrupted
         (MA7.8): exactly one finalizer records the outcome."""
         if attempt is not None:
+            error = {"category": category, "message": message}
+            if status_code is not None:
+                error["status_code"] = status_code
             self._cas_attempt(
                 attempt,
                 status=AgentRunAttemptStatus.FAILED,
                 ended_at=_utcnow(),
-                error={"category": category, "message": message},
+                error=error,
             )
         if not self._claim_agent_run_terminal(ctx, AgentRunStatus.FAILED):
             logger.warning("agent_run_already_terminal_on_failure agent_run_id=%s", ctx.agent_run.id)
@@ -1195,16 +1278,18 @@ class _CostResult:
 
 
 class _CategorizedProviderError(Exception):
-    def __init__(self, category: str, message: str):
+    def __init__(self, category: str, message: str, *, status_code=None):
         self.category = category
         self.message = message
+        self.status_code = status_code
         super().__init__(message)
 
 
 class _RetryableFailure(Exception):
-    def __init__(self, category: str, message: str):
+    def __init__(self, category: str, message: str, *, status_code: Optional[int] = None):
         self.category = category
         self.message = message
+        self.status_code = status_code
         super().__init__(message)
 
 

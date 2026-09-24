@@ -134,7 +134,7 @@ class OpenRouterAdapter:
             raise ProviderConnectionError(f"Network error contacting OpenRouter: {exc}") from exc
 
         if response.status_code == 401:
-            raise ProviderAuthenticationError("OpenRouter rejected the configured API key (401).")
+            raise ProviderAuthenticationError("OpenRouter rejected the configured API key (401).", status_code=401)
         if response.status_code >= 400:
             raise ProviderConnectionError(f"OpenRouter returned HTTP {response.status_code} for {path}.")
         return response
@@ -152,10 +152,12 @@ class OpenRouterAdapter:
             raise ProviderConnectionError(f"Network error contacting OpenRouter: {exc}") from exc
 
         if response.status_code == 401:
-            raise ProviderAuthenticationError("OpenRouter rejected the configured API key (401).")
+            raise ProviderAuthenticationError("OpenRouter rejected the configured API key (401).", status_code=401)
         if response.status_code >= 400:
+            detail = "rate limited" if response.status_code == 429 else "unavailable"
             raise ProviderConnectionError(
-                f"OpenRouter returned HTTP {response.status_code} for {path}: {response.text[:500]}"
+                f"OpenRouter provider {detail} (HTTP {response.status_code}).",
+                status_code=response.status_code,
             )
         return response
 
@@ -210,7 +212,7 @@ class OpenRouterAdapter:
         payload = response.json()
         choices = payload.get("choices")
         if not choices or not isinstance(choices, list):
-            raise ProviderInvalidResponseError("OpenRouter response had no choices.")
+            raise ProviderInvalidResponseError("OpenRouter response had no choices.", status_code=response.status_code)
         message = choices[0].get("message") or {}
         text = message.get("content")
         if not isinstance(text, str):
@@ -228,18 +230,25 @@ class OpenRouterAdapter:
                 usage_data.get("completion_tokens") if isinstance(usage_data.get("completion_tokens"), int) else None,
                 usage_data.get("total_tokens") if isinstance(usage_data.get("total_tokens"), int) else None,
             )
-            raise ProviderInvalidResponseError("OpenRouter response's message had no text content.")
+            raise ProviderInvalidResponseError(
+                "OpenRouter response's message had no text content.", status_code=response.status_code
+            )
 
         usage = payload.get("usage") or {}
         tokens_in = usage.get("prompt_tokens")
         tokens_out = usage.get("completion_tokens")
+        tokens_total = usage.get("total_tokens")
+        finish_reason = choices[0].get("finish_reason")
 
         return InvokeResponse(
             text=text,
             tokens_in=tokens_in if isinstance(tokens_in, int) else None,
             tokens_out=tokens_out if isinstance(tokens_out, int) else None,
+            tokens_total=tokens_total if isinstance(tokens_total, int) else None,
             latency_ms=latency_ms,
             provider_request_id=payload.get("id"),
+            provider_http_status=response.status_code,
+            finish_reason=finish_reason if isinstance(finish_reason, str) else None,
             # OpenRouter's /chat/completions response does not include an
             # actual-cost figure in the normal (non-streaming) response
             # body — cost_amount stays None here deliberately; the

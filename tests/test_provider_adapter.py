@@ -270,8 +270,8 @@ def test_invoke_success_returns_normalized_response():
             200,
             json={
                 "id": "gen-abc123",
-                "choices": [{"message": {"role": "assistant", "content": "MA3_EXECUTION_OK"}}],
-                "usage": {"prompt_tokens": 12, "completion_tokens": 4},
+                "choices": [{"finish_reason": "stop", "message": {"role": "assistant", "content": "MA3_EXECUTION_OK"}}],
+                "usage": {"prompt_tokens": 12, "completion_tokens": 4, "total_tokens": 16},
             },
         )
 
@@ -283,7 +283,23 @@ def test_invoke_success_returns_normalized_response():
     assert response.tokens_in == 12
     assert response.tokens_out == 4
     assert response.provider_request_id == "gen-abc123"
+    assert response.provider_http_status == 200
+    assert response.finish_reason == "stop"
+    assert response.tokens_total == 16
     assert response.cost_amount is None  # never fabricated; the caller prices it
+
+
+def test_invoke_rate_limit_does_not_expose_provider_payload():
+    def handler(request):
+        return httpx.Response(429, json={"error": {"message": "private upstream details"}})
+
+    adapter = _adapter_with_transport(handler)
+    with pytest.raises(ProviderConnectionError) as caught:
+        adapter.invoke(InvokeRequest(provider_model_id="x/y", user_prompt="hi"))
+
+    assert caught.value.status_code == 429
+    assert str(caught.value) == "OpenRouter provider rate limited (HTTP 429)."
+    assert "private upstream details" not in str(caught.value)
 
 
 def test_invoke_sends_system_and_user_messages():

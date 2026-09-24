@@ -53,9 +53,17 @@ class ProviderAuthenticationError(Exception):
     — distinct from a generic network/provider failure so a connectivity
     test can tell the operator which one happened."""
 
+    def __init__(self, message: str, *, status_code: Optional[int] = None):
+        super().__init__(message)
+        self.status_code = status_code
+
 
 class ProviderConnectionError(Exception):
     """Network-level or provider-side failure not specific to auth."""
+
+    def __init__(self, message: str, *, status_code: Optional[int] = None):
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class ProviderTimeoutError(ProviderConnectionError):
@@ -99,6 +107,9 @@ class InvokeResponse:
     latency_ms: int = 0
     provider_request_id: Optional[str] = None
     cost_amount: Optional[Decimal] = None
+    provider_http_status: Optional[int] = None
+    finish_reason: Optional[str] = None
+    tokens_total: Optional[int] = None
     raw: Dict[str, Any] = field(default_factory=dict)
 
 

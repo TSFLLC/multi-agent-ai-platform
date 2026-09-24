@@ -397,7 +397,11 @@ class ProfessorExecutionService:
         elif task_run.status == TaskRunStatus.FAILED:
             attempt = agent_run.attempts[-1] if agent_run is not None and agent_run.attempts else None
             error_kind = error_kind or ((attempt.error or {}).get("category") if attempt else "execution_error")
-            error_message = error_message or ((attempt.error or {}).get("message") if attempt else "Professor unavailable.")
+            error_kind, error_message = self._safe_provider_error(
+                error_kind,
+                error_message or ((attempt.error or {}).get("message") if attempt else None),
+                attempt.error if attempt else None,
+            )
         return ProfessorInteractionRead(
             interaction_id=task_run.id,
             task_run_id=task_run.id,
@@ -415,6 +419,18 @@ class ProfessorExecutionService:
             error_kind=error_kind,
             error_message=error_message,
         )
+
+    @staticmethod
+    def _safe_provider_error(kind: str, message: Optional[str], error: Optional[dict]):
+        """Keep provider details internal while returning learner-safe text."""
+        status_code = error.get("status_code") if isinstance(error, dict) else None
+        if kind == "provider_connection_error" and status_code == 429:
+            return "provider_rate_limited", "The AI provider is temporarily busy. Please try again shortly."
+        if kind in {"provider_connection_error", "provider_timeout", "provider_authentication_error"}:
+            return "provider_unavailable", "The AI provider is temporarily unavailable. Please try again."
+        if kind == "provider_invalid_response":
+            return kind, "The AI provider returned an invalid response. Please try again."
+        return kind, "Professor execution was unsuccessful. Please try again."
 
     def _validate_artifact(self, artifact: Artifact, requirements: dict) -> ProfessorResponse:
         text = self._read_artifact(artifact).strip()
