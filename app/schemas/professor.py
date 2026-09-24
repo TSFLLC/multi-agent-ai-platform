@@ -240,3 +240,19 @@ class ProfessorContextPreviewRead(BaseModel):
     context: ProfessorContext
     allowed_sources: List[str]
     truncated: bool = False
+
+
+class ProfessorTargetOption(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    type: ProfessorTargetType
+    id: str = Field(min_length=1, max_length=36)
+    label: str = Field(min_length=1, max_length=500)
+    subtitle: Optional[str] = Field(default=None, max_length=500)
+
+
+class ProfessorTargetOptionsRead(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    intent: ProfessorIntent
+    options: List[ProfessorTargetOption] = Field(default_factory=list, max_length=40)

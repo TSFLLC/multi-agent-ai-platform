@@ -363,6 +363,10 @@ function renderDetail(detail, redraw) {
     el("div", { class: "card" }, [
       el("div", { class: "row" }, [badge(detail.verification_level || "Unknown"), badge(`Freshness: ${detail.freshness || "Unknown"}`), badge(`Attention: ${detail.attention_state || "UNKNOWN"}`)]),
       el("h2", {}, "Why this is shown"), reasonChips(detail),
+      el("div", { class: "row" }, [
+        el("button", { class: "button-link", type: "button", onclick: () => navigate(`#/professor?intent=WHY_DOES_THIS_MATTER&target_type=development&target_id=${encodeURIComponent(d.id)}`) }, "Why does this matter?"),
+        el("button", { class: "button-link", type: "button", onclick: () => navigate(`#/professor?intent=EXPLAIN_THIS&target_type=development&target_id=${encodeURIComponent(d.id)}`) }, "Explain this"),
+      ]),
       el("p", { class: "hint" }, `${detail.claims?.length || 0} claim(s) · ${detail.attention_samples?.length || 0} attention sample(s) · ${detail.current_triage ? `triaged ${detail.current_triage.decision}` : "not reviewed"}`),
     ]),
     el("div", { class: "card" }, [el("h2", {}, "Related models"), modelLinks(detail), el("h2", {}, "Related providers"), providerLinks(detail), el("h2", {}, "Related Concepts"), conceptLinks(detail)]),

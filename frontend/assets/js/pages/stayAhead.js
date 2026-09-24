@@ -1,6 +1,7 @@
 import { api } from "../api.js";
 import { clear, el } from "../dom.js";
 import { formatDateTime } from "../format.js";
+import { navigate } from "../router.js";
 import {
   REVIEW_INTRO,
   STAY_AHEAD_INTRO,
@@ -76,6 +77,10 @@ function reviewPanel(area, card, reviewApi) {
       el("div", { class: `stay-ahead-review-result ${outcome.passed ? "passed" : "not-passed"}` }, [
         el("p", {}, outcome.message),
         el("p", { class: "hint" }, outcome.note),
+        card.conceptId ? el("a", {
+          class: "button-link",
+          href: `#/professor?intent=HELP_ME_REVIEW&target_type=concept&target_id=${encodeURIComponent(card.conceptId)}`,
+        }, "Ask Professor about this review") : null,
       ]),
     );
   };

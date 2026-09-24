@@ -15,6 +15,7 @@ from app.schemas.professor import (
     ProfessorInteractionCreate,
     ProfessorInteractionRead,
     ProfessorTarget,
+    ProfessorTargetOptionsRead,
     ProfessorTargetType,
 )
 from app.services.professor_execution_service import ProfessorExecutionService
@@ -29,6 +30,15 @@ def create_interaction(
     user: User = Depends(get_current_user),
 ):
     return ProfessorExecutionService(db).create_and_execute(user, body)
+
+
+@router.get("/targets", response_model=ProfessorTargetOptionsRead)
+def target_options(
+    intent: ProfessorIntent = Query(...),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    return ProfessorExecutionService(db).target_options(user, intent)
 
 
 @router.get("/interactions/{interaction_id}", response_model=ProfessorInteractionRead)

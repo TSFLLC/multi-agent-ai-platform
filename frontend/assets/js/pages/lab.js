@@ -316,8 +316,8 @@ const SECTION_BUILDERS = {
   next: nextSection,
 };
 
-// Sections in the fixed hierarchy. There is no Professor section: no canonical
-// Professor exists, so nothing here may pretend one does.
+// Sections in the fixed hierarchy remain canonical; Professor is a separate
+// explanatory surface and receives the experiment as an explicit target.
 export function buildResultSections(state, handlers = {}) {
   return RESULT_SECTIONS.map((id) => SECTION_BUILDERS[id](state, handlers));
 }
@@ -368,6 +368,11 @@ export async function renderExperimentDetail(root, params) {
       mount(root, el("section", { class: "page-section" }, [
         el("a", { href: "#/ail/lab" }, ["← Personal AI Lab"]),
         el("h1", {}, [typeLabel(state.data.experiment?.experiment_type)]),
+        state.data.experiment?.id ? el("button", {
+          class: "button-link",
+          type: "button",
+          onclick: () => navigate(`#/professor?intent=UNDERSTAND_MY_EXPERIMENT&target_type=experiment&target_id=${encodeURIComponent(state.data.experiment.id)}`),
+        }, "Help me understand this experiment") : null,
         ...buildResultSections(state, handlers),
       ]));
     } catch (err) {

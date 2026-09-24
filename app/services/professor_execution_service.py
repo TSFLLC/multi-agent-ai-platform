@@ -13,8 +13,12 @@ from app.db.enums import AgentRunRole, AgentRunStatus, ExecutionMode, TaskRunSta
 from app.errors import ConflictError, ForbiddenError, NotFoundError
 from app.models.agents import Agent, AgentVersion, PromptVersion
 from app.models.artifacts_eval import Artifact
+from app.models.concepts import Concept
 from app.models.governance import Budget
 from app.models.identity import Project, User
+from app.models.lab import Experiment
+from app.models.learning_review import ReviewAttempt
+from app.models.radar import Development, DevelopmentStatus
 from app.models.tasks import AgentRun, Task, TaskRun
 from app.schemas.professor import (
     ProfessorContext,
@@ -23,6 +27,9 @@ from app.schemas.professor import (
     ProfessorIntent,
     ProfessorInteractionRead,
     ProfessorResponse,
+    ProfessorTargetOption,
+    ProfessorTargetOptionsRead,
+    ProfessorTargetType,
 )
 from app.services.flight_recorder import FlightRecorderService
 from app.services.professor_context_service import ProfessorContextAssembler
@@ -52,6 +59,81 @@ class ProfessorExecutionService:
             allowed_sources=[record.role for record in context.records],
             truncated=truncated,
         )
+
+    def target_options(self, user: User, intent: ProfessorIntent) -> ProfessorTargetOptionsRead:
+        """Return a small, authorized selector set; never a generic record search."""
+        options = []
+        if intent == ProfessorIntent.EXPLAIN_THIS:
+            concepts = self.db.execute(select(Concept).order_by(Concept.name.asc()).limit(15)).scalars().all()
+            developments = self.db.execute(
+                select(Development)
+                .where(Development.status == DevelopmentStatus.ACTIVE)
+                .order_by(Development.first_seen_at.desc())
+                .limit(15)
+            ).scalars().all()
+            options.extend(
+                ProfessorTargetOption(type=ProfessorTargetType.CONCEPT, id=item.id, label=item.name)
+                for item in concepts
+            )
+            options.extend(
+                ProfessorTargetOption(
+                    type=ProfessorTargetType.DEVELOPMENT,
+                    id=item.id,
+                    label=item.title,
+                    subtitle=item.development_type,
+                )
+                for item in developments
+            )
+        elif intent == ProfessorIntent.UNDERSTAND_MY_EXPERIMENT:
+            experiments = self.db.execute(
+                select(Experiment)
+                .where(Experiment.user_id == user.id)
+                .order_by(Experiment.created_at.desc())
+                .limit(40)
+            ).scalars().all()
+            options.extend(
+                ProfessorTargetOption(
+                    type=ProfessorTargetType.EXPERIMENT,
+                    id=item.id,
+                    label=item.hypothesis or "Untitled experiment",
+                    subtitle=item.status.value.replace("_", " ").title(),
+                )
+                for item in experiments
+            )
+        elif intent == ProfessorIntent.HELP_ME_REVIEW:
+            reviews = self.db.execute(
+                select(ReviewAttempt, Concept)
+                .join(Concept, Concept.id == ReviewAttempt.concept_id)
+                .where(ReviewAttempt.user_id == user.id)
+                .order_by(ReviewAttempt.started_at.desc())
+                .limit(40)
+            ).all()
+            options.extend(
+                ProfessorTargetOption(
+                    type=ProfessorTargetType.REVIEW_ATTEMPT,
+                    id=attempt.id,
+                    label=concept.name,
+                    subtitle=f"Review {attempt.status.value}",
+                )
+                for attempt, concept in reviews
+            )
+        elif intent == ProfessorIntent.WHY_DOES_THIS_MATTER:
+            developments = self.db.execute(
+                select(Development)
+                .where(Development.status == DevelopmentStatus.ACTIVE)
+                .order_by(Development.first_seen_at.desc())
+                .limit(40)
+            ).scalars().all()
+            options.extend(
+                ProfessorTargetOption(
+                    type=ProfessorTargetType.DEVELOPMENT,
+                    id=item.id,
+                    label=item.title,
+                    subtitle=item.development_type,
+                )
+                for item in developments
+            )
+        return ProfessorTargetOptionsRead(intent=intent, options=options[:40])
 
     def create_and_execute(self, user: User, request: ProfessorContextRequest) -> ProfessorInteractionRead:
         project = ensure_ail_system_project(self.db, user)

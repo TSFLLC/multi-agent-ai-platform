@@ -177,6 +177,8 @@ blockquote { border-left: 3px solid var(--accent); color: var(--text-muted); mar
 .professor-page { max-width: 900px; }
 .professor-question { min-height: 110px; width: 100%; margin-top: 8px; }
 .professor-actions { margin-top: 12px; }
+.professor-target-selector { margin-top: 14px; }
+.professor-target-selector select { max-width: 100%; min-width: min(100%, 360px); margin-top: 8px; }
 .professor-quick-actions { flex-wrap: wrap; gap: 8px; }
 .professor-direct-answer { border-color: var(--accent); background: linear-gradient(135deg, var(--bg-card), var(--accent-soft)); }
 .professor-answer { color: var(--text); font-size: 1.25rem; line-height: 1.55; margin: 0; }
