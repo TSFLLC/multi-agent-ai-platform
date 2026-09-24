@@ -57,6 +57,62 @@ logger = logging.getLogger("scripts.hosted_entrypoint")
 DEFAULT_GRACE_SECONDS = 20.0
 
 
+def _stage(name: str, **fields) -> None:
+    """Emit a crash-safe, stdout-independent startup marker."""
+    suffix = "".join(f" {key}={value}" for key, value in fields.items())
+    print(f"STARTUP_STAGE {name}{suffix}", file=sys.stderr, flush=True)
+
+
+def _runtime_dependency_snapshot() -> None:
+    from importlib.metadata import PackageNotFoundError, version
+
+    packages = {
+        "sqlalchemy": "SQLAlchemy",
+        "alembic": "Alembic",
+        "fastapi": "FastAPI",
+        "starlette": "Starlette",
+        "pydantic": "Pydantic",
+        "uvicorn": "Uvicorn",
+        "greenlet": "greenlet",
+    }
+    resolved = {}
+    for package, label in packages.items():
+        try:
+            resolved[label] = version(package)
+        except PackageNotFoundError:
+            resolved[label] = "missing"
+    _stage("runtime_dependencies", python=sys.version.split()[0], **resolved)
+
+
+def _database_metadata(engine) -> None:
+    from sqlalchemy import text
+
+    path = settings.database_path
+    exists = path.exists()
+    size = path.stat().st_size if exists else 0
+    revision = "unavailable"
+    if exists:
+        try:
+            with engine.connect() as connection:
+                revision = connection.execute(text("SELECT version_num FROM alembic_version")).scalar() or "none"
+        except Exception as exc:  # noqa: BLE001 - diagnostic metadata must not change startup behavior
+            revision = f"read_error:{type(exc).__name__}"
+    _stage("database_metadata", path=path, exists="yes" if exists else "no", size_bytes=size, alembic_version=revision)
+
+
+def _install_startup_signal_markers() -> None:
+    def _handler(signum: int, frame) -> None:
+        print(f"STARTUP_SIGNAL {signal.Signals(signum).name}", file=sys.stderr, flush=True)
+        signal.signal(signum, signal.SIG_DFL)
+        os.kill(os.getpid(), signum)
+
+    for signum in (signal.SIGTERM, signal.SIGINT):
+        try:
+            signal.signal(signum, _handler)
+        except (ValueError, AttributeError):
+            pass
+
+
 def _resolve_port() -> int:
     """Railway injects ``PORT`` dynamically; it takes priority over the
     static ``settings.port`` default when present, since the platform — not
@@ -100,12 +156,18 @@ def migrate_and_check(engine=None) -> str:
     concretely) must not have that silently swapped out for the real
     process-wide engine underneath it."""
     from app.backup import create_backup
-    from app.db.lifecycle import upgrade_to_head
+    from alembic import command
+    from app.db.lifecycle import alembic_config, get_current_revision, get_head_revision, is_schema_up_to_date
 
     if engine is None:
         from app.db.session import engine as default_engine
 
         engine = default_engine
+
+    _runtime_dependency_snapshot()
+    _database_metadata(engine)
+
+    _stage("backup_begin")
 
     if settings.database_path.exists():
         try:
@@ -117,7 +179,21 @@ def migrate_and_check(engine=None) -> str:
     else:
         logger.info("hosted_pre_migration_backup_skipped reason=no_existing_database_file")
 
-    revision = upgrade_to_head(engine)
+    _stage("backup_complete")
+    _stage("alembic_begin")
+    command.upgrade(alembic_config(), "head")
+    _stage("alembic_returned")
+    _stage("alembic_verify_begin")
+    if not is_schema_up_to_date(engine):
+        current = get_current_revision(engine)
+        head = get_head_revision()
+        raise RuntimeError(
+            f"alembic upgrade head completed but the schema is not at head "
+            f"(current={current!r}, head={head!r})."
+        )
+    revision = get_current_revision(engine)
+    _stage("alembic_verify_complete", revision=revision)
+
     logger.info("hosted_migration_complete revision=%s", revision)
     return revision
 
@@ -172,7 +248,13 @@ def supervise(commands: Sequence[Sequence[str]], *, grace_seconds: float = DEFAU
     if not commands:
         return 0
 
-    procs = [subprocess.Popen(list(cmd)) for cmd in commands]
+    _stage("worker_start_begin")
+    worker = subprocess.Popen(list(commands[0]))
+    _stage("worker_started", pid=worker.pid)
+    _stage("web_start_begin")
+    web = subprocess.Popen(list(commands[1]))
+    _stage("web_started", pid=web.pid)
+    procs = [worker, web]
     for proc, cmd in zip(procs, commands):
         logger.info("hosted_process_started pid=%s command=%s", proc.pid, cmd)
 
@@ -210,25 +292,34 @@ def supervise(commands: Sequence[Sequence[str]], *, grace_seconds: float = DEFAU
 def main() -> int:
     from app.logging_config import configure_logging
 
-    configure_logging()
-    logger.info("hosted_entrypoint_starting hosted_mode=%s", settings.hosted_mode)
-    if not settings.hosted_mode:
-        logger.warning(
-            "hosted_entrypoint_run_without_hosted_mode -- MAP_HOSTED_MODE is not true; "
-            "this is almost certainly a misconfiguration for a Railway deployment."
-        )
-
     try:
-        migrate_and_check()
-    except Exception:
-        logger.exception("hosted_entrypoint_migration_failed -- not starting Worker/Web")
-        return 1
+        configure_logging()
+        _install_startup_signal_markers()
+        logger.info("hosted_entrypoint_starting hosted_mode=%s", settings.hosted_mode)
+        if not settings.hosted_mode:
+            logger.warning(
+                "hosted_entrypoint_run_without_hosted_mode -- MAP_HOSTED_MODE is not true; "
+                "this is almost certainly a misconfiguration for a Railway deployment."
+            )
 
-    commands = [build_worker_command(), build_web_command()]
-    logger.info("hosted_entrypoint_starting_processes commands=%s", commands)
-    exit_code = supervise(commands)
-    logger.info("hosted_entrypoint_exiting exit_code=%s", exit_code)
-    return exit_code
+        try:
+            migrate_and_check()
+        except Exception:
+            logger.exception("hosted_entrypoint_migration_failed -- not starting Worker/Web")
+            return 1
+
+        commands = [build_worker_command(), build_web_command()]
+        logger.info("hosted_entrypoint_starting_processes commands=%s", commands)
+        exit_code = supervise(commands)
+        logger.info("hosted_entrypoint_exiting exit_code=%s", exit_code)
+        return exit_code
+    except BaseException as exc:
+        _stage(
+            "baseexception",
+            type=type(exc).__name__,
+            code=getattr(exc, "code", None),
+        )
+        raise
 
 
 if __name__ == "__main__":
