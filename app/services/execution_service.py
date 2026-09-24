@@ -632,6 +632,9 @@ class AgentExecutionService:
             system_prompt=assembly.system_prompt,
             user_prompt=assembly.user_prompt,
             timeout_seconds=float(agent_run.timeout_seconds),
+            max_tokens=(ctx.task.requirements or {}).get("_professor_max_output_tokens")
+            if ctx.agent_version.role == "professor"
+            else None,
         )
 
         try:

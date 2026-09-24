@@ -31,15 +31,15 @@ from app.models.tasks import AgentRun, Task, TaskRun
 from app.schemas.professor import (
     ProfessorAttachment,
     ProfessorAttachmentType,
+    ProfessorClaimProvenance,
     ProfessorContext,
     ProfessorContextRecord,
     ProfessorContextRequest,
-    ProfessorClaimProvenance,
     ProfessorIntent,
     ProfessorProvenanceKind,
+    ProfessorProvenanceReference,
     ProfessorTarget,
     ProfessorTargetType,
-    ProfessorProvenanceReference,
 )
 from app.services.concept_graph_service import ConceptGraphService
 from app.services.experiment_execution_service import ExperimentExecutionService

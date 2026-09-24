@@ -57,12 +57,14 @@ def _validate_reference(
         raise ProfessorResponseValidationError("Professor Claim Type does not match the context record.")
     if reference.conflict_group != record.conflict_group:
         raise ProfessorResponseValidationError("Professor conflict provenance does not match the context record.")
-    if reference.origin is not None:
-        if record.claim_provenance is None or reference.origin != record.claim_provenance.origin:
-            raise ProfessorResponseValidationError("Professor claim origin does not match the context record.")
-    if reference.cited_claims:
-        if record.claim_provenance is None or reference.cited_claims != record.claim_provenance.cited_claims:
-            raise ProfessorResponseValidationError("Professor claim citations do not match the context record.")
+    if reference.origin is not None and (
+        record.claim_provenance is None or reference.origin != record.claim_provenance.origin
+    ):
+        raise ProfessorResponseValidationError("Professor claim origin does not match the context record.")
+    if reference.cited_claims and (
+        record.claim_provenance is None or reference.cited_claims != record.claim_provenance.cited_claims
+    ):
+        raise ProfessorResponseValidationError("Professor claim citations do not match the context record.")
     if attachment_only and _key(reference.ref_type, reference.ref_id) not in context.permitted_attachments:
         raise ProfessorResponseValidationError("Professor attachment reference was not explicitly authorized.")
 

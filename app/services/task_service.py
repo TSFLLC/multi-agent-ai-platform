@@ -85,6 +85,8 @@ class TaskService(BaseService):
         experiment_id: Optional[str] = None,
         model_policy_override: Optional[dict] = None,
         frozen_task_snapshot: Optional[dict] = None,
+        agent_run_role: Optional[AgentRunRole] = None,
+        enqueue: bool = True,
     ) -> TaskRun:
         task = self.get_task(task_id)
 
@@ -126,6 +128,7 @@ class TaskService(BaseService):
             status=AgentRunStatus.CREATED,
             timeout_seconds=agent_version.timeout_seconds or settings.default_agent_run_timeout_seconds,
             model_policy_override_json=model_policy_override,
+            role=agent_run_role,
         )
         self.db.add(agent_run)
         self.db.flush()
@@ -144,14 +147,15 @@ class TaskService(BaseService):
         self.db.commit()
         self.db.refresh(task_run)
 
-        self._jobs.enqueue(self.db, job_type=JobType.AGENT_RUN, payload_ref=agent_run.id)
-        self._recorder.record(
-            task_id=task.id,
-            task_run_id=task_run.id,
-            agent_run_id=agent_run.id,
-            event_type="task_run.queued",
-            decision_summary="agent_run job enqueued for worker pickup",
-        )
+        if enqueue:
+            self._jobs.enqueue(self.db, job_type=JobType.AGENT_RUN, payload_ref=agent_run.id)
+            self._recorder.record(
+                task_id=task.id,
+                task_run_id=task_run.id,
+                agent_run_id=agent_run.id,
+                event_type="task_run.queued",
+                decision_summary="agent_run job enqueued for worker pickup",
+            )
 
         return task_run
 

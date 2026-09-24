@@ -20,7 +20,6 @@ from app.db.enums import (
     ExecutionMode,
     ExperimentStatus,
     ExperimentType,
-    ProjectKind,
     TaskStatus,
     VersionStatus,
 )
@@ -101,23 +100,9 @@ class LabService:
         return version
 
     def _ail_project(self, user: User) -> Project:
-        project = self.db.execute(
-            select(Project).where(
-                Project.org_id == user.org_id,
-                Project.kind == ProjectKind.SYSTEM_AIL,
-                Project.name == "AIL Personal Lab",
-            )
-        ).scalar_one_or_none()
-        if project is None:
-            project = Project(
-                org_id=user.org_id,
-                name="AIL Personal Lab",
-                kind=ProjectKind.SYSTEM_AIL,
-                ail_evidence_opt_in=False,
-            )
-            self.db.add(project)
-            self.db.flush()
-        return project
+        from app.services.system_project_service import ensure_ail_system_project
+
+        return ensure_ail_system_project(self.db, user)
 
     @staticmethod
     def _task_snapshot(task: Task) -> dict:

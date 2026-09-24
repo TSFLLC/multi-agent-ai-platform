@@ -14,8 +14,10 @@ import { renderWorkflowStudio } from "./pages/workflowStudio.js";
 import { renderWorkflowRun } from "./pages/workflowRun.js";
 import { renderToday, renderRadar, renderDevelopmentDetail } from "./pages/radar.js";
 import { renderLab, renderExperimentDetail } from "./pages/lab.js";
+import { renderProfessor } from "./pages/professor.js";
 
 registerRoute("/ask", renderAsk);
+registerRoute("/professor", renderProfessor);
 registerRoute("/comparisons", renderComparisons);
 registerRoute("/comparisons/:id", renderComparisonDetail);
 registerRoute("/agents", renderAgents);

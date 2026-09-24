@@ -30,6 +30,7 @@ from app.api.routers import (
     model_explorer,
     model_intelligence,
     models,
+    professor,
     projects,
     radar,
     stay_ahead,
@@ -192,6 +193,7 @@ for router in (
     internal.router,
     lab.router,
     learning_reviews.router,
+    professor.router,
 ):
     app.include_router(router)
 

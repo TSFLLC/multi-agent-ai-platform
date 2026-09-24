@@ -172,6 +172,11 @@ class Settings(BaseSettings):
     # this is only the default new reviewed Task Runs are created with.
     default_max_repair_iterations: int = 2
 
+    # AIL.4C Professor bounds. These are conservative staging controls,
+    # deliberately configurable rather than commercial pricing policy.
+    professor_max_context_chars: int = 80_000
+    professor_max_output_tokens: int = 1_200
+
     @field_validator("log_level")
     @classmethod
     def _validate_log_level(cls, v: str) -> str:

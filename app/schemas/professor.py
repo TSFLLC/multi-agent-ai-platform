@@ -107,6 +107,8 @@ class ProfessorContextRequest(BaseModel):
     question: Optional[str] = Field(default=None, max_length=4000)
     target: Optional[ProfessorTarget] = None
     attachments: List[ProfessorAttachment] = Field(default_factory=list, max_length=8)
+    previous_interaction_id: Optional[str] = Field(default=None, max_length=36)
+    budget_id: Optional[str] = Field(default=None, max_length=36)
 
     @field_validator("question")
     @classmethod
@@ -205,3 +207,36 @@ class ProfessorResponse(BaseModel):
     @classmethod
     def direct_answer_not_blank(cls, value: str) -> str:
         return value.strip()
+
+
+class ProfessorInteractionCreate(ProfessorContextRequest):
+    """HTTP input; ownership and project access are always server-derived."""
+
+
+class ProfessorInteractionRead(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    interaction_id: str
+    task_run_id: str
+    agent_run_id: Optional[str] = None
+    artifact_id: Optional[str] = None
+    status: str
+    intent: ProfessorIntent
+    direct_answer: Optional[str] = None
+    explanation: Optional[str] = None
+    evidence: List[ProfessorEvidenceReference] = Field(default_factory=list)
+    grounded_assertions: List[ProfessorGroundedAssertion] = Field(default_factory=list)
+    uncertainties: List[str] = Field(default_factory=list)
+    suggested_next_actions: List[ProfessorSuggestedAction] = Field(default_factory=list)
+    attachment_references: List[ProfessorEvidenceReference] = Field(default_factory=list)
+    error_kind: Optional[str] = None
+    error_message: Optional[str] = None
+    context_preview: Optional[ProfessorContext] = None
+
+
+class ProfessorContextPreviewRead(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    context: ProfessorContext
+    allowed_sources: List[str]
+    truncated: bool = False
