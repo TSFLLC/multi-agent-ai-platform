@@ -13,10 +13,42 @@ exact records it rests on.
 
 Authorization: the caller supplies the authenticated ``user_id``. User-scoped
 tables (experiments, learning evidence, interests, triage) are always
-filtered on it. Platform runs are read only through the pre-existing
+filtered on it. Project ModelCalls are read only through the pre-existing
 ``projects.ail_evidence_opt_in`` mechanism, only through the user's own
 project membership, and only as model metadata (ids, snapshot ids, timestamps,
 counts) — never task text, prompts, code, artifacts or outputs.
+
+Personal vs shared usage (AIL.4A correction). Two different facts are kept
+apart and never blurred:
+
+* PERSONAL_USAGE — a completed run of a Personal Lab experiment owned by the
+  authenticated user (``experiments.user_id``). Only this is ever described
+  as "you used".
+* OPTED_IN_PROJECT_USAGE — a successful ModelCall in a project that carries
+  ``ail_evidence_opt_in`` and that the user can access. The repository does
+  not record who caused a ModelCall or Task Run (``tasks.created_by`` is the
+  Task template's author, and ``task_runs``/``agent_runs``/``model_calls``
+  carry no user), so personal ownership can NOT be established from project
+  membership and is never inferred. This is shared project evidence and is
+  worded as such.
+
+Re-use suppression follows the same line: only the authenticated user's own
+Personal Lab usage after a catalog change suppresses an EXPERIMENT_MAY_BE_STALE
+signal. Another member's later project call never does.
+
+Experiment completion reuses the canonical execution semantics rather than a
+second definition: ``ExperimentExecutionService._execution_state`` (read-only)
+must report COMPLETED, and — because the engine claims an Agent Run terminal
+COMPLETED before it completes its Task Run — every slot's Agent Run(s) must be
+``AgentRunStatus.COMPLETED`` with a recorded model snapshot.
+
+Deferred limitation — ``triage_decisions.revisit_condition``. The repository
+validates only ``kind`` for it and defines no shape or evaluation semantics
+(no ``verification_at_least`` level, no ``attention_state`` threshold, no date
+field), and nothing tests any. AIL.4A therefore evaluates ONLY the
+deterministic ``revisit_at`` timestamp. A ``revisit_condition`` is never
+evaluated, never inferred and never fires a signal. Full ``revisit_condition``
+support is deferred until its shape is defined and tested.
 
 Signal families (see ``app.schemas.stay_ahead``):
 
@@ -42,9 +74,10 @@ from decimal import Decimal
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only
 
 from app.db.enums import (
+    AgentRunStatus,
     ChangeSeverity,
     EvidenceRefType,
     EvidenceType,
@@ -86,6 +119,7 @@ from app.schemas.stay_ahead import (
     StayAheadToday,
 )
 from app.services.concept_graph_service import ConceptGraphService
+from app.services.experiment_execution_service import ExperimentExecutionService
 from app.services.learner_state_service import (
     DEMONSTRATED,
     EXPOSED,
@@ -196,7 +230,9 @@ class _Use:
     provider_id: str
     snapshot_id: str
     used_at: datetime
-    source: str  # "personal_lab" | "opted_in_project"
+    # "personal_lab": the user's own experiment (PERSONAL_USAGE).
+    # "opted_in_project": shared project evidence (OPTED_IN_PROJECT_USAGE).
+    source: str
     experiment_id: Optional[str] = None
     calls: int = 1
 
@@ -235,9 +271,11 @@ class StayAheadService:
         catalog = self._catalog_events({snap.provider_model_id for snap in snapshots.values()})
         model_names = self._model_names(uses)
 
-        used_models, used_model_ids = self._used_model_signals(uses, snapshots, catalog, model_names, window_start)
+        used_models, personal_latest_use = self._used_model_signals(
+            uses, snapshots, catalog, model_names, window_start
+        )
         experiments = self._experiment_signals(
-            user_id, uses, snapshots, catalog, model_names, used_model_ids, window_start
+            user_id, uses, snapshots, catalog, model_names, personal_latest_use, window_start
         )
         watched = self._watched_signals(user_id, window_start)
         concepts = self._concept_signals(user_id, learned, window_start)
@@ -299,9 +337,9 @@ class StayAheadService:
         uses: List[_Use] = []
         by_snapshot: Dict[Tuple[str, str], _Use] = {}
 
-        # Personal Lab: the user's own completed experiment runs. The Agent
-        # Run's snapshot is the record that was actually pinned/frozen when
-        # the run executed.
+        # Personal Lab: the user's own completed experiment runs (Task Run AND
+        # Agent Run both terminal-success). The Agent Run's snapshot is the
+        # record that was actually pinned/frozen when the run executed.
         lab_rows = self.db.execute(
             select(
                 ExperimentTaskRun.experiment_id,
@@ -318,6 +356,7 @@ class StayAheadService:
                 Experiment.user_id == user_id,
                 Experiment.status != ExperimentStatus.CANCELLED,
                 TaskRun.status == TaskRunStatus.COMPLETED,
+                AgentRun.status == AgentRunStatus.COMPLETED,
                 AgentRun.provider_model_snapshot_id.isnot(None),
                 AgentRun.model_id.isnot(None),
                 AgentRun.provider_id.isnot(None),
@@ -343,9 +382,11 @@ class StayAheadService:
                     existing.used_at = started
         uses.extend(by_snapshot.values())
 
-        # Opted-in platform runs: only projects the user is a member of AND
-        # that already carry ail_evidence_opt_in. Other members' Personal Lab
-        # experiments are never read through this path.
+        # Opted-in project calls: only projects the user is a member of AND
+        # that already carry ail_evidence_opt_in. This is SHARED project
+        # evidence: nothing here attributes a call to the user, so it is never
+        # treated as personal usage. Other members' Personal Lab experiments
+        # are never read through this path.
         platform_rows = self.db.execute(
             select(
                 ModelCall.provider_model_id,
@@ -557,38 +598,74 @@ class StayAheadService:
         window_start: datetime,
     ) -> Tuple[List[_Item], Dict[str, datetime]]:
         """Returns the signals plus, per provider model, the time of the
-        user's most recent use (used to suppress stale-experiment signals
-        for models the user has since re-used)."""
+        authenticated user's most recent PERSONAL use. That map — and only
+        that map — is what suppresses stale-experiment signals for models the
+        user has since re-used; shared project calls never enter it.
+
+        Personal and shared usage are detected against their own baselines
+        (the latest use in each scope), so a shared project call made after a
+        change can never hide a change the user has not personally seen."""
         by_pm: Dict[str, List[_Use]] = {}
         for use in uses:
             pm_id = snapshots[use.snapshot_id].provider_model_id
             use.provider_model_id = pm_id
             by_pm.setdefault(pm_id, []).append(use)
 
-        latest_use_time: Dict[str, datetime] = {}
+        def detect(scope_uses: List[_Use], events: List[ProviderModelSnapshot]):
+            if not scope_uses:
+                return None
+            latest = max(scope_uses, key=lambda u: (self._use_time(u, snapshots), u.snapshot_id))
+            baseline_time = self._use_time(latest, snapshots)
+            change = self._detect_change(snapshots[latest.snapshot_id], baseline_time, events)
+            if change is not None and change.changed_at < window_start:
+                change = None
+            return latest, baseline_time, change
+
+        personal_latest_time: Dict[str, datetime] = {}
         items: List[_Item] = []
         for pm_id in sorted(by_pm):
             group = by_pm[pm_id]
-            latest = max(group, key=lambda u: (self._use_time(u, snapshots), u.snapshot_id))
-            baseline_time = self._use_time(latest, snapshots)
-            latest_use_time[pm_id] = baseline_time
-            change = self._detect_change(snapshots[latest.snapshot_id], baseline_time, catalog.get(pm_id, []))
-            if change is None or change.changed_at < window_start:
+            personal = [u for u in group if u.source == "personal_lab"]
+            shared = [u for u in group if u.source == "opted_in_project"]
+            events = catalog.get(pm_id, [])
+
+            personal_result = detect(personal, events)
+            shared_result = detect(shared, events)
+            if personal_result is not None:
+                personal_latest_time[pm_id] = personal_result[1]
+            personal_hit = personal_result is not None and personal_result[2] is not None
+            shared_hit = shared_result is not None and shared_result[2] is not None
+            if not personal_hit and not shared_hit:
                 continue
 
-            experiment_ids = sorted({u.experiment_id for u in group if u.experiment_id})
-            platform_calls = sum(u.calls for u in group if u.source == "opted_in_project")
+            latest, baseline_time, change = personal_result if personal_hit else shared_result
+            experiment_ids = sorted({u.experiment_id for u in personal if u.experiment_id})
+            shared_calls = sum(u.calls for u in shared)
             model_name = names["model"].get(latest.model_id, latest.model_id)
             provider_name = names["provider"].get(latest.provider_id, latest.provider_id)
 
             reason_codes = set(self._model_reason_codes(change.changes))
-            used_parts = []
-            if experiment_ids:
-                reason_codes.add(StayAheadReasonCode.USED_IN_PERSONAL_LAB.value)
-                used_parts.append(f"{_plural(len(experiment_ids), 'Personal Lab experiment')}")
-            if platform_calls:
-                reason_codes.add(StayAheadReasonCode.USED_IN_OPTED_IN_PROJECT.value)
-                used_parts.append(f"{_plural(platform_calls, 'call')} in your opted-in projects")
+            if personal_hit:
+                reason_codes.add(StayAheadReasonCode.PERSONAL_USAGE.value)
+            if shared:
+                reason_codes.add(StayAheadReasonCode.OPTED_IN_PROJECT_USAGE.value)
+            usage_scope = ("personal_and_shared" if shared else "personal") if personal_hit else "shared_project"
+
+            if personal_hit:
+                title = f"{model_name} changed since you last used it"
+                why = (
+                    f"You used this model in {_plural(len(experiment_ids), 'Personal Lab experiment')} "
+                    f"(last on {_day(baseline_time)}), and its catalog record has changed since then."
+                )
+                if shared:
+                    why += f" It was also used in {_plural(shared_calls, 'call')} in opted-in projects you can access."
+            else:
+                title = f"{model_name} changed since it was last used in an opted-in project"
+                why = (
+                    f"This model was used in an opted-in project you can access ({_plural(shared_calls, 'call')}, "
+                    f"last on {_day(baseline_time)}), and its catalog record has changed since then. "
+                    "This is shared project usage; it does not mean you personally used it."
+                )
 
             refs = [
                 StayAheadEvidenceRef(type="provider_model_snapshot", id=change.baseline.id, role="last_used_record"),
@@ -597,31 +674,100 @@ class StayAheadService:
             links = [StayAheadLink(kind="model", id=latest.model_id, label="Review change")]
             if experiment_ids:
                 newest_experiment = max(
-                    (u for u in group if u.experiment_id), key=lambda u: (self._use_time(u, snapshots), u.experiment_id)
+                    (u for u in personal if u.experiment_id), key=lambda u: (self._use_time(u, snapshots), u.experiment_id)
                 )
                 links.append(StayAheadLink(kind="experiment", id=newest_experiment.experiment_id, label="Open previous experiment"))
 
             signal = StayAheadSignal(
                 id=f"{StayAheadFamily.USED_MODEL_CHANGED.value}:{pm_id}",
                 family=StayAheadFamily.USED_MODEL_CHANGED,
-                title=f"{model_name} changed since you last used it",
+                title=title,
                 what_changed=f"Recorded changes since then: {self._describe_changes(change.changes)}.",
-                why=(
-                    f"You used this model in {' and '.join(used_parts)} (last on {_day(baseline_time)}), "
-                    "and its catalog record has changed since then."
-                ),
+                why=why,
                 reason_codes=sorted(reason_codes),
                 since=baseline_time,
                 changed_at=change.changed_at,
-                subject={"kind": "model", "id": latest.model_id, "name": model_name, "provider": provider_name},
+                subject={
+                    "kind": "model",
+                    "id": latest.model_id,
+                    "name": model_name,
+                    "provider": provider_name,
+                    "usage_scope": usage_scope,
+                },
                 changes=change.changes,
                 evidence_refs=refs,
                 links=links,
             )
             items.append(_Item(signal=signal))
-        return items, latest_use_time
+        return items, personal_latest_time
 
     # -- EXPERIMENT_MAY_BE_STALE --------------------------------------------------
+
+    def _complete_experiments(self, user_id: str, experiment_ids: Set[str]) -> Dict[str, Experiment]:
+        """Owner's fully executed experiments, by the canonical definition.
+
+        1. ``ExperimentExecutionService._execution_state`` (read-only; the
+           settling ``refresh`` is deliberately not called) must report
+           COMPLETED — the same rule Count Toward Learning uses.
+        2. Every slot's Agent Run(s) must be terminal success
+           (``AgentRunStatus.COMPLETED``) with a recorded model snapshot. The
+           engine claims the Agent Run COMPLETED before it completes the Task
+           Run, so a Task Run alone is not enough to trust the run as a use.
+
+        ``Experiment.status`` is not consulted (it is settled lazily by a
+        service whose read path writes). Only the columns needed are loaded.
+        """
+        complete: Dict[str, Experiment] = {}
+        engine = ExperimentExecutionService(self.db)
+        for chunk in _chunks(experiment_ids):
+            candidates = (
+                self.db.execute(
+                    select(Experiment)
+                    .options(
+                        load_only(
+                            Experiment.id,
+                            Experiment.user_id,
+                            Experiment.status,
+                            Experiment.concept_id,
+                            Experiment.experiment_type,
+                            Experiment.created_at,
+                        )
+                    )
+                    .where(
+                        Experiment.id.in_(chunk),
+                        Experiment.user_id == user_id,
+                        Experiment.status != ExperimentStatus.CANCELLED,
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            slot_agents: Dict[str, Dict[str, List[Tuple[Optional[AgentRunStatus], Optional[str]]]]] = {}
+            for experiment_id, slot_id, agent_status, snapshot_id in self.db.execute(
+                select(
+                    ExperimentTaskRun.experiment_id,
+                    ExperimentTaskRun.id,
+                    AgentRun.status,
+                    AgentRun.provider_model_snapshot_id,
+                )
+                .select_from(ExperimentTaskRun)
+                .outerjoin(AgentRun, AgentRun.task_run_id == ExperimentTaskRun.task_run_id)
+                .where(ExperimentTaskRun.experiment_id.in_(chunk))
+            ).all():
+                slot_agents.setdefault(experiment_id, {}).setdefault(slot_id, []).append((agent_status, snapshot_id))
+
+            for experiment in candidates:
+                execution_status, _runs = engine._execution_state(experiment)
+                if execution_status != "COMPLETED":
+                    continue
+                slots = slot_agents.get(experiment.id, {})
+                if not slots or not all(
+                    all(status == AgentRunStatus.COMPLETED and snapshot is not None for status, snapshot in agents)
+                    for agents in slots.values()
+                ):
+                    continue
+                complete[experiment.id] = experiment
+        return complete
 
     def _experiment_signals(
         self,
@@ -630,22 +776,10 @@ class StayAheadService:
         snapshots: Dict[str, ProviderModelSnapshot],
         catalog: Dict[str, List[ProviderModelSnapshot]],
         names: Dict[str, Dict[str, str]],
-        latest_use_time: Dict[str, datetime],
+        personal_latest_time: Dict[str, datetime],
         window_start: datetime,
     ) -> List[_Item]:
-        # Only fully executed experiments: every recorded slot's Task Run is
-        # COMPLETED. Experiment.status is deliberately not consulted — it is
-        # settled lazily by a service whose read path writes.
-        slot_rows = self.db.execute(
-            select(ExperimentTaskRun.experiment_id, TaskRun.status)
-            .join(Experiment, Experiment.id == ExperimentTaskRun.experiment_id)
-            .join(TaskRun, TaskRun.id == ExperimentTaskRun.task_run_id)
-            .where(Experiment.user_id == user_id, Experiment.status != ExperimentStatus.CANCELLED)
-        ).all()
-        slot_status: Dict[str, List[TaskRunStatus]] = {}
-        for experiment_id, status in slot_rows:
-            slot_status.setdefault(experiment_id, []).append(status)
-        complete = {eid for eid, statuses in slot_status.items() if statuses and all(s == TaskRunStatus.COMPLETED for s in statuses)}
+        complete = self._complete_experiments(user_id, {u.experiment_id for u in uses if u.experiment_id})
         if not complete:
             return []
 
@@ -662,15 +796,6 @@ class StayAheadService:
             ):
                 per_experiment[use.experiment_id][pm_id] = use
 
-        experiment_rows: Dict[str, Tuple[Optional[str], ExperimentType, datetime]] = {}
-        for chunk in _chunks(per_experiment):
-            for row in self.db.execute(
-                select(Experiment.id, Experiment.concept_id, Experiment.experiment_type, Experiment.created_at).where(
-                    Experiment.id.in_(chunk), Experiment.user_id == user_id
-                )
-            ).all():
-                experiment_rows[row[0]] = (row[1], row[2], row[3])
-
         counted: Set[str] = set()
         for chunk in _chunks(per_experiment):
             counted.update(
@@ -682,11 +807,16 @@ class StayAheadService:
                     )
                 ).scalars()
             )
-        concept_names = self._concept_names({row[0] for row in experiment_rows.values() if row[0]})
+        concept_names = self._concept_names({e.concept_id for e in complete.values() if e.concept_id})
 
         items: List[_Item] = []
         for experiment_id in sorted(per_experiment):
-            concept_id, experiment_type, created_at = experiment_rows[experiment_id]
+            experiment = complete[experiment_id]
+            concept_id, experiment_type, created_at = (
+                experiment.concept_id,
+                experiment.experiment_type,
+                experiment.created_at,
+            )
             changed: List[Tuple[str, _Use, _ModelChange]] = []
             for pm_id, use in sorted(per_experiment[experiment_id].items()):
                 change = self._detect_change(
@@ -694,9 +824,10 @@ class StayAheadService:
                 )
                 if change is None or change.changed_at < window_start:
                     continue
-                # Re-used after the change: the user has already seen the model
-                # as it is now, so the experiment is not flagged.
-                if latest_use_time.get(pm_id, change.changed_at) >= change.changed_at:
+                # Re-used by THIS user after the change: they have already seen
+                # the model as it is now, so the experiment is not flagged.
+                # Another member's project call never counts as that.
+                if personal_latest_time.get(pm_id, change.changed_at) >= change.changed_at:
                     continue
                 changed.append((pm_id, use, change))
             if not changed:
@@ -707,7 +838,7 @@ class StayAheadService:
                 f"{names['model'].get(use.model_id, use.model_id)} — {self._describe_changes(change.changes)}."
                 for _, use, change in changed
             )
-            reason_codes = {StayAheadReasonCode.USED_IN_PERSONAL_LAB.value}
+            reason_codes = {StayAheadReasonCode.PERSONAL_USAGE.value}
             refs = [StayAheadEvidenceRef(type="experiment", id=experiment_id, role="experiment")]
             for _, use, change in changed:
                 reason_codes.update(self._model_reason_codes(change.changes))

@@ -25,8 +25,12 @@ class StayAheadReasonCode(str, Enum):
     weight. They are code-level constants only; no table stores them."""
 
     # Relationship to the user (why THIS user is seeing it)
-    USED_IN_PERSONAL_LAB = "USED_IN_PERSONAL_LAB"
-    USED_IN_OPTED_IN_PROJECT = "USED_IN_OPTED_IN_PROJECT"
+    # Kept apart on purpose: PERSONAL_USAGE is the authenticated user's own
+    # Personal Lab experiment usage; OPTED_IN_PROJECT_USAGE is shared project
+    # evidence that is never attributed to the user (the repository records no
+    # per-user ownership of project ModelCalls).
+    PERSONAL_USAGE = "PERSONAL_USAGE"
+    OPTED_IN_PROJECT_USAGE = "OPTED_IN_PROJECT_USAGE"
     HAS_LEARNING_EVIDENCE = "HAS_LEARNING_EVIDENCE"
     WATCHING_CONCEPT = "WATCHING_CONCEPT"
     WATCHING_DEVELOPMENT = "WATCHING_DEVELOPMENT"

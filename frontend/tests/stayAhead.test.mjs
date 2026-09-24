@@ -28,7 +28,7 @@ globalThis.document = {
 
 const {
   STAY_AHEAD_SECTIONS, STAY_AHEAD_INTRO, allEmptyText, cardModel, familyLabel, hrefForLink, reasonLabel,
-  sectionCountText, stayAheadModel,
+  sectionCountText, stayAheadModel, usageEyebrow,
 } = await import("../assets/js/stayAhead.js");
 const { stayAheadBlock, stayAheadUnavailable } = await import("../assets/js/pages/stayAhead.js");
 const { renderToday } = await import("../assets/js/pages/radar.js");
@@ -52,10 +52,10 @@ function reason(overrides = {}) {
     title: "vendor/model-a changed since you last used it",
     what_changed: "Recorded changes since then: price (output $2 to $4 per million tokens).",
     why: "You used this model in 1 Personal Lab experiment (last on 2026-08-31), and its catalog record has changed since then.",
-    reason_codes: ["MODEL_PRICE_CHANGED", "USED_IN_PERSONAL_LAB"],
+    reason_codes: ["MODEL_PRICE_CHANGED", "PERSONAL_USAGE"],
     since: T,
     changed_at: T,
-    subject: { kind: "model", id: "m-1", name: "vendor/model-a" },
+    subject: { kind: "model", id: "m-1", name: "vendor/model-a", usage_scope: "personal" },
     changes: [],
     evidence_refs: [{ type: "provider_model_snapshot", id: "s-1" }],
     links: [
@@ -96,7 +96,7 @@ test("the block has exactly the five agreed sections in fixed order", () => {
     STAY_AHEAD_SECTIONS.map((s) => s.title),
     [
       "Worth revisiting",
-      "Models you used that changed",
+      "Models that changed since they were used",
       "Watched developments with updates",
       "Experiments worth rerunning",
       "Concepts with relevant changes",
@@ -122,6 +122,29 @@ test("reason codes render as plain-language labels with a safe fallback", () => 
   assert.equal(reasonLabel("WATCH_REVISIT_DATE_REACHED"), "Your revisit date arrived");
   assert.equal(reasonLabel("SOMETHING_NEW"), "something new");
   assert.equal(familyLabel("EXPERIMENT_MAY_BE_STALE"), "Experiment may be out of date");
+});
+
+test("personal and shared project usage are labelled as different facts", () => {
+  assert.equal(reasonLabel("PERSONAL_USAGE"), "You used it in Personal Lab");
+  assert.equal(reasonLabel("OPTED_IN_PROJECT_USAGE"), "Used in an opted-in project you can access");
+  const shared = reason({
+    title: "vendor/model-a changed since it was last used in an opted-in project",
+    why: "This model was used in an opted-in project you can access (1 call, last on 2026-08-31), and its catalog record has changed since then. This is shared project usage; it does not mean you personally used it.",
+    reason_codes: ["MODEL_PRICE_CHANGED", "OPTED_IN_PROJECT_USAGE"],
+    subject: { kind: "model", id: "m-1", name: "vendor/model-a", usage_scope: "shared_project" },
+    links: [{ kind: "model", id: "m-1", label: "Review change" }],
+  });
+  assert.equal(usageEyebrow(shared, "x"), "Model used in an opted-in project");
+  assert.equal(usageEyebrow(reason(), "x"), "Model you used");
+  assert.equal(usageEyebrow(reason({ subject: { usage_scope: "personal_and_shared" } }), "x"), "Model you used");
+  assert.equal(usageEyebrow(reason({ subject: {} }), "fallback"), "fallback");
+  const card = cardModel(shared, "Model used");
+  assert.equal(card.eyebrow, "Model used in an opted-in project");
+  assert.deepEqual(card.reasons, ["Price changed", "Used in an opted-in project you can access"]);
+  assert.ok(!card.reasons.includes("You used it in Personal Lab"));
+  const block = stayAheadBlock(data({ used_models_changed: section([shared]) }));
+  assert.match(block.textContent, /Model used in an opted-in project/);
+  assert.match(block.textContent, /does not mean you personally used it/);
 });
 
 test("count text is honest about what is shown", () => {

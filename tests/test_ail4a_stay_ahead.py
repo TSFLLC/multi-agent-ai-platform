@@ -16,6 +16,7 @@ from sqlalchemy import event, select, text
 from app.auth import get_current_user
 from app.db.base import Base
 from app.db.enums import (
+    AgentRunStatus,
     ChangeSeverity,
     ConceptKind,
     EvidenceType,
@@ -109,7 +110,7 @@ def _snap(
 
 
 def _experiment(db, bootstrap, snapshots, *, concept_id=None, complete=True, started=None, hypothesis="a hypothesis",
-                user=None, project=None):
+                user=None, project=None, agent_status=AgentRunStatus.COMPLETED, agent_status_by_label=None):
     """A launched Model Face-off over ``snapshots`` whose slots ran on exactly
     those pinned snapshots (what the execution engine records)."""
     user = user or bootstrap.user
@@ -143,6 +144,7 @@ def _experiment(db, bootstrap, snapshots, *, concept_id=None, complete=True, sta
         task_run.started_at = started
         if complete:
             task_run.status = TaskRunStatus.COMPLETED
+            agent_run.status = (agent_status_by_label or {}).get(slot.label, agent_status)
     db.commit()
     return experiment
 
@@ -241,13 +243,15 @@ def _link(db, development, concept, *, state=DevelopmentConceptState.CONFIRMED, 
     return row
 
 
-def _watch(db, user, development, *, at, revisit_at=None, decision=TriageDecisionKind.WATCH, superseded=False):
+def _watch(db, user, development, *, at, revisit_at=None, decision=TriageDecisionKind.WATCH, superseded=False,
+           revisit_condition=None):
     row = TriageDecision(
         user_id=user.id,
         development_id=development.id,
         decision=decision,
         reason_codes=[],
         revisit_at=revisit_at,
+        revisit_condition=revisit_condition,
         decided_at=at,
     )
     db.add(row)
@@ -295,9 +299,11 @@ def _evidence(db, user, concept, version, *, at, passed=True, n=1, kind=Evidence
     return rows
 
 
-def _platform_call(db, project, user_project_member, bundle, snapshot, *, at, status=ModelCallStatus.SUCCESS):
+def _platform_call(db, project, user_project_member, bundle, snapshot, *, at, status=ModelCallStatus.SUCCESS,
+                   created_by=None):
     model, provider, pm = bundle
     task = make_task(db, project)
+    task.created_by = created_by  # the template's author: never treated as who ran it
     task_run = make_task_run(db, task, status=TaskRunStatus.COMPLETED)
     run = make_agent_run(db, task_run, make_agent_version(db))
     call = ModelCall(
@@ -337,7 +343,7 @@ def test_price_change_after_a_lab_experiment_fires_used_model_and_stale_experime
     (model_signal,) = result.sections.used_models_changed.items
     assert model_signal.family.value == "USED_MODEL_CHANGED"
     assert "MODEL_PRICE_CHANGED" in model_signal.reason_codes
-    assert "USED_IN_PERSONAL_LAB" in model_signal.reason_codes
+    assert "PERSONAL_USAGE" in model_signal.reason_codes
     assert model_signal.changes == [
         {"kind": "price", "fields": {"output_per_mtok": {"before": "2", "after": "4"}}}
     ]
@@ -492,7 +498,7 @@ def test_another_users_experiment_never_leaks(db, bootstrap):
     assert _today(db, other).sections.used_models_changed.total == 1
 
 
-def test_opted_in_platform_runs_count_only_for_members_of_opted_in_projects(db, bootstrap):
+def test_opted_in_project_calls_are_shared_evidence_and_only_for_members(db, bootstrap):
     bundle = _bundle(db, "platform")
     frozen = _snap(db, bundle, ago(20), source=SnapshotSource.EXECUTION_FREEZE)
     project = bootstrap.project
@@ -505,12 +511,140 @@ def test_opted_in_platform_runs_count_only_for_members_of_opted_in_projects(db, 
     project.ail_evidence_opt_in = True
     db.commit()
     (signal,) = _today(db, bootstrap.user).sections.used_models_changed.items
-    assert "USED_IN_OPTED_IN_PROJECT" in signal.reason_codes
-    assert "USED_IN_PERSONAL_LAB" not in signal.reason_codes
+    assert "OPTED_IN_PROJECT_USAGE" in signal.reason_codes
+    assert "PERSONAL_USAGE" not in signal.reason_codes
 
     # Opted in, but the requesting user is not a member: nothing.
     outsider, _ = _second_user(db, bootstrap, email="outsider@example.com")
     assert _empty(_today(db, outsider))
+
+
+def _member(db, bootstrap, project, email="colleague@example.com"):
+    """A second user who is ALSO a member of ``project``."""
+    user, _ = _second_user(db, bootstrap, email=email)
+    db.add(ProjectMembership(project_id=project.id, user_id=user.id, role=ProjectRole.MEMBER))
+    db.commit()
+    return user
+
+
+@pytest.mark.parametrize("creator", ["colleague", "the_user_themself", "nobody"])
+def test_shared_project_usage_is_never_presented_as_the_users_personal_usage(db, bootstrap, creator):
+    """A, B. Nothing in the repository attributes a ModelCall to a person
+    (Task.created_by is the template's author), so project membership never
+    becomes personal ownership — even when the Task's author is the user."""
+    colleague = _member(db, bootstrap, bootstrap.project)
+    bundle = _bundle(db, f"shared-only-{creator}")
+    frozen = _snap(db, bundle, ago(20), source=SnapshotSource.EXECUTION_FREEZE)
+    bootstrap.project.ail_evidence_opt_in = True
+    db.commit()
+    created_by = {"colleague": colleague.id, "the_user_themself": bootstrap.user.id, "nobody": None}[creator]
+    _platform_call(db, bootstrap.project, colleague, bundle, frozen, at=ago(20), created_by=created_by)
+    _snap(db, bundle, ago(5), price=("1.00", "8.00"), kinds=["price"])
+
+    result = _today(db, bootstrap.user)
+    (signal,) = result.sections.used_models_changed.items
+    assert signal.subject["usage_scope"] == "shared_project"
+    assert "OPTED_IN_PROJECT_USAGE" in signal.reason_codes
+    assert "PERSONAL_USAGE" not in signal.reason_codes
+    assert "opted-in project you can access" in signal.why
+    assert "does not mean you personally used it" in signal.why
+    wording = f"{signal.title} {signal.what_changed} {signal.why}".lower()
+    assert "you last used" not in wording and "you used this model" not in wording
+    assert not any(ref.type == "experiment" for ref in signal.evidence_refs)
+    assert [link.kind for link in signal.links] == ["model"]
+    # No personal usage means no experiment or concept signal either.
+    assert result.sections.experiments_to_rerun.total == 0
+    # The colleague sees the same shared evidence, equally not as personal.
+    (theirs,) = _today(db, colleague).sections.used_models_changed.items
+    assert theirs.subject["usage_scope"] == "shared_project"
+
+
+def test_personal_and_shared_usage_are_reported_separately_on_one_card(db, bootstrap):
+    colleague = _member(db, bootstrap, bootstrap.project)
+    bundle = _bundle(db, "both")
+    experiment, frozen = _lab_used(db, bootstrap, bundle, used_at=ago(20))
+    bootstrap.project.ail_evidence_opt_in = True
+    db.commit()
+    _platform_call(db, bootstrap.project, colleague, bundle, frozen, at=ago(20), created_by=colleague.id)
+    _snap(db, bundle, ago(5), price=("1.00", "8.00"), kinds=["price"])
+
+    (signal,) = _today(db, bootstrap.user).sections.used_models_changed.items
+    assert signal.subject["usage_scope"] == "personal_and_shared"
+    assert {"PERSONAL_USAGE", "OPTED_IN_PROJECT_USAGE"} <= set(signal.reason_codes)
+    assert "You used this model in 1 Personal Lab experiment" in signal.why
+    assert "also used in 1 call in opted-in projects you can access" in signal.why
+    assert ("experiment", experiment.id) in {(r.type, r.id) for r in signal.evidence_refs}
+
+
+def test_another_members_later_project_call_does_not_suppress_the_stale_experiment(db, bootstrap):
+    """C. Suppression needs usage attributable to the authenticated user."""
+    colleague = _member(db, bootstrap, bootstrap.project)
+    bundle = _bundle(db, "no-suppress")
+    experiment, _ = _lab_used(db, bootstrap, bundle, used_at=ago(20))
+    changed = _snap(db, bundle, ago(10), price=("1.00", "5.00"), kinds=["price"])
+    bootstrap.project.ail_evidence_opt_in = True
+    db.commit()
+    _platform_call(db, bootstrap.project, colleague, bundle, changed, at=ago(3), created_by=colleague.id)
+
+    result = _today(db, bootstrap.user)
+    assert _ids(result.sections.experiments_to_rerun) == [f"EXPERIMENT_MAY_BE_STALE:{experiment.id}"]
+    (model_signal,) = result.sections.used_models_changed.items
+    assert model_signal.subject["usage_scope"] == "personal_and_shared"
+    assert "PERSONAL_USAGE" in model_signal.reason_codes
+    # ...and the colleague, who never ran the experiment, gets no experiment signal.
+    assert _today(db, colleague).sections.experiments_to_rerun.total == 0
+
+
+def test_the_users_own_reuse_suppresses_even_when_a_colleague_also_called_the_model(db, bootstrap):
+    """D. Personal reuse after the change still suppresses, as approved."""
+    colleague = _member(db, bootstrap, bootstrap.project)
+    bundle = _bundle(db, "own-reuse")
+    _lab_used(db, bootstrap, bundle, used_at=ago(20))
+    changed = _snap(db, bundle, ago(10), price=("1.00", "5.00"), kinds=["price"])
+    bootstrap.project.ail_evidence_opt_in = True
+    db.commit()
+    _platform_call(db, bootstrap.project, colleague, bundle, changed, at=ago(6), created_by=colleague.id)
+    _experiment(db, bootstrap, [changed, _control(db, ago(3))], started=ago(3))  # the user's own reuse
+    assert _empty(_today(db, bootstrap.user))
+
+
+@pytest.mark.parametrize(
+    "agent_status", [AgentRunStatus.FAILED, AgentRunStatus.RUNNING, AgentRunStatus.CREATED, AgentRunStatus.STOPPED]
+)
+def test_stale_qualification_requires_agent_run_terminal_success(db, bootstrap, agent_status):
+    """E. Task Runs COMPLETED is not enough: the Agent Runs must have COMPLETED."""
+    bundle = _bundle(db, f"agent-{agent_status.value}")
+    _lab_used(db, bootstrap, bundle, used_at=ago(20), agent_status=agent_status)
+    _snap(db, bundle, ago(5), price=("1.00", "8.00"), kinds=["price"])
+    assert _empty(_today(db, bootstrap.user))
+
+
+def test_one_unsuccessful_agent_run_disqualifies_the_experiment_but_completed_runs_still_count_as_use(db, bootstrap):
+    bundle = _bundle(db, "mixed-agents")
+    frozen = _snap(db, bundle, ago(20), source=SnapshotSource.EXECUTION_FREEZE)
+    _experiment(
+        db,
+        bootstrap,
+        [frozen, _control(db, ago(20))],
+        started=ago(20),
+        agent_status_by_label={"model-2": AgentRunStatus.FAILED},
+    )
+    _snap(db, bundle, ago(5), price=("1.00", "8.00"), kinds=["price"])
+    result = _today(db, bootstrap.user)
+    assert result.sections.experiments_to_rerun.total == 0  # not fully, successfully executed
+    assert result.sections.used_models_changed.total == 1  # model-1's completed runs are real use
+
+
+def test_a_failed_task_run_makes_the_experiment_partial_and_not_stale_eligible(db, bootstrap):
+    bundle = _bundle(db, "partial-failed")
+    experiment, _ = _lab_used(db, bootstrap, bundle, used_at=ago(20))
+    slots = db.execute(select(ExperimentTaskRun).where(ExperimentTaskRun.experiment_id == experiment.id)).scalars().all()
+    db.get(TaskRun, slots[-1].task_run_id).status = TaskRunStatus.FAILED
+    db.commit()
+    _snap(db, bundle, ago(5), price=("1.00", "8.00"), kinds=["price"])
+    result = _today(db, bootstrap.user)
+    assert result.sections.experiments_to_rerun.total == 0
+    assert result.sections.used_models_changed.total == 1
 
 
 def test_failed_platform_calls_are_not_use(db, bootstrap):
@@ -585,6 +719,54 @@ def test_revisit_date_reached_triggers_and_a_future_date_does_not(db, bootstrap)
     assert signal.title == "Reached"
     assert "WATCH_REVISIT_DATE_REACHED" in signal.reason_codes
     assert signal.evidence_refs[0].type == "triage_decision"
+
+
+def test_revisit_at_is_evaluated_deterministically_at_its_boundaries(db, bootstrap):
+    """F. ``revisit_at`` is the one supported trigger: reached means
+    window_start <= revisit_at <= now."""
+    cases = {
+        "exactly now": NOW,
+        "one second ahead": NOW + timedelta(seconds=1),
+        "window edge": ago(30),
+        "just before the window": ago(30) - timedelta(seconds=1),
+    }
+    for title, revisit_at in cases.items():
+        dev = _development(db, title=title)
+        _watch(db, bootstrap.user, dev, at=ago(60), revisit_at=revisit_at)
+    titles = {s.title for s in _today(db, bootstrap.user).sections.watched_developments.items}
+    assert titles == {"exactly now", "window edge"}
+    assert _today(db, bootstrap.user, window_days=90).sections.watched_developments.total == 3
+
+
+@pytest.mark.parametrize(
+    "condition",
+    [
+        {"kind": "verification_at_least", "level": "Documented"},
+        {"kind": "date", "at": "2026-09-01T00:00:00+00:00"},
+        {"kind": "attention_state", "state": "HIGH"},
+    ],
+)
+def test_unsupported_revisit_condition_is_never_evaluated(db, bootstrap, condition):
+    """G. Deferred limitation: ``revisit_condition`` has no defined shape in the
+    repository beyond ``kind``, so AIL.4A does not evaluate it — even when the
+    condition, read naively, would already be satisfied."""
+    dev = _development(db, title="Conditioned")
+    _claim(db, dev, ClaimType.FACT, ago(50))  # the development IS Documented now, before the watch began
+    _watch(db, bootstrap.user, dev, at=ago(20), revisit_at=None, revisit_condition=condition)
+    assert _empty(_today(db, bootstrap.user))
+
+    # A future revisit_at plus a naively satisfied condition still does not fire.
+    later = _development(db, title="Conditioned with a future date")
+    _claim(db, later, ClaimType.FACT, ago(50))
+    _watch(db, bootstrap.user, later, at=ago(20), revisit_at=ago(-5), revisit_condition=condition)
+    assert _empty(_today(db, bootstrap.user))
+
+    # The supported trigger (revisit_at) still works alongside such a condition.
+    reached = _development(db, title="Conditioned but date reached")
+    _watch(db, bootstrap.user, reached, at=ago(20), revisit_at=ago(2), revisit_condition=condition)
+    (signal,) = _today(db, bootstrap.user).sections.watched_developments.items
+    assert signal.title == "Conditioned but date reached"
+    assert "WATCH_REVISIT_DATE_REACHED" in signal.reason_codes
 
 
 def test_confirmed_concept_link_after_watch_triggers_but_a_proposed_one_does_not(db, bootstrap):

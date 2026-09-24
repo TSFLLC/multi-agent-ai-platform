@@ -17,10 +17,10 @@ export const STAY_AHEAD_SECTIONS = [
   },
   {
     key: "used_models_changed",
-    title: "Models you used that changed",
-    intro: "Models from your own experiments or opted-in projects whose catalog record has changed since you used them.",
-    empty: "None of the models you have used has a recorded change in this window.",
-    eyebrow: "Model you used",
+    title: "Models that changed since they were used",
+    intro: "Models from your own Personal Lab experiments, or used in opted-in projects you can access, whose catalog record has changed since they were last used. Each card says which of the two it is.",
+    empty: "None of the models used in your Lab or opted-in projects has a recorded change in this window.",
+    eyebrow: "Model used",
   },
   {
     key: "watched_developments",
@@ -49,8 +49,8 @@ export const STAY_AHEAD_INTRO =
   "Changes that matter to you, based only on what you learned, tested, used or watched. Nothing here runs an experiment, changes your learning record, or makes a decision for you.";
 
 const REASON_LABELS = {
-  USED_IN_PERSONAL_LAB: "You used it in Personal Lab",
-  USED_IN_OPTED_IN_PROJECT: "Used in an opted-in project",
+  PERSONAL_USAGE: "You used it in Personal Lab",
+  OPTED_IN_PROJECT_USAGE: "Used in an opted-in project you can access",
   HAS_LEARNING_EVIDENCE: "You have learning evidence",
   WATCHING_CONCEPT: "You are watching this Concept",
   WATCHING_DEVELOPMENT: "You are watching this development",
@@ -120,13 +120,22 @@ function reasonModel(reason) {
   };
 }
 
+// Personal and shared usage are different facts. Only the backend's
+// usage_scope may say "you used"; project usage is never called personal.
+export function usageEyebrow(signal, fallback) {
+  const scope = signal?.subject?.usage_scope;
+  if (scope === "shared_project") return "Model used in an opted-in project";
+  if (scope === "personal" || scope === "personal_and_shared") return "Model you used";
+  return fallback;
+}
+
 // One card = what changed, why you are seeing it, what you can open next.
 export function cardModel(signal, eyebrow) {
   const base = reasonModel(signal);
   const state = signal.learner_state;
   return {
     ...base,
-    eyebrow: eyebrow || base.familyLabel,
+    eyebrow: usageEyebrow(signal, eyebrow || base.familyLabel),
     learnerState: state ? { label: ladderLabel(state.ladder), overlays: state.overlays || [] } : null,
     // Only WORTH_REVISITING carries absorbed signals; each keeps its own
     // reason labels and links, so nothing is summarised into a score.
