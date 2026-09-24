@@ -151,6 +151,12 @@ p { color: var(--text-muted); line-height: 1.5; }
 .radar-links { margin: 8px 0 16px; }
 .link-chip { color: #b9caff; margin-right: 8px; word-break: break-all; }
 .today-section { margin-top: 8px; }
+.stay-ahead { margin-bottom: 8px; }
+.stay-ahead-card h3 { margin: 6px 0 8px; }
+.stay-ahead-what, .stay-ahead-why { margin: 6px 0; }
+.stay-ahead-links { margin-top: 10px; }
+.stay-ahead-reason { border-left: 3px solid var(--border-soft); padding-left: 12px; }
+.stay-ahead-reason p { margin: 4px 0; }
 .claim-card { background: var(--bg-elevated); border: 1px solid var(--border-soft); border-radius: var(--radius); padding: 16px; }
 .claim-card + .claim-card { margin-top: 10px; }
 .claim-text { color: var(--text); margin: 12px 0; }

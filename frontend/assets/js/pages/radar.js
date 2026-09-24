@@ -2,6 +2,7 @@ import { api } from "../api.js";
 import { el, mount, clear } from "../dom.js";
 import { formatDateTime, truncate } from "../format.js";
 import { navigate } from "../router.js";
+import { stayAheadBlock, stayAheadUnavailable } from "./stayAhead.js";
 
 const LIMIT = 50;
 const TODAY_CAP = 3;
@@ -192,13 +193,25 @@ function section(title, items, emptyText) {
   ]);
 }
 
+async function todayStayAhead() {
+  try {
+    return stayAheadBlock(await api.get("/stay-ahead/today"));
+  } catch (error) {
+    return stayAheadUnavailable(error);
+  }
+}
+
 export async function renderToday(root) {
   mount(root, el("div", { class: "stack" }, [pageHeader("Today", "A bounded, deterministic view of what changed and why it is shown."), stateCard("Loading Today…", "loading-state")]));
   try {
+    // Stay ahead loads alongside, and its failure is contained: the existing
+    // Radar sections below never depend on it.
+    const stayAhead = todayStayAhead();
     const rows = await api.get(`/radar/developments?limit=${LIMIT}`);
     const groups = groupToday(await fetchDetails(rows));
     const content = el("div", { class: "stack" }, [
       pageHeader("Today", "No AI call is required to open this view.", [el("a", { class: "button-link", href: "#/ail/radar" }, "Open Radar")]),
+      await stayAhead,
       section("Important or relevant changes", groups.important, "No relevant changes recorded in the current window."),
       section("New or materially changed models", groups.newModels, "No new model changes recorded."),
       section("Pricing and capability changes", groups.changes, "No pricing or capability changes recorded."),
