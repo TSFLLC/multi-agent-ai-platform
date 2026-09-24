@@ -1097,3 +1097,18 @@ button.link:hover:not(:disabled) { background: none; color: #8fb0ff; }
 .token-gate-form input { padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-elevated); color: var(--text); font-size: 0.9rem; }
 .token-gate-form button { padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-elevated); color: var(--text); cursor: pointer; font-weight: 600; }
 .token-gate-error { color: var(--danger); }
+
+/* AIL.3C Personal Lab results sections */
+.lab-section { margin: 20px 0; padding-top: 12px; border-top: 1px solid var(--border-soft); }
+.lab-section h2 { margin: 0 0 8px; }
+.lab-section label { display: block; margin: 10px 0; color: var(--text-muted); }
+.lab-section select, .lab-section textarea, .lab-section input[type="search"] { display: block; width: 100%; max-width: 560px; margin-top: 4px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-elevated); color: var(--text); font: inherit; }
+.lab-qualification { padding: 10px 14px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg-card); }
+.lab-qualification p { margin: 4px 0; }
+.lab-qualification-ready, .lab-qualification-done { background: var(--free-bg); border-color: var(--free); }
+.lab-qualification-waiting { background: var(--paid-bg); border-color: var(--paid); }
+.lab-qualification-blocked { background: var(--unknown-bg); border-color: var(--unknown); }
+.lab-conclusion { padding: 10px 14px; border-left: 3px solid var(--accent); background: var(--bg-card); margin-bottom: 10px; }
+.lab-concept-results { list-style: none; padding: 0; }
+.success-text { color: var(--free); }
+.error-text { color: var(--danger); }

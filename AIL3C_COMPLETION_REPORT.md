@@ -1,6 +1,6 @@
-# AIL.3C status (backend and API layer only)
+# AIL.3C status
 
-The frontend is **not** implemented. AIL.3C is not complete.
+Backend, API and the Personal Lab results page are implemented. The results page has not been checked visually in a browser (see Deferred).
 
 ## Implemented and tested
 
@@ -26,9 +26,21 @@ Every item below has an executable test in `tests/test_ail3c_learning_api.py` (3
   - the downgrade refuses while experiment-backed evidence exists.
   Tested on disposable databases: populated upgrade, downgrade, re-upgrade, `PRAGMA integrity_check`, `PRAGMA foreign_key_check`, and a single head.
 
+## Personal Lab results page
+
+`frontend/assets/js/pages/lab.js` (sections) and `frontend/assets/js/labLearning.js` (pure view logic). Sections, in fixed order: What I tested, What happened, Evaluation, Where they differed, My conclusion, Count toward learning, What I can do next.
+
+- **Conclusion editor.** Shown only once there are results to read. Every conclusion type is presented as winner-free, and it is validated client-side with the same rules as the backend.
+- **Count toward learning.** The button appears only when the qualification is READY and is never called on render. Every other state shows a plain-language reason and no button. An already-counted experiment shows its state and locks the Concept.
+- **Concept picker.** It uses the existing `GET /radar/concepts` and `PUT .../concept`.
+- **Radar origin.** A read-only link, shown only when `development_id` is set.
+- **Evaluation.** Status only. No criteria counts or denominators appear, because the results payload carries none.
+- **No Professor control.** No canonical Professor exists, so none is rendered.
+
+Tests: `frontend/tests/labLearning.test.mjs` (14 tests, using a small fake DOM), and the full frontend suite (384 passed). The live API flow was also exercised against a disposable, fully migrated database.
+
 ## Deferred
 
-- Personal Lab frontend (conclusion editor, Count Toward Learning UI, qualification explanations, Concept picker, Radar-origin readback).
+- Visual/browser verification of the results page (the Chrome extension was not connected).
 - Professor: no canonical implementation exists.
 - Learning Plan proposal from an experiment.
-- Frontend tests.

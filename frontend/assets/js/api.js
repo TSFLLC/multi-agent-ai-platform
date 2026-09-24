@@ -58,6 +58,7 @@ async function request(path, { method = "GET", body, headers } = {}) {
 export const api = {
   get: (path) => request(path),
   post: (path, body, opts = {}) => request(path, { method: "POST", body: body ?? {}, ...opts }),
+  put: (path, body, opts = {}) => request(path, { method: "PUT", body: body ?? {}, ...opts }),
   raw: request,
   getText: async (path) => {
     const response = await fetch(path, { headers: { Authorization: `Bearer ${currentToken() || ""}` } });
