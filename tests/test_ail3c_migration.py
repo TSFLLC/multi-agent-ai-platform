@@ -6,6 +6,7 @@ index, all as produced by the actual Alembic revision.
 """
 
 from pathlib import Path
+import logging.config
 
 import pytest
 from alembic.config import Config
@@ -73,6 +74,30 @@ def test_single_alembic_head():
     script = ScriptDirectory.from_config(_cfg())
     assert script.get_heads() == ["ail4b_review_attempts"]
     assert script.get_revision("ail4b_review_attempts").down_revision == HEAD
+
+
+def test_alembic_migration_preserves_hosted_failure_logger(tmp_path, monkeypatch):
+    """Alembic logging setup must not hide hosted startup migration errors."""
+    from alembic import command
+
+    db_path = tmp_path / "hosted-migration-logging.db"
+    monkeypatch.setattr(settings, "database_path", db_path)
+    calls = []
+    real_file_config = logging.config.fileConfig
+
+    def observed_file_config(*args, **kwargs):
+        calls.append(kwargs.copy())
+        return real_file_config(*args, **kwargs)
+
+    monkeypatch.setattr(logging.config, "fileConfig", observed_file_config)
+    hosted_logger = logging.getLogger("scripts.hosted_entrypoint")
+    hosted_logger.disabled = False
+
+    command.upgrade(_cfg(), "head")
+
+    assert calls
+    assert all(call.get("disable_existing_loggers") is False for call in calls)
+    assert hosted_logger.disabled is False
 
 
 def test_populated_upgrade_downgrade_reupgrade(db_path):

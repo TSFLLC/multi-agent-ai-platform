@@ -16,7 +16,7 @@ from app.db.session import build_engine
 config = context.config
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 # Single source of truth for the DB URL is app.config.settings, not
 # alembic.ini, so there is exactly one place that decides where the local
