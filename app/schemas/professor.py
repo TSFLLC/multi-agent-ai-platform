@@ -49,6 +49,40 @@ class ProfessorProvenanceKind(str, Enum):
     AI_EXPLANATION = "ai_explanation"
 
 
+class ProfessorAssertionKind(str, Enum):
+    FACTUAL = "factual"
+    PLATFORM_OBSERVATION = "platform_observation"
+    USER_AUTHORED_CONCLUSION = "user_authored_conclusion"
+    AI_EXPLANATION = "ai_explanation"
+    ADVISORY = "advisory"
+
+
+class ProfessorActionType(str, Enum):
+    LEARN = "learn"
+    REVIEW = "review"
+    INSPECT_EXPERIMENT = "inspect_experiment"
+    INSPECT_DEVELOPMENT = "inspect_development"
+    OPEN_ROUTING_DECISION = "open_routing_decision"
+    OPEN_MODEL = "open_model"
+    ATTACH_RECORD = "attach_record"
+    CONTINUE = "continue"
+
+
+class ProfessorProvenanceReference(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    ref_type: str = Field(min_length=1, max_length=80)
+    ref_id: str = Field(min_length=1, max_length=36)
+
+
+class ProfessorClaimProvenance(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    origin_kind: str = Field(min_length=1, max_length=80)
+    origin: ProfessorProvenanceReference
+    cited_claims: List[ProfessorProvenanceReference] = Field(default_factory=list, max_length=20)
+
+
 class ProfessorTarget(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -91,6 +125,8 @@ class ProfessorEvidenceReference(BaseModel):
     provenance_kind: ProfessorProvenanceKind
     claim_type: Optional[ClaimType] = None
     conflict_group: Optional[str] = None
+    origin: Optional[ProfessorProvenanceReference] = None
+    cited_claims: List[ProfessorProvenanceReference] = Field(default_factory=list, max_length=20)
 
 
 class ProfessorContextRecord(BaseModel):
@@ -102,6 +138,7 @@ class ProfessorContextRecord(BaseModel):
     provenance_kind: ProfessorProvenanceKind
     claim_type: Optional[ClaimType] = None
     conflict_group: Optional[str] = None
+    claim_provenance: Optional[ProfessorClaimProvenance] = None
     data: Dict = Field(default_factory=dict)
 
 
@@ -129,7 +166,7 @@ class ProfessorContext(BaseModel):
 class ProfessorSuggestedAction(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    type: str = Field(min_length=1, max_length=80)
+    type: ProfessorActionType
     target_id: Optional[str] = Field(default=None, max_length=36)
     reason: str = Field(min_length=1, max_length=1000)
     advisory: bool = True
@@ -142,6 +179,14 @@ class ProfessorSuggestedAction(BaseModel):
         return value
 
 
+class ProfessorGroundedAssertion(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    assertion_kind: ProfessorAssertionKind
+    text: str = Field(min_length=1, max_length=4000)
+    references: List[ProfessorEvidenceReference] = Field(default_factory=list, max_length=20)
+
+
 class ProfessorResponse(BaseModel):
     """Bounded output contract for AIL.4C.2 generation."""
 
@@ -151,6 +196,7 @@ class ProfessorResponse(BaseModel):
     direct_answer: str = Field(min_length=1, max_length=12000)
     explanation: Optional[str] = Field(default=None, max_length=20000)
     evidence: List[ProfessorEvidenceReference] = Field(default_factory=list, max_length=100)
+    grounded_assertions: List["ProfessorGroundedAssertion"] = Field(default_factory=list, max_length=100)
     uncertainties: List[str] = Field(default_factory=list, max_length=20)
     suggested_next_actions: List[ProfessorSuggestedAction] = Field(default_factory=list, max_length=5)
     attachment_references: List[ProfessorEvidenceReference] = Field(default_factory=list, max_length=8)

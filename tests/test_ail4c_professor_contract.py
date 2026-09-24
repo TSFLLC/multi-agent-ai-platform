@@ -7,6 +7,7 @@ validator must be safe to call without creating Agent Runs or learning data.
 from datetime import datetime, timezone
 
 import pytest
+from sqlalchemy import select
 
 from app.db.enums import (
     ConceptKind,
@@ -20,6 +21,8 @@ from app.db.enums import (
 )
 from app.errors import NotFoundError
 from app.models.lab import Experiment
+from app.models.learner import LearningEvidence, LearningPlanItem
+from app.models.learning_review import ReviewAttempt, ReviewPromptDelivery
 from app.models.radar import Claim, ClaimCreationMethod, ClaimStatus, ClaimType, Development
 from app.models.tasks import TaskRun
 from app.schemas.professor import (
@@ -29,6 +32,10 @@ from app.schemas.professor import (
     ProfessorContextRecord,
     ProfessorContextRequest,
     ProfessorEvidenceReference,
+    ProfessorClaimProvenance,
+    ProfessorProvenanceReference,
+    ProfessorAssertionKind,
+    ProfessorGroundedAssertion,
     ProfessorIntent,
     ProfessorProvenanceKind,
     ProfessorResponse,
@@ -92,6 +99,20 @@ def test_response_requires_context_membership_and_preserves_provenance():
                 provenance_kind=ProfessorProvenanceKind.LEARNING_RECORD,
             )
         ],
+        grounded_assertions=[
+            ProfessorGroundedAssertion(
+                assertion_kind=ProfessorAssertionKind.FACTUAL,
+                text="The recorded item is available.",
+                references=[
+                    ProfessorEvidenceReference(
+                        ref_type="claim",
+                        ref_id="claim-1",
+                        role="support",
+                        provenance_kind=ProfessorProvenanceKind.LEARNING_RECORD,
+                    )
+                ],
+            )
+        ],
     )
     assert validate_professor_response(valid, context) == valid
 
@@ -129,6 +150,21 @@ def test_conflicting_evidence_must_be_returned_side_by_side():
                 conflict_group="conflict-1",
             )
         ],
+        grounded_assertions=[
+            ProfessorGroundedAssertion(
+                assertion_kind=ProfessorAssertionKind.FACTUAL,
+                text="There is evidence to compare.",
+                references=[
+                    ProfessorEvidenceReference(
+                        ref_type="claim",
+                        ref_id="claim-a",
+                        role="support",
+                        provenance_kind=ProfessorProvenanceKind.LEARNING_RECORD,
+                        conflict_group="conflict-1",
+                    )
+                ],
+            )
+        ],
     )
     with pytest.raises(ProfessorResponseValidationError):
         validate_professor_response(one_side, context)
@@ -139,12 +175,133 @@ def test_response_cannot_advance_learning_or_review_state():
     response = ProfessorResponse(
         intent=ProfessorIntent.HELP_ME_REVIEW,
         direct_answer="You are now demonstrated.",
+        grounded_assertions=[
+            ProfessorGroundedAssertion(
+                assertion_kind=ProfessorAssertionKind.AI_EXPLANATION,
+                text="You are now demonstrated.",
+            )
+        ],
     )
     with pytest.raises(ProfessorResponseValidationError):
         validate_professor_response(response, context)
 
     with pytest.raises(ValueError):
         ProfessorSuggestedAction(type="mark_state", reason="change state", advisory=False)
+
+
+def test_unsupported_factual_assertion_requires_grounding():
+    context = _context(records=[_record("claim", "claim-1", claim_type=ClaimType.FACT)])
+    response = ProfessorResponse(
+        intent=ProfessorIntent.EXPLAIN_THIS,
+        direct_answer="The provider is faster.",
+    )
+    with pytest.raises(ProfessorResponseValidationError):
+        validate_professor_response(response, context)
+
+
+def test_ai_explanation_may_be_unreferenced_but_cannot_become_evidence():
+    explanation = ProfessorResponse(
+        intent=ProfessorIntent.ASK_PROFESSOR,
+        direct_answer="This is an interpretation, not a recorded fact.",
+        grounded_assertions=[
+            ProfessorGroundedAssertion(
+                assertion_kind=ProfessorAssertionKind.AI_EXPLANATION,
+                text="This is an interpretation, not a recorded fact.",
+            )
+        ],
+    )
+    assert validate_professor_response(explanation, _context(ProfessorIntent.ASK_PROFESSOR)) == explanation
+
+    context = _context(
+        records=[
+            _record("claim", "claim-ai", provenance=ProfessorProvenanceKind.AI_EXPLANATION, claim_type=ClaimType.AI_EXPLANATION)
+        ]
+    )
+    factual = ProfessorResponse(
+        intent=ProfessorIntent.EXPLAIN_THIS,
+        direct_answer="The record proves the fact.",
+        grounded_assertions=[
+            ProfessorGroundedAssertion(
+                assertion_kind=ProfessorAssertionKind.FACTUAL,
+                text="The record proves the fact.",
+                references=[
+                    ProfessorEvidenceReference(
+                        ref_type="claim", ref_id="claim-ai", role="support",
+                        provenance_kind=ProfessorProvenanceKind.AI_EXPLANATION,
+                        claim_type=ClaimType.AI_EXPLANATION,
+                    )
+                ],
+            )
+        ],
+    )
+    with pytest.raises(ProfessorResponseValidationError):
+        validate_professor_response(factual, context)
+
+
+def test_claim_origin_and_citation_references_must_match_context():
+    provenance = ProfessorClaimProvenance(
+        origin_kind="source_item",
+        origin=ProfessorProvenanceReference(ref_type="radar_item", ref_id="source-1"),
+        cited_claims=[ProfessorProvenanceReference(ref_type="claim", ref_id="claim-2")],
+    )
+    record = _record(
+        "claim",
+        "claim-1",
+        provenance=ProfessorProvenanceKind.EXTERNAL_KNOWLEDGE,
+        claim_type=ClaimType.RESEARCH_RESULT,
+    )
+    record.claim_provenance = provenance
+    context = _context(records=[record, _record("claim", "claim-2")])
+    good = ProfessorResponse(
+        intent=ProfessorIntent.EXPLAIN_THIS,
+        direct_answer="The source-backed claim is recorded.",
+        grounded_assertions=[
+            ProfessorGroundedAssertion(
+                assertion_kind=ProfessorAssertionKind.FACTUAL,
+                text="The source-backed claim is recorded.",
+                references=[
+                    ProfessorEvidenceReference(
+                        ref_type="claim", ref_id="claim-1", role="support",
+                        provenance_kind=ProfessorProvenanceKind.EXTERNAL_KNOWLEDGE,
+                        claim_type=ClaimType.RESEARCH_RESULT,
+                        origin=provenance.origin,
+                        cited_claims=provenance.cited_claims,
+                    )
+                ],
+            )
+        ],
+    )
+    assert validate_professor_response(good, context) == good
+
+    bad = good.model_copy(deep=True)
+    bad.grounded_assertions[0].references[0].origin = ProfessorProvenanceReference(
+        ref_type="radar_item", ref_id="unauthorized-source"
+    )
+    with pytest.raises(ProfessorResponseValidationError):
+        validate_professor_response(bad, context)
+
+
+def test_advisory_actions_have_fixed_types_and_authorized_targets():
+    with pytest.raises(ValueError):
+        ProfessorSuggestedAction(type="delete_learning_evidence", reason="delete it")
+
+    context = _context(records=[_record("concept", "concept-1")])
+    unauthorized = ProfessorResponse(
+        intent=ProfessorIntent.EXPLAIN_THIS,
+        direct_answer="An explanation.",
+        grounded_assertions=[
+            ProfessorGroundedAssertion(assertion_kind=ProfessorAssertionKind.AI_EXPLANATION, text="An explanation.")
+        ],
+        suggested_next_actions=[
+            ProfessorSuggestedAction(type="learn", target_id="other-concept", reason="Study it next")
+        ],
+    )
+    with pytest.raises(ProfessorResponseValidationError):
+        validate_professor_response(unauthorized, context)
+
+    valid = unauthorized.model_copy(deep=True)
+    valid.suggested_next_actions[0].target_id = "concept-1"
+    assert validate_professor_response(valid, context) == valid
 
 
 def test_concept_context_is_user_scoped_and_read_only(db, bootstrap):
@@ -173,6 +330,77 @@ def test_concept_context_is_user_scoped_and_read_only(db, bootstrap):
     assert {record.ref_type for record in context.records} >= {"concept", "concept_version", "learning_item"}
     assert context.deterministic_facts["learner_state"]["ladder"] == "not_started"
     assert version.id in {record.ref_id for record in context.records if record.ref_type == "concept_version"}
+
+
+def test_professor_context_and_validation_do_not_mutate_protected_domains(db, bootstrap):
+    concept = make_concept(db, slug="professor-snapshot-concept")
+    version = make_published_version(db, concept)
+    development = Development(
+        title="Snapshot development",
+        development_type="release",
+        candidate_key="professor-snapshot-development",
+        first_seen_at=datetime.now(timezone.utc),
+    )
+    db.add(development)
+    db.flush()
+    db.add(
+        Claim(
+            text="A recorded fact",
+            claim_type=ClaimType.FACT,
+            development_id=development.id,
+            as_of=datetime.now(timezone.utc),
+            created_by=ClaimCreationMethod.USER,
+            status=ClaimStatus.ACTIVE,
+        )
+    )
+    db.add(
+        Experiment(
+            user_id=bootstrap.user.id,
+            experiment_type=ExperimentType.VARIANCE,
+            status=ExperimentStatus.COMPLETED,
+            hypothesis="A bounded hypothesis",
+            repetitions=1,
+            config_snapshot={"bounded": True},
+            estimated_currency="USD",
+            conclusion_type="observation",
+            conclusion_text="A user conclusion",
+            concluded_at=datetime.now(timezone.utc),
+        )
+    )
+    db.commit()
+
+    def snapshot():
+        return {
+            "evidence": db.execute(select(LearningEvidence.id, LearningEvidence.passed, LearningEvidence.score)).all(),
+            "plan": db.execute(select(LearningPlanItem.id, LearningPlanItem.state, LearningPlanItem.position)).all(),
+            "claims": db.execute(select(Claim.id, Claim.text, Claim.status)).all(),
+            "experiments": db.execute(select(Experiment.id, Experiment.conclusion_type, Experiment.conclusion_text)).all(),
+            "reviews": db.execute(select(ReviewAttempt.id, ReviewAttempt.status, ReviewAttempt.resulting_learning_evidence_id)).all(),
+            "deliveries": db.execute(select(ReviewPromptDelivery.id, ReviewPromptDelivery.slot)).all(),
+        }
+
+    before = snapshot()
+    context = ProfessorContextAssembler(db).assemble(
+        bootstrap.user.id,
+        ProfessorContextRequest(
+            intent=ProfessorIntent.WHY_DOES_THIS_MATTER,
+            target=ProfessorTarget(type=ProfessorTargetType.DEVELOPMENT, id=development.id),
+        ),
+    )
+    validate_professor_response(
+        ProfessorResponse(
+            intent=ProfessorIntent.WHY_DOES_THIS_MATTER,
+            direct_answer="This is an interpretation of the recorded material.",
+            grounded_assertions=[
+                ProfessorGroundedAssertion(
+                    assertion_kind=ProfessorAssertionKind.AI_EXPLANATION,
+                    text="This is an interpretation of the recorded material.",
+                )
+            ],
+        ),
+        context,
+    )
+    assert snapshot() == before
 
 
 def test_cross_user_learning_attachment_fails_closed(db, bootstrap):

@@ -4,7 +4,13 @@ import re
 from typing import Iterable, Set
 
 from app.errors import ConflictError
-from app.schemas.professor import ProfessorContext, ProfessorEvidenceReference, ProfessorResponse
+from app.models.radar import ClaimType
+from app.schemas.professor import (
+    ProfessorAssertionKind,
+    ProfessorContext,
+    ProfessorEvidenceReference,
+    ProfessorResponse,
+)
 
 
 class ProfessorResponseValidationError(ConflictError):
@@ -51,8 +57,25 @@ def _validate_reference(
         raise ProfessorResponseValidationError("Professor Claim Type does not match the context record.")
     if reference.conflict_group != record.conflict_group:
         raise ProfessorResponseValidationError("Professor conflict provenance does not match the context record.")
+    if reference.origin is not None:
+        if record.claim_provenance is None or reference.origin != record.claim_provenance.origin:
+            raise ProfessorResponseValidationError("Professor claim origin does not match the context record.")
+    if reference.cited_claims:
+        if record.claim_provenance is None or reference.cited_claims != record.claim_provenance.cited_claims:
+            raise ProfessorResponseValidationError("Professor claim citations do not match the context record.")
     if attachment_only and _key(reference.ref_type, reference.ref_id) not in context.permitted_attachments:
         raise ProfessorResponseValidationError("Professor attachment reference was not explicitly authorized.")
+
+
+def _validate_grounded_assertion(reference: ProfessorEvidenceReference, context: ProfessorContext, *, kind: ProfessorAssertionKind) -> None:
+    record = context.permitted_references.get(_key(reference.ref_type, reference.ref_id))
+    _validate_reference(reference, context, context.permitted_references)
+    if kind in {
+        ProfessorAssertionKind.FACTUAL,
+        ProfessorAssertionKind.PLATFORM_OBSERVATION,
+        ProfessorAssertionKind.USER_AUTHORED_CONCLUSION,
+    } and record.claim_type == ClaimType.AI_EXPLANATION:
+        raise ProfessorResponseValidationError("An AI explanation cannot be used as factual evidence.")
 
 
 def validate_professor_response(response: ProfessorResponse, context: ProfessorContext) -> ProfessorResponse:
@@ -77,6 +100,18 @@ def validate_professor_response(response: ProfessorResponse, context: ProfessorC
     for reference in response.attachment_references:
         _validate_reference(reference, context, permitted, attachment_only=True)
 
+    if not response.grounded_assertions:
+        raise ProfessorResponseValidationError("Professor response must classify its assertions and grounding.")
+    for assertion in response.grounded_assertions:
+        if assertion.assertion_kind in {
+            ProfessorAssertionKind.FACTUAL,
+            ProfessorAssertionKind.PLATFORM_OBSERVATION,
+            ProfessorAssertionKind.USER_AUTHORED_CONCLUSION,
+        } and not assertion.references:
+            raise ProfessorResponseValidationError("Factual and platform assertions require provenance references.")
+        for reference in assertion.references:
+            _validate_grounded_assertion(reference, context, kind=assertion.assertion_kind)
+
     cited_conflicts: Set[str] = {
         reference.conflict_group
         for reference in response.evidence + response.attachment_references
@@ -98,6 +133,15 @@ def validate_professor_response(response: ProfessorResponse, context: ProfessorC
     for action in response.suggested_next_actions:
         if not action.advisory:
             raise ProfessorResponseValidationError("Professor next actions must be advisory.")
+        if action.target_id is not None:
+            authorized_ids = {record.ref_id for record in context.records}
+            if context.target is not None:
+                authorized_ids.add(context.target.id)
+            for value in context.deterministic_facts.values():
+                if isinstance(value, str):
+                    authorized_ids.add(value)
+            if action.target_id not in authorized_ids:
+                raise ProfessorResponseValidationError("Professor action target is outside the assembled context.")
 
     return response
 

@@ -19,6 +19,8 @@ from app.models.identity import Project, ProjectMembership
 from app.models.learner import LearningEvidence
 from app.models.radar import (
     Claim,
+    ClaimCitation,
+    ClaimOrigin,
     ClaimStatus,
     ClaimType,
     Development,
@@ -32,10 +34,12 @@ from app.schemas.professor import (
     ProfessorContext,
     ProfessorContextRecord,
     ProfessorContextRequest,
+    ProfessorClaimProvenance,
     ProfessorIntent,
     ProfessorProvenanceKind,
     ProfessorTarget,
     ProfessorTargetType,
+    ProfessorProvenanceReference,
 )
 from app.services.concept_graph_service import ConceptGraphService
 from app.services.experiment_execution_service import ExperimentExecutionService
@@ -184,6 +188,7 @@ class ProfessorContextAssembler:
         *,
         claim_type: Optional[ClaimType] = None,
         conflict_group: Optional[str] = None,
+        claim_provenance: Optional[ProfessorClaimProvenance] = None,
         data: Optional[Dict[str, Any]] = None,
     ) -> ProfessorContextRecord:
         record = ProfessorContextRecord(
@@ -193,6 +198,7 @@ class ProfessorContextAssembler:
             provenance_kind=provenance_kind,
             claim_type=claim_type,
             conflict_group=conflict_group,
+            claim_provenance=claim_provenance,
             data=_value(data or {}),
         )
         records.append(record)
@@ -414,6 +420,7 @@ class ProfessorContextAssembler:
                 .limit(MAX_CLAIMS_PER_DEVELOPMENT)
             ).scalars()
         )
+        claim_ids = {claim.id for claim in claims}
         conflict_keys: Dict[str, List[Claim]] = {}
         for claim in claims:
             key = (claim.conditions or {}).get("conflict_key")
@@ -434,6 +441,37 @@ class ProfessorContextAssembler:
                 provenance = ProfessorProvenanceKind.AI_EXPLANATION
             else:
                 provenance = ProfessorProvenanceKind.EXTERNAL_KNOWLEDGE
+            origin = self.db.execute(
+                select(ClaimOrigin).where(ClaimOrigin.claim_id == claim.id)
+            ).scalar_one_or_none()
+            claim_provenance = None
+            if origin is not None:
+                if origin.source_item_id:
+                    origin_ref = ProfessorProvenanceReference(ref_type="radar_item", ref_id=origin.source_item_id)
+                elif origin.evaluation_id:
+                    origin_ref = ProfessorProvenanceReference(ref_type="evaluation", ref_id=origin.evaluation_id)
+                elif origin.agent_run_id:
+                    origin_ref = ProfessorProvenanceReference(ref_type="agent_run", ref_id=origin.agent_run_id)
+                else:
+                    origin_ref = None
+                if origin_ref is not None:
+                    citations = list(
+                        self.db.execute(
+                            select(ClaimCitation.cited_claim_id)
+                            .where(ClaimCitation.explanation_claim_id == claim.id)
+                            .order_by(ClaimCitation.cited_claim_id)
+                            .limit(20)
+                        ).scalars()
+                    )
+                    citations = [claim_id for claim_id in citations if claim_id in claim_ids]
+                    claim_provenance = ProfessorClaimProvenance(
+                        origin_kind=_value(origin.origin_kind),
+                        origin=origin_ref,
+                        cited_claims=[
+                            ProfessorProvenanceReference(ref_type="claim", ref_id=claim_id)
+                            for claim_id in citations
+                        ],
+                    )
             self._add(
                 records,
                 "claim",
@@ -442,6 +480,7 @@ class ProfessorContextAssembler:
                 provenance,
                 claim_type=claim.claim_type,
                 conflict_group=conflict_groups.get(id(claim)),
+                claim_provenance=claim_provenance,
                 data=_model_data(claim, ["text", "quote_span", "conditions", "as_of", "created_by", "status", "model_id", "development_id"]),
             )
         concept_links = list(
