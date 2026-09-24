@@ -25,6 +25,35 @@ def _role_enum(*values):
     return sa.Enum(*values, name="agentrunrole", native_enum=False, create_constraint=True)
 
 
+def _rebuild_role(existing_type, new_type) -> None:
+    bind = op.get_bind()
+    raw = bind.connection.dbapi_connection
+    if raw.in_transaction:
+        raw.commit()
+    bind.exec_driver_sql("PRAGMA foreign_keys=OFF")
+    try:
+        with op.batch_alter_table("agent_runs", schema=None) as batch_op:
+            existing = _role_checks(bind)
+            if "agentrunrole" in existing:
+                batch_op.drop_constraint(batch_op.f("agentrunrole"), type_="check")
+            if "ck_agent_runs_agentrunrole" in existing:
+                batch_op.drop_constraint(batch_op.f("ck_agent_runs_agentrunrole"), type_="check")
+            batch_op.alter_column(
+                "role",
+                existing_type=existing_type,
+                type_=new_type,
+                existing_nullable=True,
+            )
+        violations = bind.exec_driver_sql("PRAGMA foreign_key_check").fetchall()
+        if violations:
+            raise RuntimeError(
+                f"agent_runs rebuild left {len(violations)} foreign-key violation(s); refusing to continue"
+            )
+    finally:
+        if not raw.in_transaction:
+            bind.exec_driver_sql("PRAGMA foreign_keys=ON")
+
+
 def upgrade() -> None:
     bind = op.get_bind()
     # SQLite batch DDL is non-transactional. If a hosted process is killed
@@ -38,18 +67,10 @@ def upgrade() -> None:
                 "Cannot recover agent_runs migration: canonical agent_runs table is missing."
             )
         op.drop_table("_alembic_tmp_agent_runs")
-    existing = _role_checks(bind)
-    with op.batch_alter_table("agent_runs", schema=None) as batch_op:
-        if "agentrunrole" in existing:
-            batch_op.drop_constraint(batch_op.f("agentrunrole"), type_="check")
-        if "ck_agent_runs_agentrunrole" in existing:
-            batch_op.drop_constraint(batch_op.f("ck_agent_runs_agentrunrole"), type_="check")
-        batch_op.alter_column(
-            "role",
-            existing_type=sa.VARCHAR(length=9),
-            type_=_role_enum("primary", "reviewer", "repair", "evaluator", "professor"),
-            existing_nullable=True,
-        )
+    _rebuild_role(
+        sa.VARCHAR(length=9),
+        _role_enum("primary", "reviewer", "repair", "evaluator", "professor"),
+    )
 
 
 def downgrade() -> None:
@@ -63,15 +84,7 @@ def downgrade() -> None:
             f"{professor_count} Professor AgentRun row(s) exist."
         )
 
-    existing = _role_checks(bind)
-    with op.batch_alter_table("agent_runs", schema=None) as batch_op:
-        if "agentrunrole" in existing:
-            batch_op.drop_constraint(batch_op.f("agentrunrole"), type_="check")
-        if "ck_agent_runs_agentrunrole" in existing:
-            batch_op.drop_constraint(batch_op.f("ck_agent_runs_agentrunrole"), type_="check")
-        batch_op.alter_column(
-            "role",
-            existing_type=_role_enum("primary", "reviewer", "repair", "evaluator", "professor"),
-            type_=_role_enum("primary", "reviewer", "repair", "evaluator"),
-            existing_nullable=True,
-        )
+    _rebuild_role(
+        _role_enum("primary", "reviewer", "repair", "evaluator", "professor"),
+        _role_enum("primary", "reviewer", "repair", "evaluator"),
+    )

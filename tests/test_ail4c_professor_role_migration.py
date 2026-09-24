@@ -92,6 +92,25 @@ def test_upgrade_recovers_known_stale_sqlite_batch_table(db_path):
         _clean(conn)
     engine.dispose()
 
+
+def test_upgrade_preserves_foreign_key_children(db_path):
+    command.upgrade(_cfg(), PREVIOUS_HEAD)
+    engine = _engine(db_path)
+    with engine.begin() as conn:
+        _seed_agent_runs(conn)
+        conn.execute(text(
+            "INSERT INTO agent_run_attempts (id, agent_run_id, attempt_number, status, started_at) "
+            f"VALUES ('attempt-1', 'run-primary', 1, 'running', '{NOW}')"
+        ))
+    engine.dispose()
+
+    command.upgrade(_cfg(), NEW_HEAD)
+    engine = _engine(db_path)
+    with engine.begin() as conn:
+        assert conn.execute(text("SELECT agent_run_id FROM agent_run_attempts WHERE id = 'attempt-1'")).scalar_one() == "run-primary"
+        _clean(conn)
+    engine.dispose()
+
 def test_professor_role_downgrade_refuses_without_relabeling(db_path):
     command.upgrade(_cfg(), NEW_HEAD)
     engine = _engine(db_path)
