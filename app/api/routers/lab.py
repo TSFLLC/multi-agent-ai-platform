@@ -6,9 +6,12 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_db
 from app.auth import get_current_user
+from app.errors import ConflictError
 from app.models.identity import User
 from app.models.lab import EvalSetVersionTask, Experiment
 from app.schemas.lab import (
+    ExperimentConceptBind,
+    ExperimentConclusionWrite,
     ExperimentCreate,
     ExperimentEvaluateRequest,
     ExperimentListRead,
@@ -20,7 +23,9 @@ from app.schemas.lab import (
     TestKitVersionRead,
 )
 from app.services.experiment_execution_service import ExperimentExecutionService
+from app.services.experiment_learning_qualification_service import ExperimentLearningQualificationService
 from app.services.lab_service import LabService
+from app.services.learner_state_service import LearnerStateService
 
 router = APIRouter(prefix="/lab", tags=["personal-lab"])
 
@@ -147,6 +152,65 @@ def experiment_results(experiment_id: str, db: Session = Depends(get_db), user: 
 def get_experiment(experiment_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     service = LabService(db)
     return service.experiment_read(service.get_experiment(user.id, experiment_id))
+
+
+@router.put("/experiments/{experiment_id}/conclusion", response_model=ExperimentRead)
+def save_experiment_conclusion(
+    experiment_id: str,
+    body: ExperimentConclusionWrite,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    service = LabService(db)
+    return service.experiment_read(
+        service.save_conclusion(user.id, experiment_id, body.conclusion_type, body.conclusion_text)
+    )
+
+
+@router.put("/experiments/{experiment_id}/concept", response_model=ExperimentRead)
+def bind_experiment_concept(
+    experiment_id: str,
+    body: ExperimentConceptBind,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    service = LabService(db)
+    return service.experiment_read(service.bind_concept(user.id, experiment_id, body.concept_id))
+
+
+@router.get("/experiments/{experiment_id}/learning-qualification")
+def experiment_learning_qualification(
+    experiment_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)
+):
+    return ExperimentLearningQualificationService(db).assess(user.id, experiment_id)
+
+
+@router.post("/experiments/{experiment_id}/count-toward-learning")
+def count_experiment_toward_learning(
+    experiment_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)
+):
+    evidence, created, qualification = ExperimentLearningQualificationService(db).count_toward_learning(
+        user.id, experiment_id
+    )
+    if evidence is None:
+        raise ConflictError(qualification["message"], detail={"qualification": qualification})
+    state = LearnerStateService(db).state(user.id, evidence.concept_id)
+    return {
+        "created": created,
+        "evidence": {
+            "id": evidence.id,
+            "concept_id": evidence.concept_id,
+            "concept_version_id": evidence.concept_version_id,
+            "evidence_type": evidence.evidence_type,
+            "grader": evidence.grader,
+            "passed": evidence.passed,
+            "ref_type": evidence.ref_type,
+            "ref_id": evidence.ref_id,
+            "created_at": evidence.created_at,
+        },
+        "learner_state": {"ladder": state.ladder, "overlays": sorted(state.overlays)},
+        "qualification": qualification,
+    }
 
 
 @router.post("/experiments/{experiment_id}/run")

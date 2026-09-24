@@ -13,8 +13,10 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.db.enums import (
+    ConclusionType,
     CostEstimateKind,
     EvalSetVersionStatus,
+    EvidenceRefType,
     ExecutionMode,
     ExperimentStatus,
     ExperimentType,
@@ -34,6 +36,7 @@ from app.models.lab import (
     ExperimentAgentVersion,
     ExperimentModel,
 )
+from app.models.learner import LearningEvidence
 from app.models.providers import Model, ProviderModelSnapshot
 from app.models.radar import Development
 from app.models.tasks import Task
@@ -65,6 +68,10 @@ _STARTER_KITS = (
         ),
     ),
 )
+
+
+# AIL.3B overall_status values that have results the owner can read and conclude on.
+_CONCLUDABLE = frozenset({"COMPLETED", "PARTIAL", "FAILED", "EVALUATION_FAILED"})
 
 
 def _utcnow() -> datetime:
@@ -393,6 +400,60 @@ class LabService:
             raise NotFoundError("Experiment not found.")
         return experiment
 
+    def _has_experiment_evidence(self, experiment_id: str) -> bool:
+        return self.db.execute(
+            select(LearningEvidence.id).where(
+                LearningEvidence.ref_type == EvidenceRefType.EXPERIMENT,
+                LearningEvidence.ref_id == experiment_id,
+            )
+        ).first() is not None
+
+    def bind_concept(self, user_id: str, experiment_id: str, concept_id: str) -> Experiment:
+        """Owner selects/corrects the Concept, freezing its current version.
+        Never creates a Concept; refused once experiment-backed evidence exists
+        so historical provenance cannot be rewritten."""
+        experiment = self.get_experiment(user_id, experiment_id)
+        if self._has_experiment_evidence(experiment.id):
+            raise ConflictError("This experiment has already been counted toward learning; its Concept can no longer change.")
+        concept = self.db.get(Concept, concept_id)
+        if concept is None:
+            raise NotFoundError("Concept not found.")
+        from app.services.concept_graph_service import ConceptGraphService
+
+        version = ConceptGraphService(self.db).get_current_version(concept.id)
+        if version is None:
+            raise ConflictError("This Concept has no version to bind to yet.")
+        experiment.concept_id = concept.id
+        experiment.concept_version_id = version.id
+        self.db.commit()
+        self.db.refresh(experiment)
+        return experiment
+
+    def save_conclusion(
+        self, user_id: str, experiment_id: str, conclusion_type: ConclusionType, conclusion_text: Optional[str]
+    ) -> Experiment:
+        """The owner's own reading of the results. Touches only the three
+        conclusion columns: never MA6 evidence, never Learning Evidence, and
+        it never has to name a winner."""
+        from app.services.experiment_execution_service import ExperimentExecutionService
+
+        experiment = self.get_experiment(user_id, experiment_id)
+        execution = ExperimentExecutionService(self.db)
+        experiment = execution.refresh(experiment)
+        if experiment.status == ExperimentStatus.CANCELLED or (
+            execution._state_summary(experiment)["overall_status"] not in _CONCLUDABLE
+        ):
+            raise ConflictError("You can write a conclusion once the experiment has finished and there are results to read.")
+        text = (conclusion_text or "").strip()
+        if conclusion_type == ConclusionType.CUSTOM and not text:
+            raise ConflictError("Describe your conclusion in your own words.")
+        experiment.conclusion_type = conclusion_type.value
+        experiment.conclusion_text = text or None
+        experiment.concluded_at = _utcnow()
+        self.db.commit()
+        self.db.refresh(experiment)
+        return experiment
+
     def experiment_read(self, experiment: Experiment) -> dict:
         agent_ids = list(self.db.execute(
             select(ExperimentAgentVersion.agent_version_id)
@@ -413,6 +474,16 @@ class LabService:
             "eval_set_version_id": experiment.eval_set_version_id,
             "development_id": experiment.development_id,
             "concept_id": experiment.concept_id,
+            "concept_version_id": experiment.concept_version_id,
+            "conclusion": (
+                {
+                    "type": experiment.conclusion_type,
+                    "text": experiment.conclusion_text,
+                    "concluded_at": experiment.concluded_at,
+                }
+                if experiment.conclusion_type
+                else None
+            ),
             "learning_item_id": experiment.learning_item_id,
             "repetitions": experiment.repetitions,
             "config_snapshot": experiment.config_snapshot,

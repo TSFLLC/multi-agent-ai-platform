@@ -570,6 +570,17 @@ class EvalSetVersionStatus(str, enum.Enum):
     FROZEN = "frozen"
 
 
+class ConclusionType(str, enum.Enum):
+    """The owner's own reading of an Experiment (AIL.3C). Deliberately has no
+    "model X won" value: a conclusion never has to pick a winner."""
+
+    NO_MEANINGFUL_DIFFERENCE = "no_meaningful_difference"
+    TRADEOFF = "tradeoff"
+    INCONCLUSIVE = "inconclusive"
+    MORE_TESTING_NEEDED = "more_testing_needed"
+    CUSTOM = "custom"
+
+
 class ExperimentType(str, enum.Enum):
     MODEL_COMPARISON = "model_comparison"
     PROMPT_COMPARISON = "prompt_comparison"

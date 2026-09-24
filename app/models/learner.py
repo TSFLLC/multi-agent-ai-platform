@@ -140,6 +140,19 @@ class LearningEvidence(UUIDPrimaryKeyMixin, Base):
     Sec 30)."""
 
     __tablename__ = "learning_evidence"
+    # AIL.3C: exactly one experiment-backed evidence row per user+experiment,
+    # enforced by the database (mirrors the partial unique index in the AIL.3C
+    # migration so create_all()-built test databases enforce it too).
+    __table_args__ = (
+        Index(
+            "uq_learning_evidence_experiment_ref",
+            "user_id",
+            "ref_id",
+            unique=True,
+            sqlite_where=text("ref_type = 'experiment'"),
+            postgresql_where=text("ref_type = 'experiment'"),
+        ),
+    )
 
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     concept_id: Mapped[str] = mapped_column(ForeignKey("concepts.id", ondelete="CASCADE"), nullable=False)

@@ -1,286 +1,238 @@
-"""Experiment Learning Qualification Service — AIL.3C (CORRECTED)
+"""Experiment learning qualification — AIL.3C.
 
-Deterministic service for qualifying when an experiment can produce learning
-evidence. Never grants PRACTICED/DEMONSTRATED directly; only appends qualifying
-evidence that LearnerStateService will evaluate per existing semantics.
+Answers one question: "does this Experiment provide legitimate hands-on LAB
+evidence for its Concept?" It never predicts or assigns mastery;
+``LearnerStateService`` derives the ladder from all canonical evidence.
 
-KEY PRINCIPLE: Qualification is NOT about predicting mastery. It's about
-answering: "Does this completed experiment provide legitimate hands-on LAB
-evidence for this Concept?"
+Execution/evaluation completeness is AIL.3B's own contract, reused from
+``ExperimentExecutionService`` rather than modelled a second time:
 
-LearnerStateService determines the resulting ladder state using all canonical
-evidence requirements.
+- the required executions are the ``ExperimentTaskRun`` slots whose Task Run
+  COMPLETED;
+- evaluation is required only when ``config_snapshot`` names an
+  ``evaluation_definition_version_id``;
+- for each slot's Agent Run the latest ``EvaluationRun`` on that exact
+  definition version is authoritative.
+
+``passed`` is derived only from those MA6 ``EvaluationCriterionResult``
+findings. Nothing is copied into the evidence row and no score is invented.
 """
 
 from typing import Dict, List, Optional, Tuple
-from sqlalchemy import and_, select
-from sqlalchemy.orm import Session
-from sqlalchemy.exc import IntegrityError
 
-from app.db.enums import EvaluationFinding, EvaluationRunStatus, EvidenceRefType, EvidenceType, ExperimentStatus, ExperimentType, GradingMode
-from app.models.lab import Experiment, ExperimentTaskRun
-from app.models.evaluation_runs import EvaluationRun, EvaluationCriterionResult
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
+
+from app.db.enums import (
+    EvaluationFinding,
+    EvaluationRunStatus,
+    EvidenceRefType,
+    EvidenceType,
+    ExperimentStatus,
+    GradingMode,
+    TaskRunStatus,
+)
+from app.errors import NotFoundError
+from app.models.concepts import ConceptVersion
+from app.models.evaluation_definitions import EvaluationCriterion
+from app.models.evaluation_runs import EvaluationCriterionResult, EvaluationRun
+from app.models.lab import Experiment
 from app.models.learner import LearningEvidence
-from app.models.tasks import TaskRun, AgentRun
+from app.models.tasks import AgentRun, TaskRun
+from app.services.experiment_execution_service import ExperimentExecutionService
 from app.services.learning_evidence_service import LearningEvidenceService
+
+READY = "READY"
+ALREADY_COUNTED = "ALREADY_COUNTED"
+MISSING_CONCEPT = "MISSING_CONCEPT"
+CONCEPT_REBIND_REQUIRED = "CONCEPT_REBIND_REQUIRED"
+EXPERIMENT_INCOMPLETE = "EXPERIMENT_INCOMPLETE"
+EVALUATION_NOT_CONFIGURED = "EVALUATION_NOT_CONFIGURED"
+EVALUATION_PENDING = "EVALUATION_PENDING"
+EVALUATION_FAILED = "EVALUATION_FAILED"
+EVALUATION_INCOMPLETE = "EVALUATION_INCOMPLETE"
+EVIDENCE_DID_NOT_PASS = "EVIDENCE_DID_NOT_PASS"
+
+_MESSAGES = {
+    READY: "Ready to count toward learning.",
+    ALREADY_COUNTED: "Already counted toward learning.",
+    MISSING_CONCEPT: "Choose a Concept first.",
+    CONCEPT_REBIND_REQUIRED: "Choose the Concept again to confirm which version this experiment relates to.",
+    EXPERIMENT_INCOMPLETE: "The experiment has not finished running successfully yet.",
+    EVALUATION_NOT_CONFIGURED: "This experiment was not evaluated, so there is no verified result to count.",
+    EVALUATION_PENDING: "Evaluation is still pending.",
+    EVALUATION_FAILED: "Evaluation failed.",
+    EVALUATION_INCOMPLETE: "Some required evaluations are incomplete.",
+    EVIDENCE_DID_NOT_PASS: "The experiment did not produce qualifying hands-on evidence.",
+}
 
 
 class ExperimentLearningQualificationService:
-    """Deterministic qualification rules for experiment-backed learning evidence.
-
-    FIXED: Proper MA6 association, canonical evaluation evidence, no synthesis.
-    """
-
     def __init__(self, db: Session):
         self.db = db
         self.evidence_service = LearningEvidenceService(db)
 
-    def can_count_toward_learning(
-        self,
-        user_id: str,
-        experiment_id: str
-    ) -> Tuple[bool, Dict[str, any]]:
-        """
-        Deterministic check: can this experiment create learning evidence?
+    # -- Public ---------------------------------------------------------------
 
-        Returns: (qualified: bool, reasons: dict with details)
+    def assess(self, user_id: str, experiment_id: str) -> Dict:
+        experiment = self._owned(user_id, experiment_id)
+        existing = self._find_evidence(user_id, experiment.id)
+        if existing is not None:
+            return self._result(ALREADY_COUNTED, experiment, evidence_id=existing.id)
 
-        Reasons dict includes:
-        - qualified: bool (overall result)
-        - experiment_status_ok: bool
-        - concept_associated: bool
-        - evaluation_complete: bool
-        - details: List[str] (human-readable reasons if not qualified)
-        """
-        reasons = {
-            "qualified": False,
-            "experiment_status_ok": False,
-            "concept_associated": bool,
-            "evaluation_complete": False,
-            "details": []
-        }
-
-        # Fetch experiment with authorization
-        experiment = self._get_experiment_or_raise(user_id, experiment_id)
-
-        # Check 1: Experiment status
-        # Only COMPLETED experiments can create evidence. FAILED explicitly excluded.
-        # Evidence from FAILED experiments is non-qualifying (not a pass).
-        if experiment.status != ExperimentStatus.COMPLETED:
-            reasons["details"].append(
-                f"Experiment status is {experiment.status.value}, not COMPLETED"
-            )
-            return False, reasons
-        reasons["experiment_status_ok"] = True
-
-        # Check 2: Concept associated
-        # User must have selected a concept for learning purposes.
         if not experiment.concept_id:
-            reasons["details"].append("No concept selected for this experiment")
-            return False, reasons
-        reasons["concept_associated"] = True
+            return self._result(MISSING_CONCEPT, experiment)
+        version = (
+            self.db.get(ConceptVersion, experiment.concept_version_id) if experiment.concept_version_id else None
+        )
+        if version is None or version.concept_id != experiment.concept_id:
+            return self._result(CONCEPT_REBIND_REQUIRED, experiment)
 
-        # Check 3: Concept version frozen
-        # When experiment is counted toward learning, freeze the version.
-        # This check ensures the version is available (checked at count time).
-        if not experiment.concept_version_id:
-            reasons["details"].append("Concept version not frozen at experiment creation")
-            return False, reasons
+        execution = ExperimentExecutionService(self.db)
+        experiment = execution.refresh(experiment)
+        execution_status, runs = execution._execution_state(experiment)
+        if experiment.status == ExperimentStatus.CANCELLED or execution_status != "COMPLETED":
+            return self._result(EXPERIMENT_INCOMPLETE, experiment)
 
-        # Check 4: Evaluation complete
-        # Query canonical MA6 EvaluationRuns using correct provenance chain:
-        # Experiment → ExperimentTaskRun → TaskRun → AgentRun → EvaluationRun
-        # ALL required evaluations must be complete.
-        evaluation_complete, eval_reason = self._check_evaluation_complete(experiment_id, experiment.experiment_type)
-        if not evaluation_complete:
-            reasons["details"].append(eval_reason)
-            return False, reasons
-        reasons["evaluation_complete"] = True
+        definition_id = (experiment.config_snapshot or {}).get("evaluation_definition_version_id")
+        if not definition_id:
+            return self._result(EVALUATION_NOT_CONFIGURED, experiment)
+        evaluation_status = execution._evaluation_state(experiment, runs)
+        if evaluation_status == "FAILED":
+            return self._result(EVALUATION_FAILED, experiment)
+        if evaluation_status != "COMPLETED":
+            return self._result(EVALUATION_PENDING, experiment)
 
-        reasons["qualified"] = True
-        return True, reasons
+        evaluations = self._latest_evaluations(runs, definition_id)
+        if evaluations is None:
+            return self._result(EVALUATION_INCOMPLETE, experiment)
+
+        findings, covered = self._findings(evaluations, definition_id)
+        if not covered:
+            return self._result(EVALUATION_INCOMPLETE, experiment)
+        failing = sorted({key for key, finding in findings if finding in _FAILING})
+        if failing or not any(finding == EvaluationFinding.MET for _, finding in findings):
+            return self._result(EVIDENCE_DID_NOT_PASS, experiment, not_passing_criteria=failing)
+        return self._result(READY, experiment, ready=True)
 
     def count_toward_learning(
-        self,
-        user_id: str,
-        experiment_id: str
-    ) -> Tuple[Optional[LearningEvidence], str]:
-        """
-        Idempotent action: create learning evidence if experiment qualifies.
+        self, user_id: str, experiment_id: str
+    ) -> Tuple[Optional[LearningEvidence], bool, Dict]:
+        """Returns (evidence, created, assessment). ``created`` is False for a
+        retry or a lost race; evidence is None when not READY."""
+        assessment = self.assess(user_id, experiment_id)
+        if assessment["status"] == ALREADY_COUNTED:
+            return self._find_evidence(user_id, experiment_id), False, assessment
+        if not assessment["ready"]:
+            return None, False, assessment
 
-        Returns: (evidence: LearningEvidence | None, message: str)
-
-        Idempotency: returns existing evidence if already created for this experiment.
-        Database-level unique constraint prevents duplicates on concurrent requests.
-        """
-        # Verify qualification
-        can_count, reasons = self.can_count_toward_learning(user_id, experiment_id)
-
-        if not can_count:
-            reason_msg = "; ".join(reasons["details"])
-            return None, f"Cannot count toward learning: {reason_msg}"
-
-        # Check idempotency: does evidence for this experiment already exist?
-        existing = self._find_experiment_evidence(user_id, experiment_id)
-        if existing:
-            return existing, "Evidence already recorded for this experiment"
-
-        # Fetch experiment to get frozen concept info
-        experiment = self._get_experiment_or_raise(user_id, experiment_id)
-
-        # Derive passed from canonical evaluation evidence, not from status alone
-        passed, derivation_reason = self._derive_passed_from_evaluation(experiment_id)
-        if not passed:
-            return None, f"Cannot create passing evidence: {derivation_reason}"
-
-        # Create evidence: experiment-backed evidence is LAB type with EXPERIMENT ref_type
-        # passed is derived from canonical platform evidence, grader is DETERMINISTIC
+        experiment = self._owned(user_id, experiment_id)
         try:
             evidence = self.evidence_service.record_evidence(
                 user_id=user_id,
                 concept_id=experiment.concept_id,
-                concept_version_id=experiment.concept_version_id,  # Use frozen version
-                evidence_type=EvidenceType.LAB,  # Hands-on platform evidence
-                grader=GradingMode.DETERMINISTIC,  # Platform-verified execution
-                score=None,  # Experiments don't have scores; evaluation results are in MA6
-                passed=passed,  # Derived from canonical evaluation evidence
+                concept_version_id=experiment.concept_version_id,
+                evidence_type=EvidenceType.LAB,
+                grader=GradingMode.DETERMINISTIC,
+                score=None,
+                passed=True,
                 ref_type=EvidenceRefType.EXPERIMENT,
-                ref_id=experiment_id,
+                ref_id=experiment.id,
             )
-            return evidence, "Learning evidence recorded"
         except IntegrityError:
-            # Concurrent request created evidence first; return it
-            # Database-level uniqueness constraint prevents duplicates
+            # A concurrent request inserted first; the partial unique index
+            # rejected this one. Re-read the canonical row. If none exists the
+            # failure was something else (CHECK/FK) and must not be masked.
             self.db.rollback()
-            existing = self._find_experiment_evidence(user_id, experiment_id)
-            if existing:
-                return existing, "Evidence already recorded for this experiment (concurrent creation)"
-            # Shouldn't reach here if constraint is properly configured
-            raise
+            existing = self._find_evidence(user_id, experiment_id)
+            if existing is None:
+                raise
+            return existing, False, self.assess(user_id, experiment_id)
+        return evidence, True, self.assess(user_id, experiment_id)
 
-    def _get_experiment_or_raise(self, user_id: str, experiment_id: str) -> Experiment:
-        """Fetch experiment with authorization check."""
-        stmt = select(Experiment).where(
-            and_(
-                Experiment.id == experiment_id,
-                Experiment.user_id == user_id  # Authorization: user owns this experiment
-            )
-        )
-        experiment = self.db.execute(stmt).scalar_one_or_none()
-        if not experiment:
-            raise ValueError(f"Experiment not found or not owned by user: {experiment_id}")
+    # -- Internals ------------------------------------------------------------
+
+    def _owned(self, user_id: str, experiment_id: str) -> Experiment:
+        experiment = self.db.execute(
+            select(Experiment).where(Experiment.id == experiment_id, Experiment.user_id == user_id)
+        ).scalar_one_or_none()
+        if experiment is None:
+            raise NotFoundError("Experiment not found.")
         return experiment
 
-    def _check_evaluation_complete(
-        self,
-        experiment_id: str,
-        experiment_type: ExperimentType
-    ) -> Tuple[bool, str]:
-        """
-        Check if ALL required MA6 evaluations are complete for this experiment.
-
-        Trace: Experiment → ExperimentTaskRun → TaskRun → AgentRun → EvaluationRun
-
-        Returns: (complete: bool, reason: str)
-
-        Rules:
-        - Every AgentRun produced by the experiment must have a COMPLETED EvaluationRun
-        - Pending/Running/Failed evaluations cause rejection
-        - Unrelated evaluations are ignored (must join through experiment)
-        """
-        # Step 1: Get all AgentRuns for this experiment via the proper chain
-        stmt = select(AgentRun).join(
-            TaskRun,
-            TaskRun.id == AgentRun.task_run_id
-        ).where(
-            TaskRun.experiment_id == experiment_id
-        )
-        agent_runs = list(self.db.execute(stmt).scalars())
-
-        if not agent_runs:
-            return False, "No agent runs found for this experiment"
-
-        # Step 2: For each AgentRun, verify it has a COMPLETED EvaluationRun
-        for agent_run in agent_runs:
-            eval_stmt = select(EvaluationRun).where(
-                and_(
-                    EvaluationRun.subject_agent_run_id == agent_run.id,
-                    EvaluationRun.status == EvaluationRunStatus.COMPLETED
-                )
-            ).limit(1)
-
-            evaluation = self.db.execute(eval_stmt).scalar_one_or_none()
-            if not evaluation:
-                return False, f"Agent run {agent_run.id} has no completed evaluation"
-
-        return True, ""
-
-    def _derive_passed_from_evaluation(self, experiment_id: str) -> Tuple[bool, str]:
-        """
-        Derive the passed value from canonical MA6 evaluation evidence.
-
-        CRITICAL: Do NOT synthesize. Do NOT copy criteria counts. Do NOT guess.
-
-        A passing hands-on (LAB) result means:
-        - All evaluation criteria that apply found MET or NOT_APPLICABLE
-        - At least some criteria produced findings (not all NOT_APPLICABLE)
-        - No NOT_MET or PARTIAL findings exist
-
-        Returns: (passed: bool, reason: str)
-        """
-        # Get all evaluations for this experiment's agent runs
-        stmt = select(EvaluationRun).join(
-            AgentRun,
-            AgentRun.id == EvaluationRun.subject_agent_run_id
-        ).join(
-            TaskRun,
-            TaskRun.id == AgentRun.task_run_id
-        ).where(
-            TaskRun.experiment_id == experiment_id
-        )
-        evaluations = list(self.db.execute(stmt).scalars())
-
-        if not evaluations:
-            return False, "No evaluations found"
-
-        # Check all evaluations for failed criteria
-        all_passed = True
-        has_findings = False
-
-        for evaluation in evaluations:
-            for criterion_result in evaluation.criterion_results:
-                # NOT_APPLICABLE doesn't count against passing
-                if criterion_result.finding == EvaluationFinding.NOT_APPLICABLE:
-                    continue
-
-                has_findings = True
-
-                # Any NOT_MET or PARTIAL means not passed
-                if criterion_result.finding in (EvaluationFinding.NOT_MET, EvaluationFinding.PARTIAL):
-                    all_passed = False
-                    return False, f"Criterion {criterion_result.criterion_key} not met: {criterion_result.rationale}"
-
-        if not has_findings:
-            return False, "All evaluation criteria were not applicable (no actual evaluation)"
-
-        if all_passed and has_findings:
-            return True, ""
-
-        return False, "Evaluation did not establish a passing result"
-
-    def _find_experiment_evidence(self, user_id: str, experiment_id: str) -> Optional[LearningEvidence]:
-        """
-        Check if evidence already exists for this experiment (idempotency).
-
-        Database unique constraint enforces exactly-once at constraint level.
-        This query is for application-level verification.
-        """
-        stmt = select(LearningEvidence).where(
-            and_(
+    def _find_evidence(self, user_id: str, experiment_id: str) -> Optional[LearningEvidence]:
+        return self.db.execute(
+            select(LearningEvidence).where(
                 LearningEvidence.user_id == user_id,
                 LearningEvidence.ref_type == EvidenceRefType.EXPERIMENT,
-                LearningEvidence.ref_id == experiment_id
+                LearningEvidence.ref_id == experiment_id,
             )
-        ).limit(1)
+        ).scalars().first()
 
-        return self.db.execute(stmt).scalar_one_or_none()
+    def _latest_evaluations(self, runs: List[TaskRun], definition_id: str) -> Optional[List[EvaluationRun]]:
+        """Latest EvaluationRun on the configured definition version for each
+        COMPLETED slot's Agent Run (AIL.3B's rule). None if any is missing or
+        not COMPLETED."""
+        evaluations: List[EvaluationRun] = []
+        for task_run in runs:
+            if task_run.status != TaskRunStatus.COMPLETED:
+                continue
+            agent_run = self.db.execute(
+                select(AgentRun).where(AgentRun.task_run_id == task_run.id)
+            ).scalar_one_or_none()
+            if agent_run is None:
+                return None
+            evaluation = self.db.execute(
+                select(EvaluationRun)
+                .where(
+                    EvaluationRun.subject_agent_run_id == agent_run.id,
+                    EvaluationRun.evaluation_definition_version_id == definition_id,
+                )
+                .order_by(EvaluationRun.created_at.desc())
+            ).scalars().first()
+            if evaluation is None or evaluation.status != EvaluationRunStatus.COMPLETED:
+                return None
+            evaluations.append(evaluation)
+        return evaluations or None
+
+    def _findings(
+        self, evaluations: List[EvaluationRun], definition_id: str
+    ) -> Tuple[List[Tuple[str, EvaluationFinding]], bool]:
+        """All (criterion_key, finding) pairs, and whether every evaluation
+        covers every criterion of the configured definition version."""
+        expected = set(
+            self.db.execute(
+                select(EvaluationCriterion.key).where(
+                    EvaluationCriterion.evaluation_definition_version_id == definition_id
+                )
+            ).scalars()
+        )
+        findings: List[Tuple[str, EvaluationFinding]] = []
+        for evaluation in evaluations:
+            results = list(
+                self.db.execute(
+                    select(EvaluationCriterionResult).where(
+                        EvaluationCriterionResult.evaluation_run_id == evaluation.id
+                    )
+                ).scalars()
+            )
+            if not results or not expected.issubset({r.criterion_key for r in results}):
+                return [], False
+            findings.extend((r.criterion_key, r.finding) for r in results)
+        return findings, True
+
+    @staticmethod
+    def _result(status: str, experiment: Experiment, *, ready: bool = False, **extra) -> Dict:
+        return {
+            "status": status,
+            "ready": ready,
+            "message": _MESSAGES[status],
+            "experiment_id": experiment.id,
+            "concept_id": experiment.concept_id,
+            "concept_version_id": experiment.concept_version_id,
+            **extra,
+        }
+
+
+_FAILING = (EvaluationFinding.NOT_MET, EvaluationFinding.PARTIAL)

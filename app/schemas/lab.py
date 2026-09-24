@@ -5,6 +5,7 @@ from typing import List, Optional
 from pydantic import BaseModel, Field
 
 from app.db.enums import (
+    ConclusionType,
     CostEstimateKind,
     EvalSetVersionStatus,
     EvaluationMethod,
@@ -84,6 +85,8 @@ class ExperimentRead(BaseModel):
     eval_set_version_id: str
     development_id: Optional[str] = None
     concept_id: Optional[str] = None
+    concept_version_id: Optional[str] = None
+    conclusion: Optional[dict] = None
     learning_item_id: Optional[str] = None
     repetitions: int
     config_snapshot: dict
@@ -105,6 +108,21 @@ class ExperimentEvaluateRequest(BaseModel):
     evaluation_definition_version_id: str
     method: EvaluationMethod = EvaluationMethod.DETERMINISTIC
     evaluator_agent_version_id: Optional[str] = None
+
+    class Config:
+        extra = "forbid"
+
+
+class ExperimentConclusionWrite(BaseModel):
+    conclusion_type: ConclusionType
+    conclusion_text: Optional[str] = Field(default=None, max_length=4000)
+
+    class Config:
+        extra = "forbid"
+
+
+class ExperimentConceptBind(BaseModel):
+    concept_id: str = Field(min_length=1, max_length=36)
 
     class Config:
         extra = "forbid"
