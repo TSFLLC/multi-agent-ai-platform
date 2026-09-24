@@ -14,8 +14,14 @@ Execution/evaluation completeness is AIL.3B's own contract, reused from
 - for each slot's Agent Run the latest ``EvaluationRun`` on that exact
   definition version is authoritative.
 
-``passed`` is derived only from those MA6 ``EvaluationCriterionResult``
-findings. Nothing is copied into the evidence row and no score is invented.
+MET / PARTIAL / NOT_MET findings describe how the *candidates* performed and
+stay canonical MA6 evidence. They do not decide whether the learner completed
+a legitimate hands-on activity, so they never disqualify an experiment. What
+does: every required execution must carry a completed evaluation with at least
+one meaningful finding (anything other than NOT_APPLICABLE). ``passed=True``
+on the LAB evidence therefore means "qualifying hands-on activity", never
+"the candidates did well". Nothing is copied from MA6 into the evidence row
+and no score is invented.
 """
 
 from typing import Dict, List, Optional, Tuple
@@ -52,7 +58,7 @@ EVALUATION_NOT_CONFIGURED = "EVALUATION_NOT_CONFIGURED"
 EVALUATION_PENDING = "EVALUATION_PENDING"
 EVALUATION_FAILED = "EVALUATION_FAILED"
 EVALUATION_INCOMPLETE = "EVALUATION_INCOMPLETE"
-EVIDENCE_DID_NOT_PASS = "EVIDENCE_DID_NOT_PASS"
+NO_MEANINGFUL_EVALUATION = "NO_MEANINGFUL_EVALUATION"
 
 _MESSAGES = {
     READY: "Ready to count toward learning.",
@@ -64,7 +70,7 @@ _MESSAGES = {
     EVALUATION_PENDING: "Evaluation is still pending.",
     EVALUATION_FAILED: "Evaluation failed.",
     EVALUATION_INCOMPLETE: "Some required evaluations are incomplete.",
-    EVIDENCE_DID_NOT_PASS: "The experiment did not produce qualifying hands-on evidence.",
+    NO_MEANINGFUL_EVALUATION: "The evaluation produced no meaningful results to learn from.",
 }
 
 
@@ -108,12 +114,11 @@ class ExperimentLearningQualificationService:
         if evaluations is None:
             return self._result(EVALUATION_INCOMPLETE, experiment)
 
-        findings, covered = self._findings(evaluations, definition_id)
-        if not covered:
+        findings_per_evaluation = self._findings(evaluations, definition_id)
+        if findings_per_evaluation is None:
             return self._result(EVALUATION_INCOMPLETE, experiment)
-        failing = sorted({key for key, finding in findings if finding in _FAILING})
-        if failing or not any(finding == EvaluationFinding.MET for _, finding in findings):
-            return self._result(EVIDENCE_DID_NOT_PASS, experiment, not_passing_criteria=failing)
+        if any(not any(f in _MEANINGFUL for f in findings) for findings in findings_per_evaluation):
+            return self._result(NO_MEANINGFUL_EVALUATION, experiment)
         return self._result(READY, experiment, ready=True)
 
     def count_toward_learning(
@@ -198,9 +203,9 @@ class ExperimentLearningQualificationService:
 
     def _findings(
         self, evaluations: List[EvaluationRun], definition_id: str
-    ) -> Tuple[List[Tuple[str, EvaluationFinding]], bool]:
-        """All (criterion_key, finding) pairs, and whether every evaluation
-        covers every criterion of the configured definition version."""
+    ) -> Optional[List[List[EvaluationFinding]]]:
+        """Findings per evaluation, or None unless every evaluation covers
+        every criterion of the configured definition version."""
         expected = set(
             self.db.execute(
                 select(EvaluationCriterion.key).where(
@@ -208,7 +213,7 @@ class ExperimentLearningQualificationService:
                 )
             ).scalars()
         )
-        findings: List[Tuple[str, EvaluationFinding]] = []
+        per_evaluation: List[List[EvaluationFinding]] = []
         for evaluation in evaluations:
             results = list(
                 self.db.execute(
@@ -218,9 +223,9 @@ class ExperimentLearningQualificationService:
                 ).scalars()
             )
             if not results or not expected.issubset({r.criterion_key for r in results}):
-                return [], False
-            findings.extend((r.criterion_key, r.finding) for r in results)
-        return findings, True
+                return None
+            per_evaluation.append([r.finding for r in results])
+        return per_evaluation
 
     @staticmethod
     def _result(status: str, experiment: Experiment, *, ready: bool = False, **extra) -> Dict:
@@ -235,4 +240,4 @@ class ExperimentLearningQualificationService:
         }
 
 
-_FAILING = (EvaluationFinding.NOT_MET, EvaluationFinding.PARTIAL)
+_MEANINGFUL = (EvaluationFinding.MET, EvaluationFinding.PARTIAL, EvaluationFinding.NOT_MET)

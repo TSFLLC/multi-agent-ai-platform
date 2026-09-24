@@ -12,8 +12,8 @@ Every item below has an executable test in `tests/test_ail3c_learning_api.py` (3
   - the required executions are the `ExperimentTaskRun` slots whose Task Run COMPLETED;
   - evaluation must be configured (`evaluation_definition_version_id`);
   - the latest `EvaluationRun` on that definition version per slot Agent Run is authoritative, and its criterion results must cover every criterion of the definition version;
-  - status codes: `READY`, `ALREADY_COUNTED`, `MISSING_CONCEPT`, `CONCEPT_REBIND_REQUIRED`, `EXPERIMENT_INCOMPLETE`, `EVALUATION_NOT_CONFIGURED`, `EVALUATION_PENDING`, `EVALUATION_FAILED`, `EVALUATION_INCOMPLETE`, `EVIDENCE_DID_NOT_PASS`.
-- **Pass derivation** comes only from MA6 findings: no NOT_MET or PARTIAL anywhere, and at least one MET. `Experiment.status == COMPLETED` alone is never a pass, and no score is invented.
+  - status codes: `READY`, `ALREADY_COUNTED`, `MISSING_CONCEPT`, `CONCEPT_REBIND_REQUIRED`, `EXPERIMENT_INCOMPLETE`, `EVALUATION_NOT_CONFIGURED`, `EVALUATION_PENDING`, `EVALUATION_FAILED`, `EVALUATION_INCOMPLETE`, `NO_MEANINGFUL_EVALUATION`.
+- **Qualification rule.** MET / PARTIAL / NOT_MET findings describe how the candidates performed. They stay canonical MA6 evidence and never disqualify an experiment. What is required is that every completed execution has a COMPLETED evaluation on the configured definition version with at least one meaningful (non-NOT_APPLICABLE) finding. `passed=True` on the LAB evidence therefore means "qualifying hands-on activity", not "the candidates did well". `Experiment.status == COMPLETED` alone is never enough, and no score is invented.
 - **Count Toward Learning** (`POST .../count-toward-learning`) is an explicit, authenticated action that appends one LAB / DETERMINISTIC / `passed=True` / `ref_type=EXPERIMENT` evidence row against the frozen ConceptVersion. The response includes the learner state derived by `LearnerStateService`. It never sets PRACTICED or DEMONSTRATED directly.
 - **Exactly-once.** A partial UNIQUE index `uq_learning_evidence_experiment_ref` on `(user_id, ref_id) WHERE ref_type='experiment'` is declared on the model and created by the migration. On `IntegrityError` the service rolls back and re-reads the canonical row. A threaded race, a forced lost-race path, and a raw duplicate insert are all tested.
 - **Human conclusion** (`PUT .../conclusion`). The types are `no_meaningful_difference`, `tradeoff`, `inconclusive`, `more_testing_needed` and `custom`; there is no winner value. It is allowed only once results exist (AIL.3B overall status COMPLETED, PARTIAL, FAILED or EVALUATION_FAILED). It touches only the three conclusion columns and is exposed on the experiment read contract. Conclusion validation is enforced in the schema and service; there is no DB CHECK on `conclusion_type`.
@@ -25,10 +25,6 @@ Every item below has an executable test in `tests/test_ail3c_learning_api.py` (3
   - it creates the partial unique index;
   - the downgrade refuses while experiment-backed evidence exists.
   Tested on disposable databases: populated upgrade, downgrade, re-upgrade, `PRAGMA integrity_check`, `PRAGMA foreign_key_check`, and a single head.
-
-## Known product limitation
-
-The pass rule requires no NOT_MET or PARTIAL finding across all evaluated candidates. A model face-off where one model fails a criterion therefore does not qualify as passing LAB evidence. This is kept as specified and needs a product decision before UAT.
 
 ## Deferred
 

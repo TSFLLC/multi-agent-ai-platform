@@ -41,9 +41,9 @@ from app.services.experiment_learning_qualification_service import (
     EVALUATION_INCOMPLETE,
     EVALUATION_NOT_CONFIGURED,
     EVALUATION_PENDING,
-    EVIDENCE_DID_NOT_PASS,
     EXPERIMENT_INCOMPLETE,
     MISSING_CONCEPT,
+    NO_MEANINGFUL_EVALUATION,
     READY,
     ExperimentLearningQualificationService,
 )
@@ -335,26 +335,47 @@ def test_evaluation_on_a_different_definition_version_does_not_count(db, bootstr
     assert _assess(db, bootstrap.user.id, experiment)["ready"] is False
 
 
-@pytest.mark.parametrize("finding", [NOT_MET, PARTIAL])
-def test_failed_findings_prevent_passing_evidence(client, auth_headers, db, bootstrap, finding):  # G
-    experiment, *_ = _finished(db, bootstrap, findings=finding)
-    assessment = _assess(db, bootstrap.user.id, experiment)
-    assert assessment["status"] == EVIDENCE_DID_NOT_PASS and assessment["not_passing_criteria"] == ["correctness"]
+# Findings describe candidate performance; they never decide whether the
+# learner completed a legitimate hands-on activity. Slots alternate model-1 /
+# model-2, so [x, y] * 6 gives each candidate its own finding on every task.
+@pytest.mark.parametrize(
+    "findings",
+    [
+        pytest.param(MET, id="both-candidates-perform-well"),
+        pytest.param([MET, NOT_MET] * 6, id="one-candidate-not-met"),
+        pytest.param([PARTIAL, MET] * 6, id="one-candidate-partial"),
+        pytest.param([NOT_MET, PARTIAL] * 6, id="both-candidates-perform-poorly"),
+        pytest.param(NOT_MET, id="all-not-met"),
+    ],
+)
+def test_completed_fully_evaluated_experiment_qualifies_whatever_the_candidates_scored(
+    client, auth_headers, db, bootstrap, findings
+):
+    experiment, _, concept, version = _finished(db, bootstrap, findings=findings)
+    assert _assess(db, bootstrap.user.id, experiment)["status"] == READY
+
+    def ma6():
+        return db.execute(text("SELECT id, finding, rationale FROM evaluation_criterion_results ORDER BY id")).fetchall()
+
+    before = ma6()
     response = client.post(f"/lab/experiments/{experiment.id}/count-toward-learning", headers=auth_headers)
-    assert response.status_code == 409
-    assert not _evidence_rows(db, experiment.id)
+    assert response.status_code == 200 and response.json()["created"] is True
+    row = _evidence_rows(db, experiment.id)[0]
+    assert (row.evidence_type, row.concept_version_id, row.score) == (EvidenceType.LAB, version.id, None)
+    assert ma6() == before  # canonical MA6 findings stay exactly as evaluated
+    assert LearnerStateService(db).state(bootstrap.user.id, concept.id).ladder == PRACTICED
 
 
-def test_one_failing_candidate_evaluation_prevents_passing_evidence(db, bootstrap):
-    experiment, *_ = _finished(db, bootstrap, findings=[MET] * 11 + [NOT_MET])
-    assert _assess(db, bootstrap.user.id, experiment)["status"] == EVIDENCE_DID_NOT_PASS
-
-
-def test_all_not_applicable_does_not_create_passing_evidence(db, bootstrap):  # H
+def test_all_not_applicable_is_not_meaningful_evidence(db, bootstrap):
     experiment, *_ = _finished(db, bootstrap, findings=NOT_APPLICABLE)
-    assert _assess(db, bootstrap.user.id, experiment)["status"] == EVIDENCE_DID_NOT_PASS
+    assert _assess(db, bootstrap.user.id, experiment)["status"] == NO_MEANINGFUL_EVALUATION
     _, created, _ = ExperimentLearningQualificationService(db).count_toward_learning(bootstrap.user.id, experiment.id)
     assert not created and not _evidence_rows(db, experiment.id)
+
+
+def test_one_execution_with_no_meaningful_findings_blocks_qualification(db, bootstrap):
+    experiment, *_ = _finished(db, bootstrap, findings=[MET] * 11 + [NOT_APPLICABLE])
+    assert _assess(db, bootstrap.user.id, experiment)["status"] == NO_MEANINGFUL_EVALUATION
 
 
 def test_experiment_status_completed_alone_is_not_a_pass(db, bootstrap):
