@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_db
 from app.auth import get_current_user
+from app.authz import require_platform_admin
 from app.db.enums import AcademyEnrollmentStatus, ConceptRelationType
 from app.models.academy import AcademyEnrollment, AcademyProgram, AcademyProgramItem, AcademyProgramVersion
 from app.models.identity import User
@@ -27,6 +28,7 @@ from app.schemas.academy import (
 )
 from app.services.academy_service import AcademyProgress, AcademyService
 from app.services.learner_state_service import LearnerStateService
+from app.services.practical_ai_foundations_provisioning import provision_practical_ai_foundations
 
 router = APIRouter(prefix="/academy", tags=["academy"])
 
@@ -138,6 +140,15 @@ def create_program(body: AcademyProgramCreate, db: Session = Depends(get_db), us
 def seed_foundations(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     version = AcademyService(db).seed_foundations_program(user)
     return _version_read(version, db=db)
+
+
+@router.post("/concept-graph/seed-practical-ai-foundations")
+def seed_practical_ai_foundations_concept_graph(
+    db: Session = Depends(get_db),
+    _admin: User = Depends(require_platform_admin),
+):
+    """Owner/admin-only additive seed for the approved authored graph."""
+    return provision_practical_ai_foundations(db).as_dict()
 
 
 @router.get("/programs/{program_id}", response_model=AcademyProgramRead)

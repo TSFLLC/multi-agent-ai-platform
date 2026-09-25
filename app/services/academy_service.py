@@ -308,7 +308,14 @@ class AcademyService:
 
     def _validate_items(self, version, items):
         concept_ids = {i.concept_id for i in items if i.concept_id}
-        positions = {i.concept_id: (i.day, i.position) for i in items if i.concept_id}
+        # A frozen curriculum may intentionally revisit a concept later.  A
+        # prerequisite is satisfied by the earliest occurrence, not replaced
+        # by the later review occurrence.
+        positions = {}
+        for item in items:
+            if item.concept_id:
+                position = (item.day, item.position)
+                positions[item.concept_id] = min(positions.get(item.concept_id, position), position)
         for item in items:
             if item.concept_id:
                 current = self.db.get(Concept, item.concept_id)
