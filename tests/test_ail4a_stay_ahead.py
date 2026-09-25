@@ -1112,9 +1112,9 @@ def test_no_schema_change_and_no_later_slice_tables():
     from alembic.script import ScriptDirectory
 
     script = ScriptDirectory.from_config(Config("alembic.ini"))
-    # AIL.4A added no tables. AIL.4B remains directly above AIL.3C, while
-    # AIL.4C's authorized role migration is the current linear head.
-    assert script.get_heads() == ["ail4c_professor_agent_role"]
+    # AIL.4A added no tables. The Academy Foundation migration is now the
+    # current linear head above the AIL.4C role migration.
+    assert script.get_heads() == ["ail5a_academy_foundation"]
     assert script.get_revision("ail4b_review_attempts").down_revision == "ail3c_experiment_conclusion"
     tables = set(Base.metadata.tables)
     assert not tables & {"interest_rules", "opportunities", "stay_ahead_signals", "signal_dismissals"}

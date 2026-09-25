@@ -5,6 +5,7 @@ autogeneration always sees the complete schema.
 """
 
 from app.models import (
+    academy,
     agents,
     artifacts_eval,
     concepts,
@@ -26,6 +27,7 @@ from app.models import (
 )
 
 __all__ = [
+    "academy",
     "agents",
     "artifacts_eval",
     "concepts",

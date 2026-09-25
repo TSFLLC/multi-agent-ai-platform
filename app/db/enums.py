@@ -623,6 +623,31 @@ class PlanItemOrigin(str, enum.Enum):
     PLANNER = "planner"
     USER = "user"
     PROFESSOR = "professor"
+    PROGRAM = "program"
+
+
+class AcademyProgramItemKind(str, enum.Enum):
+    CONCEPT = "concept"
+    LEARNING_ITEM = "learning_item"
+    CHECKPOINT = "checkpoint"
+
+
+class AcademyProgramVersionStatus(str, enum.Enum):
+    DRAFT = "draft"
+    PUBLISHED = "published"
+    RETIRED = "retired"
+
+
+class AcademyEnrollmentStatus(str, enum.Enum):
+    ACTIVE = "active"
+    PAUSED = "paused"
+    COMPLETED = "completed"
+    WITHDRAWN = "withdrawn"
+
+
+class AcademyPace(str, enum.Enum):
+    SCHEDULED = "scheduled"
+    SELF_PACED = "self_paced"
 
 # --- Provider model snapshot provenance (AIL.1B addition) --------------------
 

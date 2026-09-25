@@ -17,6 +17,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api.routers import (
+    academy,
     agents,
     approvals,
     comparisons,
@@ -174,6 +175,7 @@ app = FastAPI(
 register_exception_handlers(app)
 
 for router in (
+    academy.router,
     projects.router,
     agents.router,
     models.router,
