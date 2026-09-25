@@ -110,8 +110,9 @@ def _ids(ctx: CheckContext, field_name: str) -> List[str]:
 
 
 def check_choice_match(ctx: CheckContext, spec: dict) -> CheckOutcome:
-    items = ctx.challenge.get("items") or []
     keys = (ctx.challenge.get("server_only") or {}).get("answer_keys") or {}
+    # only the drawn questions carry an answer key (a fixed explain-back prompt does not)
+    items = [i for i in ctx.challenge.get("items") or [] if i["entry_key"] in keys]
     if not items:
         raise CheckUnavailable("no drawn question items were issued")
     correct = 0

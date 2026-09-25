@@ -310,22 +310,29 @@ class AssessmentService:
         }
 
     def _cooldown_ends(self, user_id: str, definition_key: str, hours: int) -> Optional[datetime]:
-        last = self.db.execute(
-            select(AssessmentAttempt, AssessmentResult)
-            .join(AssessmentResult, AssessmentResult.attempt_id == AssessmentAttempt.id)
-            .join(AssessmentDefinition, AssessmentDefinition.id == AssessmentAttempt.definition_id)
-            .where(
-                AssessmentAttempt.user_id == user_id,
-                AssessmentDefinition.definition_key == definition_key,
-                AssessmentResult.result_kind == AssessmentResultKind.FINAL,
-                AssessmentResult.supersedes_result_id.is_(None),
-                AssessmentResult.outcome != AssessmentOutcome.PASSED,
+        """The retry cooldown follows a NEEDS_WORK outcome only. A provisional,
+        review-pending or could-not-assess result is not the learner's doing, and a
+        human override to PASSED (the effective result) lifts it entirely."""
+        last = (
+            self.db.execute(
+                select(AssessmentAttempt)
+                .join(AssessmentDefinition, AssessmentDefinition.id == AssessmentAttempt.definition_id)
+                .where(
+                    AssessmentAttempt.user_id == user_id,
+                    AssessmentDefinition.definition_key == definition_key,
+                    AssessmentAttempt.status == AssessmentAttemptStatus.FINALIZED,
+                )
+                .order_by(AssessmentAttempt.finalized_at.desc())
             )
-            .order_by(AssessmentAttempt.finalized_at.desc())
-        ).first()
-        if last is None or last[0].finalized_at is None:
+            .scalars()
+            .first()
+        )
+        if last is None or last.finalized_at is None:
             return None
-        return aware(last[0].finalized_at) + timedelta(hours=hours)
+        effective = self.effective_result(last.id)
+        if effective is None or effective.outcome != AssessmentOutcome.NEEDS_WORK:
+            return None
+        return aware(last.finalized_at) + timedelta(hours=hours)
 
     # -- source work / manifest ------------------------------------------------------------------------------
 
@@ -704,6 +711,8 @@ class AssessmentService:
         self, user: User, attempt_id: str, attestation: Any, *, budget_id: Optional[str] = None
     ) -> AssessmentAttempt:
         attempt = self.get_attempt(user.id, attempt_id)
+        if attempt.status == AssessmentAttemptStatus.ABANDONED and attempt.submitted_at is None:
+            raise ConflictError("You left this assessment. Start a new attempt when you are ready.")
         if attempt.status != AssessmentAttemptStatus.DRAFT:
             return self._resume_processing(user, attempt, budget_id=budget_id)  # idempotent replay
         AssessmentModeGuard(self.db, now=self._clock()).expire_stale(user.id)

@@ -192,6 +192,21 @@ test("Workspace shows the Assessment Mode banner, the fresh challenge, the expla
   assert.match(r.textContent, /About .*left\. The clock is server-side only/);
 });
 
+test("A capstone workspace shows the capstone checklist with the fixed brief and the platform share", async () => {
+  const capstone = ATTEMPT({ definition: { ...DEF, kind: "capstone", criteria: [
+    { key: "a", label: "Milestones", decided_by: "the platform", required: true }, { key: "b", label: "Design choices", decided_by: "the Academy Grader", required: true },
+  ] } });
+  reset({ "GET /academy/assessments/attempts/att-1/result": { status: "draft", attempt: capstone } });
+  const r = root();
+  await renderAssessmentAttempt(r, { id: "att-1" });
+  const panel = byClass(r, "capstone-checklist")[0];
+  assert.match(panel.textContent, /Capstone checklist/);
+  assert.match(panel.textContent, /1 of 2 parts \(50%\) are checked by the platform/);
+  assert.match(panel.textContent, /fixed when you accepted it/);
+  assert.match(panel.textContent, /Checked by the platform/);
+  assert.match(panel.textContent, /Judged by the Grader/);
+});
+
 test("Submitting needs a declaration; then it saves the draft, submits and shows the result", async () => {
   const finalView = { status: "finalized", attempt: ATTEMPT({ status: "finalized", mentor_locked: false }), history: [], reviews: [],
     result: { id: "res-1", outcome: "passed", demonstration_effect: "counts_toward_demonstrated", has_record: true, gaps: [], remediation: [],

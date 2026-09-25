@@ -5,7 +5,7 @@
 import { api } from "../api.js";
 import { clear, el } from "../dom.js";
 import {
-  DECLARATIONS, REVIEW_SEES, assessmentModeBanner, attemptStatusText, buildDraft, centerModel, confidenceLabel, costLabel,
+  DECLARATIONS, REVIEW_SEES, assessmentModeBanner, capstoneChecklist, attemptStatusText, buildDraft, centerModel, confidenceLabel, costLabel,
   declarationNote, decisionLabel, effectLabel, emptyCenterText, findingLabel, helpLabel, kindLabel, outcomeInfo, readinessModel,
   recordFileName, recordModel, remediationLink, resultModel, reviewPayload, sourceWorkText, timeLeftText, validateSubmit,
 } from "../assessments.js";
@@ -220,6 +220,19 @@ export async function renderAssessmentWorkspace(root, attempt) {
     el("ul", {}, def.criteria.map((c) => el("li", {}, [el("strong", {}, c.label), ` — decided by ${c.decided_by}${c.required ? "" : " (optional)"}`]))),
     attempt.fresh_required ? el("p", { class: "callout" }, "This is a fresh challenge: it shows what you can do independently.") : null,
   ]));
+  const capstone = capstoneChecklist(def);
+  if (capstone) {
+    root.appendChild(el("section", { class: "card capstone-checklist" }, [
+      el("h2", {}, "Capstone checklist"),
+      el("p", {}, capstone.intro),
+      el("p", { class: "hint" }, capstone.frozen),
+      el("h3", {}, "Checked by the platform"),
+      el("ul", {}, capstone.platform.map((c) => el("li", {}, c.label))),
+      el("h3", {}, "Judged by the Grader"),
+      el("ul", {}, capstone.judged.map((c) => el("li", {}, `${c.label}${c.required ? "" : " (optional)"}`))),
+      capstone.gated ? el("p", { class: "hint" }, capstone.gated) : null,
+    ]));
+  }
   const challenge = challengeBlock(attempt.challenge, state, onChange);
   if (challenge) root.appendChild(challenge);
   if ((def.response_fields || []).length) {
@@ -357,6 +370,14 @@ export async function renderAssessmentResult(root, attemptId, view) {
   clear(root);
   const title = view.attempt.definition.title;
   root.appendChild(header(title, `${kindLabel(view.attempt.definition.kind)} · ${attemptStatusText(view.attempt)}`));
+  if (!model.finalized && view.status === "abandoned") {
+    root.appendChild(el("section", { class: "card" }, [
+      el("h2", {}, "You left this assessment"),
+      el("p", {}, "Nothing was submitted and nothing changed. Your Mentor and Professor are available again."),
+      el("a", { class: "button", href: `#/academy/assessments/definitions/${enc(view.attempt.definition.definition_key)}` }, "Start again"),
+    ]));
+    return;
+  }
   if (!model.finalized) {
     const box = el("section", { class: "card" }, [el("h2", {}, "Your attempt is saved"), el("p", {}, model.pending ? model.pending.message : "Your attempt is being checked.")]);
     if (model.pending) box.appendChild(el("ul", {}, model.pending.deterministic_checks.map((c) => el("li", {}, `${findingLabel(c.finding)} — ${c.label}`))));

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  CENTER_SECTIONS, assessmentModeBanner, attemptStatusText, buildDraft, centerModel, confidenceLabel, costLabel, declarationNote,
+  CENTER_SECTIONS, capstoneChecklist, assessmentModeBanner, attemptStatusText, buildDraft, centerModel, confidenceLabel, costLabel, declarationNote,
   effectLabel, emptyCenterText, freshReasonText, helpLabel, isTruthfulText, kindLabel, outcomeInfo, readinessModel,
   recordFileName, recordModel, recordStatusText, remediationLink, resultModel, reviewModel, reviewPayload, splitIds,
   timeLeftText, validateSubmit,
@@ -202,4 +202,36 @@ test("Demonstration Record model states what was verified vs self-reported and i
   assert.equal(recordFileName(payload, "md"), "demonstration-record-kc-x-abcdef12.md");
   assert.equal(recordStatusText("superseded_by_review"), "Replaced by a later review decision (history is kept)");
   for (const text of [model.title, model.notice, model.status, ...model.verified, ...model.selfReported]) assert.ok(isTruthfulText(text));
+});
+
+test("the capstone checklist separates platform checks from judged parts and states the 70% rule", () => {
+  const definition = { kind: "capstone", requires_platform_capability: null, criteria: [
+    { label: "Milestones", decided_by: "the platform", required: true },
+    { label: "Evaluation", decided_by: "the platform", required: true },
+    { label: "Write-up", decided_by: "the platform", required: true },
+    { label: "Fresh run", decided_by: "the platform", required: true },
+    { label: "Design choices", decided_by: "the Academy Grader", required: true },
+  ] };
+  const list = capstoneChecklist(definition);
+  assert.equal(list.platform.length, 4);
+  assert.equal(list.judged.length, 1);
+  assert.equal(list.share, 80);
+  assert.match(list.intro, /can never be the only thing that decides your capstone/);
+  assert.match(list.frozen, /never edits them/);
+  assert.equal(list.gated, "");
+  assert.match(capstoneChecklist({ ...definition, requires_platform_capability: "ma9.x" }).gated, /after MA9/);
+  assert.equal(capstoneChecklist({ kind: "knowledge_check", criteria: [] }), null);
+  assert.equal(capstoneChecklist(null), null);
+});
+
+test("the shipped assessment UI has no surveillance or copy-detection hooks", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const files = ["../assets/js/assessments.js", "../assets/js/pages/assessments.js"];
+  const banned = /visibilitychange|\bblur\b|onblur|clipboard|\bpaste\b|onpaste|\bcopy\b|oncopy|keydown|keyup|keypress|getUserMedia|MediaDevices|getDisplayMedia|webcam|screen ?capture|mousemove|IntersectionObserver|similarity|plagiar|proctor/i;
+  for (const file of files) {
+    const source = await readFile(new URL(file, import.meta.url), "utf8");
+    // ignore prose that states the prohibition
+    const code = source.split("\n").filter((line) => !/no camera|no copy detection|not monitored|clipboard tracking|clipboard monitoring/i.test(line)).join("\n");
+    assert.doesNotMatch(code, banned, file);
+  }
 });

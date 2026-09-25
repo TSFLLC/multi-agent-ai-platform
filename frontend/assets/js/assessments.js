@@ -118,6 +118,22 @@ export function sourceWorkText(levels) {
   return levels && levels.length ? `Your project work: ${levels.map(helpLabel).join(", ")}.` : "";
 }
 
+/** The capstone checklist: what the platform checks vs. what the Grader judges. Pure. */
+export function capstoneChecklist(definition) {
+  if (!definition || definition.kind !== "capstone") return null;
+  const platform = definition.criteria.filter((c) => c.decided_by === "the platform");
+  const judged = definition.criteria.filter((c) => c.decided_by !== "the platform");
+  const share = definition.criteria.length ? Math.round((100 * platform.length) / definition.criteria.length) : 0;
+  return {
+    platform,
+    judged,
+    share,
+    intro: `${platform.length} of ${definition.criteria.length} parts (${share}%) are checked by the platform from your real results. AI judgment can never be the only thing that decides your capstone.`,
+    frozen: "Your project brief and its criteria were fixed when you accepted it. This assessment never edits them.",
+    gated: definition.requires_platform_capability ? "Some parts are available after MA9." : "",
+  };
+}
+
 // -- draft building ------------------------------------------------------------------------------------------------
 
 const setPath = (target, path, value) => {
