@@ -89,7 +89,8 @@ def explain_definition(db, author, concept, *, key="eb-structured-output", cross
          "reference_points": ["Structured output constrains the model to a schema"], "facts": ["long_enough"],
          "on_not_met": [{"kind": "learning_item", "ref": "structured-output-lesson", "label": "Revisit the lesson"}]},
         {"key": "limits", "label": "You state a limit", "method": "grader", "required": True,
-         "reference_points": ["A schema does not guarantee the content is true"]},
+         "reference_points": ["A schema does not guarantee the content is true"],
+         "on_not_met": [{"kind": "learning_item", "ref": "structured-output-limits", "label": "Re-read the limits section"}]},
     ]
     prompts = [{"entry_key": f"p{i}", "prompt_md": f"Explain structured output ({i}).", "reference_points": [f"point {i}"]} for i in range(3)]
     defn = AssessmentDefinitionService(db).create_draft(
