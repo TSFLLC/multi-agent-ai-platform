@@ -112,17 +112,22 @@ def test_the_grader_service_never_writes_evidence_or_state():
     assert not called & {"record_evidence", "supersede"}
 
 
-def test_supersede_is_only_used_by_the_assessment_review_service():
-    users = []
+def test_the_evidence_service_write_surface_is_unchanged_and_only_the_review_service_sets_supersession():
+    from app.services.learning_evidence_service import LearningEvidenceService
+
+    assert {n for n in vars(LearningEvidenceService) if not n.startswith("_")} == {
+        "record_evidence",
+        "list_evidence",
+    }
+    setters = set()
     for path in APP.rglob("*.py"):
         for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-            if (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Attribute)
-                and node.func.attr == "supersede"
-            ):
-                users.append(path.name)
-    assert set(users) == {"assessment_review_service.py"}
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Attribute) and target.attr == "superseded_by_id":
+                        setters.add(path.name)
+    # Radar has its own, unrelated claims.superseded_by_id
+    assert setters - {"radar_intelligence_service.py"} == {"assessment_review_service.py"}
 
 
 def test_only_the_grader_service_creates_grader_runs():

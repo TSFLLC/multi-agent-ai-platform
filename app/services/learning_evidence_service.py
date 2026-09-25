@@ -2,8 +2,7 @@
 
 Append-only by construction: this module exposes exactly one row-creating
 method, ``record_evidence``, and it always ``INSERT``s a new row — there
-is no ``update``/``delete`` method here at all. The only other write is
-``supersede`` (AIL.5C), which sets a single pointer and edits nothing else. The only way any
+is no ``update``/``delete`` method here at all. The only way any
 ``learning_evidence`` row is ever removed is
 ``app.services.learner_profile_service.LearnerProfileService.
 delete_learner_data`` (the full-user-deletion path, spec Sec 30).
@@ -81,29 +80,6 @@ class LearningEvidenceService:
         else:
             self.db.flush()
         return evidence
-
-    def supersede(self, old_id: str, new_id: str, *, commit: bool = True) -> LearningEvidence:
-        """AIL.5C: the ONE narrowly scoped pointer setter for the documented
-        dispute convention ("append a new row and point the old row at it",
-        docs/ail-learning-spec-v1.md Sec 18.4). It only ever sets
-        ``superseded_by_id``, never edits any other field, refuses to
-        re-point an already superseded row, and requires the same learner and
-        Concept on both rows. Only the assessment review service calls it
-        (an AST test enforces that)."""
-        old = self.db.get(LearningEvidence, old_id)
-        new = self.db.get(LearningEvidence, new_id)
-        if old is None or new is None:
-            raise ValueError("Both evidence rows must exist.")
-        if old.user_id != new.user_id or old.concept_id != new.concept_id or old.id == new.id:
-            raise ValueError("A row can only be superseded by another row of the same learner and Concept.")
-        if old.superseded_by_id is not None:
-            raise ValueError("This evidence row has already been superseded.")
-        old.superseded_by_id = new.id
-        if commit:
-            self.db.commit()
-        else:
-            self.db.flush()
-        return old
 
     def list_evidence(self, user_id: str, *, concept_id: Optional[str] = None) -> List[LearningEvidence]:
         stmt = select(LearningEvidence).where(LearningEvidence.user_id == user_id)

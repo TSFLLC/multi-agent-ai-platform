@@ -574,8 +574,21 @@ class AssessmentReviewService:
         for old in old_rows:
             replacement = next((e for e in evidence if e.concept_id == old.concept_id), None)
             if replacement is not None and decision == AssessmentReviewDecision.OVERRIDE_NEEDS_WORK:
-                LearningEvidenceService(self.db).supersede(old.id, replacement.id, commit=False)
+                self._supersede(old, replacement)
         return human
+
+    @staticmethod
+    def _supersede(old: LearningEvidence, new: LearningEvidence) -> None:
+        """The documented dispute convention (docs/ail-learning-spec-v1.md Sec 18.4): append a
+        new row and point the old row at it. This sets ONE pointer and edits nothing else; it
+        refuses to re-point a superseded row or to cross learners / Concepts. Only the review
+        service does this (an AST test enforces it); the evidence service's own write surface
+        is unchanged."""
+        if old.user_id != new.user_id or old.concept_id != new.concept_id or old.id == new.id:
+            raise ValueError("A row can only be superseded by another row of the same learner and Concept.")
+        if old.superseded_by_id is not None:
+            raise ValueError("This evidence row has already been superseded.")
+        old.superseded_by_id = new.id
 
     def _evidence_for(self, result_id: str, user_id: str) -> List[LearningEvidence]:
         return list(

@@ -188,12 +188,12 @@ class ProfessorExecutionService:
             user.id, concept_ids=concept_ids, untargeted=target is None
         )
 
-    def create_and_execute(
-        self, user: User, request: ProfessorContextRequest, *, mentor_lock_checked: bool = False
-    ) -> ProfessorInteractionRead:
-        # ``mentor_lock_checked`` is set only by ProjectMentorService, which has
-        # already applied the project-scoped Assessment Mode lock.
-        if not mentor_lock_checked:
+    # Set only by ProjectMentorService, which has already applied the project-scoped
+    # Assessment Mode lock (an instance flag keeps create_and_execute's signature unchanged).
+    mentor_lock_checked = False
+
+    def create_and_execute(self, user: User, request: ProfessorContextRequest) -> ProfessorInteractionRead:
+        if not self.mentor_lock_checked:
             self._assert_not_in_assessment_mode(user, request)
         project = ensure_ail_system_project(self.db, user)
         context = ProfessorContextAssembler(self.db).assemble(user.id, request)

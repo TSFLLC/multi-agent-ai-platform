@@ -91,6 +91,8 @@ def test_all_six_experiences_use_one_fixed_intent_contract():
         "UNDERSTAND_MY_EXPERIMENT",
         "HELP_ME_REVIEW",
         "WHY_DOES_THIS_MATTER",
+        # AIL.5C (design-frozen extension): read-only coaching AFTER an assessment.
+        "HELP_ME_AFTER_ASSESSMENT",
     ]
 
 

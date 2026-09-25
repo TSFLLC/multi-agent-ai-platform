@@ -43,7 +43,9 @@ class ProjectMentorService:
             concept_id = item.concept_id if item else None
         prompt = f"Project Mentor mode. Authorized maximum assistance: {requested_level.value}. Do not complete the learner's work. Milestone: {milestone.title}. Instructions: {milestone.instructions_md}\nLearner question: {question}"
         request = ProfessorContextRequest(intent=ProfessorIntent.ASK_PROFESSOR, question=prompt, target=ProfessorTarget(type=ProfessorTargetType.CONCEPT, id=concept_id) if concept_id else None)
-        result = ProfessorExecutionService(self.db).create_and_execute(user, request, mentor_lock_checked=True)
+        professor = ProfessorExecutionService(self.db)
+        professor.mentor_lock_checked = True
+        result = professor.create_and_execute(user, request)
         if result.status in {"complete", "completed"}:
             milestone_attempt.max_assistance_level = max(milestone_attempt.max_assistance_level or AssistanceLevel.H0, requested_level)
             self.db.commit()
