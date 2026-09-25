@@ -43,7 +43,9 @@ class LegacyLearnerStateService(LearnerStateService):
         overlays = set(result.overlays) - {CHANGED}
         legacy_demonstrated = version is not None and self._legacy_demonstrated(graded, version)
         # Recompute only the rungs the correction can change.
-        practiced = any(e.evidence_type in (EvidenceType.OBSERVATION, EvidenceType.LAB) and e.passed for e in graded)
+        practiced = any(
+            e.evidence_type in (EvidenceType.OBSERVATION, EvidenceType.LAB) and e.passed for e in graded
+        )
         if legacy_demonstrated:
             ladder = DEMONSTRATED
         elif ladder == DEMONSTRATED:
@@ -105,9 +107,7 @@ class LegacyLearnerStateService(LearnerStateService):
 
 
 def diff(session: Session):
-    pairs = sorted(
-        set(session.execute(select(LearningEvidence.user_id, LearningEvidence.concept_id)).all())
-    )
+    pairs = sorted(set(session.execute(select(LearningEvidence.user_id, LearningEvidence.concept_id)).all()))
     legacy, corrected = LegacyLearnerStateService(session), LearnerStateService(session)
     for user_id, concept_id in pairs:
         old, new = legacy.state(user_id, concept_id), corrected.state(user_id, concept_id)

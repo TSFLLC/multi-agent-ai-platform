@@ -19,7 +19,7 @@
 """
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -122,7 +122,10 @@ class AssessmentGraderService:
                     "required_capabilities": {"structured_output_support": True},
                     "excluded_capabilities": {"reasoning_tier": ["high"]},
                 },
-                context_policy={"source": "assessment_grading_packet", "max_context_chars": settings.grader_max_packet_chars},
+                context_policy={
+                    "source": "assessment_grading_packet",
+                    "max_context_chars": settings.grader_max_packet_chars,
+                },
                 budget_policy={"max_output_tokens": settings.grader_max_output_tokens},
                 status=VersionStatus.ACTIVE,
                 published_at=prompt.created_at,
@@ -131,12 +134,18 @@ class AssessmentGraderService:
             self.db.commit()
             return version
         if agent.project_id != project.id or agent.role != "grader":
-            raise ConflictError("The reserved Academy Grader agent is not attached to the AIL system project.")
-        version = self.db.execute(
-            select(AgentVersion)
-            .where(AgentVersion.agent_id == agent.id, AgentVersion.status == VersionStatus.ACTIVE)
-            .order_by(AgentVersion.version.desc())
-        ).scalars().first()
+            raise ConflictError(
+                "The reserved Academy Grader agent is not attached to the AIL system project."
+            )
+        version = (
+            self.db.execute(
+                select(AgentVersion)
+                .where(AgentVersion.agent_id == agent.id, AgentVersion.status == VersionStatus.ACTIVE)
+                .order_by(AgentVersion.version.desc())
+            )
+            .scalars()
+            .first()
+        )
         if version is None:
             raise ConflictError("Academy Grader has no active Agent Version.")
         return version
@@ -181,13 +190,22 @@ Rules:
 
         existing = self._existing_round_result(attempt.id, round_no)
         if existing is not None:
-            return GradeRound(GRADING_COMPLETE, judged=existing.criteria, run_ids=existing.grader_agent_run_ids or [], result=existing)
+            return GradeRound(
+                GRADING_COMPLETE,
+                judged=existing.criteria,
+                run_ids=existing.grader_agent_run_ids or [],
+                result=existing,
+            )
 
-        primary = self._slot(user, project, attempt, agent_version, packet, round_no, "primary", None, budget_id)
+        primary = self._slot(
+            user, project, attempt, agent_version, packet, round_no, "primary", None, budget_id
+        )
         if primary.status == "provider_failure" or primary.status == "pending":
             return GradeRound(GRADING_TRANSIENT_FAILURE, detail=primary.detail)
         if primary.status == "invalid":
-            return self._write_round(attempt, agent_version, round_no, GRADING_UNUSABLE, [primary], packet, detail=primary.detail)
+            return self._write_round(
+                attempt, agent_version, round_no, GRADING_UNUSABLE, [primary], packet, detail=primary.detail
+            )
 
         slots = [primary]
         status = GRADING_COMPLETE
@@ -195,9 +213,14 @@ Rules:
         if crosscheck_required:
             alt = self._alternate_policy(agent_version, primary.provider_model_id)
             if alt is None:
-                status, detail = GRADING_CROSSCHECK_UNAVAILABLE, "no different eligible model is available for a cross-check"
+                status, detail = (
+                    GRADING_CROSSCHECK_UNAVAILABLE,
+                    "no different eligible model is available for a cross-check",
+                )
             else:
-                cross = self._slot(user, project, attempt, agent_version, packet, round_no, "crosscheck", alt, budget_id)
+                cross = self._slot(
+                    user, project, attempt, agent_version, packet, round_no, "crosscheck", alt, budget_id
+                )
                 if cross.status in ("provider_failure", "pending"):
                     return GradeRound(GRADING_TRANSIENT_FAILURE, detail=cross.detail)
                 if cross.status == "invalid":
@@ -209,13 +232,17 @@ Rules:
     # -- persistence of a finished round ----------------------------------------------------
 
     def _existing_round_result(self, attempt_id: str, round_no: int) -> Optional[AssessmentResult]:
-        return self.db.execute(
-            select(AssessmentResult).where(
-                AssessmentResult.attempt_id == attempt_id,
-                AssessmentResult.result_kind == AssessmentResultKind.GRADER,
-                AssessmentResult.round == round_no,
+        return (
+            self.db.execute(
+                select(AssessmentResult).where(
+                    AssessmentResult.attempt_id == attempt_id,
+                    AssessmentResult.result_kind == AssessmentResultKind.GRADER,
+                    AssessmentResult.round == round_no,
+                )
             )
-        ).scalars().first()
+            .scalars()
+            .first()
+        )
 
     def _write_round(
         self,
@@ -230,11 +257,17 @@ Rules:
     ) -> GradeRound:
         merged: List[Dict[str, Any]] = []
         usable = [s for s in slots if s.status == "ok"]
-        definition_criteria = {c["key"]: c for c in self.db.get(AssessmentDefinition, attempt.definition_id).criteria}
+        definition_criteria = {
+            c["key"]: c for c in self.db.get(AssessmentDefinition, attempt.definition_id).criteria
+        }
         if usable:
             for key in packet.grader_keys:
                 runs = [
-                    {**next(c for c in s.criteria if c.key == key).to_json(), "slot": s.slot, "agent_run_id": s.run_id}
+                    {
+                        **next(c for c in s.criteria if c.key == key).to_json(),
+                        "slot": s.slot,
+                        "agent_run_id": s.run_id,
+                    }
                     for s in usable
                 ]
                 row = judged_agreement(runs)
@@ -249,7 +282,12 @@ Rules:
             "packet_hash": packet.packet_hash,
             "runs": [self._lineage(s) for s in slots if s.run_id],
         }
-        seq = (self.db.execute(select(func.max(AssessmentResult.seq)).where(AssessmentResult.attempt_id == attempt.id)).scalar() or 0) + 1
+        seq = (
+            self.db.execute(
+                select(func.max(AssessmentResult.seq)).where(AssessmentResult.attempt_id == attempt.id)
+            ).scalar()
+            or 0
+        ) + 1
         result = AssessmentResult(
             attempt_id=attempt.id,
             user_id=attempt.user_id,
@@ -269,7 +307,11 @@ Rules:
     def _lineage(self, slot: SlotResult) -> Dict[str, Any]:
         """Model / provider / token / cost lineage for one run, straight from
         the run's own ModelCall rows — never fabricated (unknown stays unknown)."""
-        calls = list(self.db.execute(select(ModelCall).where(ModelCall.agent_run_id == slot.run_id).order_by(ModelCall.started_at)).scalars())
+        calls = list(
+            self.db.execute(
+                select(ModelCall).where(ModelCall.agent_run_id == slot.run_id).order_by(ModelCall.started_at)
+            ).scalars()
+        )
         call = calls[-1] if calls else None
         if call is None or call.cost_amount is None:
             cost_status = "unknown"
@@ -313,9 +355,13 @@ Rules:
 
     def _round_tasks(self, project: Project, attempt_id: str, round_no: int) -> List[Task]:
         prefix = self._title(attempt_id, round_no)
-        return list(self.db.execute(
-            select(Task).where(Task.project_id == project.id, Task.title.like(prefix + "%")).order_by(Task.created_at)
-        ).scalars())
+        return list(
+            self.db.execute(
+                select(Task)
+                .where(Task.project_id == project.id, Task.title.like(prefix + "%"))
+                .order_by(Task.created_at)
+            ).scalars()
+        )
 
     def _slot_tasks(self, project: Project, attempt_id: str, round_no: int, slot: str) -> List[Task]:
         found = []
@@ -331,7 +377,9 @@ Rules:
         count = 0
         for task in self._round_tasks(project, attempt_id, round_no):
             run = self._agent_run_for_task(task)
-            if run is not None and (run.status == AgentRunStatus.COMPLETED or task.title.endswith(_INVALID_SUFFIX)):
+            if run is not None and (
+                run.status == AgentRunStatus.COMPLETED or task.title.endswith(_INVALID_SUFFIX)
+            ):
                 count += 1
         return count
 
@@ -367,7 +415,18 @@ Rules:
                     return SlotResult(slot, "invalid", detail="the per-round grading cap was reached")
                 return SlotResult(slot, "provider_failure", detail="the per-round grading cap was reached")
             number += 1
-            result = self._dispatch(user, project, attempt, agent_version, packet, round_no, slot, number, policy_override, budget_id)
+            result = self._dispatch(
+                user,
+                project,
+                attempt,
+                agent_version,
+                packet,
+                round_no,
+                slot,
+                number,
+                policy_override,
+                budget_id,
+            )
             if result.status == "invalid":
                 invalid += 1  # one automatic retry for malformed output, then give up
                 continue
@@ -435,28 +494,76 @@ Rules:
             task_id=task.id,
             task_run_id=task_run.id,
             agent_run_id=agent_run.id,
-            event_type="assessment.grading_completed" if result.status == "ok" else "assessment.grading_failed",
+            event_type=(
+                "assessment.grading_completed" if result.status == "ok" else "assessment.grading_failed"
+            ),
             decision_summary=f"grading {slot} {result.status}",
         )
         return result
 
     def _read_run(self, run: AgentRun, packet: GradingPacket, slot: str, task: Task) -> SlotResult:
-        if run.status in (AgentRunStatus.CREATED, AgentRunStatus.RUNNING, AgentRunStatus.WAITING_FOR_MODEL, AgentRunStatus.WAITING_FOR_TOOL, AgentRunStatus.SANDBOX_PROVISIONING):
+        if run.status in (
+            AgentRunStatus.CREATED,
+            AgentRunStatus.RUNNING,
+            AgentRunStatus.WAITING_FOR_MODEL,
+            AgentRunStatus.WAITING_FOR_TOOL,
+            AgentRunStatus.SANDBOX_PROVISIONING,
+        ):
             return SlotResult(slot, "pending", run_id=run.id, detail="a grading run is still in progress")
-        model_pm = self.db.execute(select(ModelCall.provider_model_id).where(ModelCall.agent_run_id == run.id).order_by(ModelCall.started_at.desc())).scalars().first()
+        model_pm = (
+            self.db.execute(
+                select(ModelCall.provider_model_id)
+                .where(ModelCall.agent_run_id == run.id)
+                .order_by(ModelCall.started_at.desc())
+            )
+            .scalars()
+            .first()
+        )
         if task.title.endswith(_INVALID_SUFFIX):
-            return SlotResult(slot, "invalid", run_id=run.id, provider_model_id=model_pm, detail="the Grader's output was rejected earlier")
+            return SlotResult(
+                slot,
+                "invalid",
+                run_id=run.id,
+                provider_model_id=model_pm,
+                detail="the Grader's output was rejected earlier",
+            )
         if run.status != AgentRunStatus.COMPLETED:
-            return SlotResult(slot, "provider_failure", run_id=run.id, provider_model_id=model_pm, detail="the grading provider run did not complete")
-        artifact = self.db.execute(select(Artifact).where(Artifact.agent_run_id == run.id).order_by(Artifact.created_at.desc())).scalars().first()
+            return SlotResult(
+                slot,
+                "provider_failure",
+                run_id=run.id,
+                provider_model_id=model_pm,
+                detail="the grading provider run did not complete",
+            )
+        artifact = (
+            self.db.execute(
+                select(Artifact).where(Artifact.agent_run_id == run.id).order_by(Artifact.created_at.desc())
+            )
+            .scalars()
+            .first()
+        )
         if artifact is None:
-            return SlotResult(slot, "provider_failure", run_id=run.id, provider_model_id=model_pm, detail="the grading run produced no output")
+            return SlotResult(
+                slot,
+                "provider_failure",
+                run_id=run.id,
+                provider_model_id=model_pm,
+                detail="the grading run produced no output",
+            )
         try:
             with open(artifact.storage_ref, "r", encoding="utf-8") as handle:
                 raw = handle.read()
-            criteria = parse_grading_response(raw, expected_keys=packet.grader_keys, response_text=packet.response_text)
+            criteria = parse_grading_response(
+                raw, expected_keys=packet.grader_keys, response_text=packet.response_text
+            )
         except (OSError, UnicodeDecodeError):
-            return SlotResult(slot, "provider_failure", run_id=run.id, provider_model_id=model_pm, detail="the grading output could not be read")
+            return SlotResult(
+                slot,
+                "provider_failure",
+                run_id=run.id,
+                provider_model_id=model_pm,
+                detail="the grading output could not be read",
+            )
         except GradingResponseInvalid as exc:
             self._mark_invalid(run, task, str(exc))
             return SlotResult(slot, "invalid", run_id=run.id, provider_model_id=model_pm, detail=str(exc))
@@ -485,9 +592,15 @@ Rules:
             )
 
     def _agent_run_for_task(self, task: Task) -> Optional[AgentRun]:
-        return self.db.execute(
-            select(AgentRun).join(TaskRun, TaskRun.id == AgentRun.task_run_id).where(TaskRun.task_id == task.id)
-        ).scalars().first()
+        return (
+            self.db.execute(
+                select(AgentRun)
+                .join(TaskRun, TaskRun.id == AgentRun.task_run_id)
+                .where(TaskRun.task_id == task.id)
+            )
+            .scalars()
+            .first()
+        )
 
     # -- model selection ---------------------------------------------------------------------------
 
@@ -501,7 +614,9 @@ Rules:
         policy["required_capabilities"] = required
         return policy
 
-    def _alternate_policy(self, agent_version: AgentVersion, first_provider_model_id: Optional[str]) -> Optional[dict]:
+    def _alternate_policy(
+        self, agent_version: AgentVersion, first_provider_model_id: Optional[str]
+    ) -> Optional[dict]:
         """A manual pin to a DIFFERENT eligible provider model, chosen from the
         router's own eligible set with the first run's model excluded. No new
         router feature; ``None`` when no different model can be proven."""
@@ -514,7 +629,10 @@ Rules:
         probe = {
             "mode": "auto",
             "auto_policy": base.get("auto_policy") or "prefer_free",
-            "required_capabilities": {**(base.get("required_capabilities") or {}), "structured_output_support": True},
+            "required_capabilities": {
+                **(base.get("required_capabilities") or {}),
+                "structured_output_support": True,
+            },
             "excluded_capabilities": base.get("excluded_capabilities") or {},
         }
         try:

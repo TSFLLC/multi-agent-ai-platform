@@ -203,6 +203,7 @@ export function resultModel(view) {
     gaps: result.gaps || [],
     remediation: result.remediation || [],
     hasRecord: Boolean(result.has_record),
+    recordResultId: result.record_result_id || result.id,
     stateChanges: Object.values(answers.learner_state || {}),
     review: reviewModel(view.reviews || []),
     history: view.history || [],

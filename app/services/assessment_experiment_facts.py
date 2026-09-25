@@ -24,15 +24,26 @@ def experiment_facts(db: Session, user_id: str, experiment_id: str) -> Optional[
     if experiment is None or experiment.user_id != user_id:
         return None
     labels: Dict[str, Dict[str, int]] = {}
-    rows = db.execute(select(ExperimentTaskRun).where(ExperimentTaskRun.experiment_id == experiment.id)).scalars()
+    rows = db.execute(
+        select(ExperimentTaskRun).where(ExperimentTaskRun.experiment_id == experiment.id)
+    ).scalars()
     for etr in rows:
         counts = labels.setdefault(etr.label, {"met": 0, "partial": 0, "not_met": 0, "not_applicable": 0})
-        for agent_run in db.execute(select(AgentRun).where(AgentRun.task_run_id == etr.task_run_id)).scalars():
-            latest = db.execute(
-                select(EvaluationRun)
-                .where(EvaluationRun.subject_agent_run_id == agent_run.id, EvaluationRun.status == EvaluationRunStatus.COMPLETED)
-                .order_by(EvaluationRun.created_at.desc())
-            ).scalars().first()
+        for agent_run in db.execute(
+            select(AgentRun).where(AgentRun.task_run_id == etr.task_run_id)
+        ).scalars():
+            latest = (
+                db.execute(
+                    select(EvaluationRun)
+                    .where(
+                        EvaluationRun.subject_agent_run_id == agent_run.id,
+                        EvaluationRun.status == EvaluationRunStatus.COMPLETED,
+                    )
+                    .order_by(EvaluationRun.created_at.desc())
+                )
+                .scalars()
+                .first()
+            )
             if latest is not None:
                 for result in latest.criterion_results:
                     counts[result.finding.value] += 1

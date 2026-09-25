@@ -26,6 +26,7 @@ from typing import Any, Dict, List, Optional
 
 from app.db.enums import (
     AssessmentOutcome,
+    AssistanceLevel,
     DemonstrationEffect,
     EvaluationFinding,
     ExecutionVerification,
@@ -94,18 +95,18 @@ def judged_agreement(runs: List[Dict[str, Any]]) -> Dict[str, Any]:
     return merged
 
 
-def source_work_summary(manifest: Dict[str, Any], challenge_issued: bool, attestation: Optional[dict]) -> Dict[str, Any]:
+def source_work_summary(
+    manifest: Dict[str, Any], challenge_issued: bool, attestation: Optional[dict]
+) -> Dict[str, Any]:
     """Independence facts, re-derived from platform records already in the
     frozen manifest (never from the learner's claim)."""
     work = manifest.get("source_work") or {}
     levels = [l for l in work.get("levels", [])]
-    from app.db.enums import AssistanceLevel
-
     classes = sorted({policy.classify_assistance(AssistanceLevel(l)) for l in levels}) if levels else []
     top = max((policy.assistance_rank(AssistanceLevel(l)) or 0 for l in levels), default=None)
     return {
         "source_levels": levels,
-        "source_max_assistance": ("h%d" % top) if top is not None else None,
+        "source_max_assistance": f"h{top}" if top is not None else None,
         "source_classes": classes,
         "study_mode_used": bool(work.get("study_mode_used")),
         "challenge_issued": challenge_issued,
@@ -114,7 +115,9 @@ def source_work_summary(manifest: Dict[str, Any], challenge_issued: bool, attest
     }
 
 
-def _effect(independence: Dict[str, Any], verified: bool, evidence_is_execution: bool, attestation: Optional[dict]) -> DemonstrationEffect:
+def _effect(
+    independence: Dict[str, Any], verified: bool, evidence_is_execution: bool, attestation: Optional[dict]
+) -> DemonstrationEffect:
     if policy.attestation_is_formative(attestation):
         return DemonstrationEffect.FORMATIVE_ONLY
     if independence["challenge_issued"]:
@@ -124,8 +127,11 @@ def _effect(independence: Dict[str, Any], verified: bool, evidence_is_execution:
         return DemonstrationEffect.COUNTS_TOWARD_DEMONSTRATED
     classes = set(independence["source_classes"])
     if policy.FORMATIVE in classes:
-        levels = set(independence["source_levels"])
-        if "h5" in levels:
+        # Work that cannot even count as practice (H5) is feedback only; the rule lives in the policy.
+        if any(
+            not policy.level_counts_toward_practiced(AssistanceLevel(l))
+            for l in independence["source_levels"]
+        ):
             return DemonstrationEffect.FORMATIVE_ONLY
         return DemonstrationEffect.COUNTS_TOWARD_PRACTICED_ONLY
     if policy.PARTIAL in classes:
@@ -207,7 +213,11 @@ def aggregate(
         return finish(AssessmentOutcome.PROVISIONAL, "crosscheck_unavailable", judged_gaps)
 
     confident_failure = [
-        j for j in required_judged if _is_failure(j["finding"]) and j["agreement"] != "disagree" and j["confidence"] != GraderConfidence.LOW.value
+        j
+        for j in required_judged
+        if _is_failure(j["finding"])
+        and j["agreement"] != "disagree"
+        and j["confidence"] != GraderConfidence.LOW.value
     ]
     if confident_failure:
         return finish(AssessmentOutcome.NEEDS_WORK, "required_judgment_not_met", judged_gaps)
@@ -220,7 +230,9 @@ def aggregate(
     return finish(AssessmentOutcome.PASSED, "all_required_criteria_met", judged_gaps)
 
 
-def remediation_for(gaps: List[Dict[str, Any]], criteria_by_key: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+def remediation_for(
+    gaps: List[Dict[str, Any]], criteria_by_key: Dict[str, Dict[str, Any]]
+) -> List[Dict[str, Any]]:
     """Deterministic remediation — authored per criterion, never chosen by a
     model. Always at least one next step for a non-pass (no dead ends)."""
     steps: List[Dict[str, Any]] = []

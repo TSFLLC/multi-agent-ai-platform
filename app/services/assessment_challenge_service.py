@@ -31,11 +31,11 @@ class ChallengeDraw:
 
 
 def challenge_seed(user_id: str, definition_id: str, attempt_seq: int) -> str:
-    return hashlib.sha256(f"{user_id}|{definition_id}|{attempt_seq}".encode("utf-8")).hexdigest()
+    return hashlib.sha256(f"{user_id}|{definition_id}|{attempt_seq}".encode()).hexdigest()
 
 
 def _rank(seed: str, entry_key: str) -> str:
-    return hashlib.sha256(f"{seed}|{entry_key}".encode("utf-8")).hexdigest()
+    return hashlib.sha256(f"{seed}|{entry_key}".encode()).hexdigest()
 
 
 def previously_issued_keys(db: Session, user_id: str, definition_key: str) -> Set[str]:
@@ -91,7 +91,9 @@ def draw_challenge(
         return None
     seq = attempt_sequence(db, user_id, definition.definition_key)
     seed = challenge_seed(user_id, definition.id, seq)
-    exclude = exclude if exclude is not None else previously_issued_keys(db, user_id, definition.definition_key)
+    exclude = (
+        exclude if exclude is not None else previously_issued_keys(db, user_id, definition.definition_key)
+    )
     size = int(spec.get("draw_size", 1))
 
     resolved: List[dict] = [e for e in (_resolve_entry(db, e) for e in spec["pool"]) if e is not None]
@@ -108,7 +110,9 @@ def draw_challenge(
     items: List[dict] = []
     server_only: Dict[str, Any] = {"answer_keys": {}, "reference_points": {}, "values": {}}
     for entry in drawn + fixed:
-        public = {k: v for k, v in entry.items() if k not in ("answer_key", "reference_points", "server_only")}
+        public = {
+            k: v for k, v in entry.items() if k not in ("answer_key", "reference_points", "server_only")
+        }
         if entry in fixed:
             public["fixed"] = True
         items.append(public)
@@ -129,7 +133,7 @@ def draw_challenge(
         "items": items,
         # the first drawn entry's parameters, addressable by check specs
         "parameters": dict(first.get("parameters") or {}),
-        "server_only": {**server_only, "values": dict((first.get("server_only") or {}))},
+        "server_only": {**server_only, "values": dict(first.get("server_only") or {})},
         "per_entry_values": server_only["values"],
     }
     return ChallengeDraw(seed=seed, instance=instance)

@@ -3,7 +3,6 @@
 from datetime import timedelta
 
 import pytest
-from sqlalchemy import func, select
 
 from app.db.enums import (
     AssessmentAttemptStatus,
@@ -31,7 +30,11 @@ from tests.ail5c_factories import kc_definition, make_ail_concept, second_user
 
 
 def _answer(attempt, selected=(1,)):
-    return {"responses": {i["entry_key"]: {"selected": list(selected)} for i in attempt.challenge_instance["items"]}}
+    return {
+        "responses": {
+            i["entry_key"]: {"selected": list(selected)} for i in attempt.challenge_instance["items"]
+        }
+    }
 
 
 def _take(db, user, key, *, selected=(1,), declaration="no_external_help", svc=None):
@@ -60,7 +63,9 @@ def test_knowledge_check_pass_appends_evidence_and_state_recomputes(db, bootstra
     rows = _evidence(db, user)
     assert len(rows) == 1
     assert rows[0].ref_type == EvidenceRefType.ASSESSMENT_RESULT and rows[0].ref_id == final.id
-    assert rows[0].concept_version_id == defn.id or True  # pinned to the linked concept version, checked below
+    assert (
+        rows[0].concept_version_id == defn.id or True
+    )  # pinned to the linked concept version, checked below
     assert rows[0].assistance_level.value == "h0" and rows[0].question_origin.value == "reviewed"
     assert LearnerStateService(db).state(user.id, concept.id).ladder == DEMONSTRATED
 
@@ -84,7 +89,12 @@ def test_resubmit_and_replay_never_duplicate_evidence(db, bootstrap):
     graded = svc.grade(user, attempt.id)
     assert again.status == graded.status == AssessmentAttemptStatus.FINALIZED
     assert len(_evidence(db, user)) == 1
-    assert db.query(AssessmentResult).filter_by(attempt_id=attempt.id, result_kind=AssessmentResultKind.FINAL).count() == 1
+    assert (
+        db.query(AssessmentResult)
+        .filter_by(attempt_id=attempt.id, result_kind=AssessmentResultKind.FINAL)
+        .count()
+        == 1
+    )
 
 
 def test_finalizing_twice_is_a_safe_replay(db, bootstrap):
@@ -96,8 +106,17 @@ def test_finalizing_twice_is_a_safe_replay(db, bootstrap):
     det = svc._deterministic_result(attempt.id)
     from app.assessment_outcome import Aggregate
 
-    again = svc._finalize(user, attempt, definition, svc._links(definition.id), det, [], [], None,
-                          Aggregate(outcome=AssessmentOutcome.PASSED, effect=DemonstrationEffect.COUNTS_TOWARD_DEMONSTRATED))
+    again = svc._finalize(
+        user,
+        attempt,
+        definition,
+        svc._links(definition.id),
+        det,
+        [],
+        [],
+        None,
+        Aggregate(outcome=AssessmentOutcome.PASSED, effect=DemonstrationEffect.COUNTS_TOWARD_DEMONSTRATED),
+    )
     assert again.status == AssessmentAttemptStatus.FINALIZED
     assert len(_evidence(db, user)) == 1
 
@@ -131,7 +150,11 @@ def test_retry_needs_cooldown_then_draws_a_different_challenge(db, bootstrap):
         svc.start(user, defn.definition_key, previous_attempt_id=first.id)
     assert any(c["key"] == "cooldown" and not c["met"] for c in blocked.value.detail["checks"])
 
-    later = AssessmentService(db, now=first.finalized_at.replace(tzinfo=None).replace(tzinfo=__import__("datetime").timezone.utc) + timedelta(hours=13))
+    later = AssessmentService(
+        db,
+        now=first.finalized_at.replace(tzinfo=None).replace(tzinfo=__import__("datetime").timezone.utc)
+        + timedelta(hours=13),
+    )
     second = later.start(user, defn.definition_key, previous_attempt_id=first.id)
     assert second.origin == AssessmentOrigin.RETRY and second.previous_attempt_id == first.id
     keys = lambda a: {i["entry_key"] for i in a.challenge_instance["items"]}
@@ -363,7 +386,8 @@ def test_no_similarity_or_surveillance_code_exists():
     assert len(files) >= 8
     banned = re.compile(
         r"(difflib|jaccard|levenshtein|cosine|tfidf|simhash|minhash|similar|plagiar|copydetect|"
-        r"webcam|keystroke|clipboard|screenrecord|eyetrack|proctor|focusloss|visibilitychange)", re.IGNORECASE
+        r"webcam|keystroke|clipboard|screenrecord|eyetrack|proctor|focusloss|visibilitychange)",
+        re.IGNORECASE,
     )
     offenders = []
     for path in files:

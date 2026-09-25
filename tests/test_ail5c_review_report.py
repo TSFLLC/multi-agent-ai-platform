@@ -9,14 +9,16 @@ from app.db.enums import (
     AssessmentOrigin,
     AssessmentOutcome,
     AssessmentResultKind,
-    AssessmentReviewDecision as Decision,
     AssessmentReviewStatus,
     ChangeSeverity,
     GradingMode,
     OrgRole,
 )
+from app.db.enums import (
+    AssessmentReviewDecision as Decision,
+)
 from app.errors import ConflictError, ForbiddenError, NotFoundError
-from app.models.assessment import AssessmentAttempt, AssessmentResult, AssessmentReview
+from app.models.assessment import AssessmentAttempt, AssessmentReview
 from app.models.identity import Organization, User
 from app.models.learner import LearningEvidence
 from app.models.observability import AuditEvent
@@ -37,8 +39,12 @@ from tests.ail5c_factories import (
     setup_free_models,
 )
 
-REQ_KC_EB = {"requires_all": [
-    {"evidence_type": "knowledge_check", "min_passed": 1}, {"evidence_type": "explain_back", "min_passed": 1}]}
+REQ_KC_EB = {
+    "requires_all": [
+        {"evidence_type": "knowledge_check", "min_passed": 1},
+        {"evidence_type": "explain_back", "min_passed": 1},
+    ]
+}
 EXPLANATION = "Structured output makes a model follow a schema so answers parse reliably; a schema does not make content true."
 REASON = "I believe my explanation covered the limits clearly."
 
@@ -50,7 +56,9 @@ def _kc(db, bootstrap, *, correct=True, core=False):
     defn = kc_definition(db, bootstrap.user, concept)
     svc = AssessmentService(db)
     attempt = svc.start(learner, defn.definition_key)
-    answers = {i["entry_key"]: {"selected": [1 if correct else 0]} for i in attempt.challenge_instance["items"]}
+    answers = {
+        i["entry_key"]: {"selected": [1 if correct else 0]} for i in attempt.challenge_instance["items"]
+    }
     svc.save_draft(learner.id, attempt.id, {"responses": answers})
     return learner, concept, defn, svc, svc.submit(learner, attempt.id, {"declaration": "no_external_help"})
 
@@ -64,7 +72,12 @@ def _judged_needs_work(db, bootstrap):
 
     def script(n, keys, quote):
         return [
-            judgment(k, quote, finding="not_met" if k == "limits" else "met", gap="No limit is stated." if k == "limits" else None)
+            judgment(
+                k,
+                quote,
+                finding="not_met" if k == "limits" else "met",
+                gap="No limit is stated." if k == "limits" else None,
+            )
             for k in keys
         ]
 
@@ -148,12 +161,16 @@ def test_a_reviewer_sees_no_content_without_consent_and_every_read_is_audited(db
     learner = second_user(db, bootstrap.organization)
     concept, _version = make_ail_concept(db, requirements=REQ_KC_EB)
     defn = explain_definition(db, bootstrap.user, concept)
-    adapter = ScriptedGrader(lambda n, keys, quote: default_findings(keys, quote, finding="met" if n == 1 else "not_met"))
+    adapter = ScriptedGrader(
+        lambda n, keys, quote: default_findings(keys, quote, finding="met" if n == 1 else "not_met")
+    )
     svc = AssessmentService(db, adapter_factory=lambda _d, _p: adapter)
     attempt = svc.start(learner, defn.definition_key)
     svc.save_draft(learner.id, attempt.id, {"fields": {"explanation": EXPLANATION + " PRIVATE-WORDS"}})
     svc.submit(learner, attempt.id, {"declaration": "no_external_help"})
-    review = db.query(AssessmentReview).filter_by(attempt_id=attempt.id).one()  # opened by the platform (disagreement)
+    review = (
+        db.query(AssessmentReview).filter_by(attempt_id=attempt.id).one()
+    )  # opened by the platform (disagreement)
     assert review.consent_shared_at is None
 
     reviews = AssessmentReviewService(db)
@@ -191,7 +208,9 @@ def test_override_pass_on_a_judged_failure_appends_human_evidence_and_keeps_hist
     assert original.outcome == AssessmentOutcome.NEEDS_WORK and _evidence(db, learner) == []
     reviews = AssessmentReviewService(db)
     review = reviews.request(learner, attempt.id, reason=REASON, consent=True)
-    decided = reviews.decide(bootstrap.user, review.id, Decision.OVERRIDE_PASS, "The explanation does address the limit.")
+    decided = reviews.decide(
+        bootstrap.user, review.id, Decision.OVERRIDE_PASS, "The explanation does address the limit."
+    )
     assert decided.status == AssessmentReviewStatus.RESOLVED and decided.reviewer_user_id == bootstrap.user.id
 
     human = svc.effective_result(attempt.id)
@@ -223,13 +242,17 @@ def test_override_needs_work_reverses_a_pass_with_the_supersede_pointer(db, boot
     assert LearnerStateService(db).state(learner.id, concept.id).ladder == DEMONSTRATED
     reviews = AssessmentReviewService(db)
     review = reviews.request(learner, attempt.id, reason=REASON, consent=True)
-    reviews.decide(bootstrap.user, review.id, Decision.OVERRIDE_NEEDS_WORK, "The attestation was inconsistent.")
+    reviews.decide(
+        bootstrap.user, review.id, Decision.OVERRIDE_NEEDS_WORK, "The attestation was inconsistent."
+    )
 
     rows = _evidence(db, learner)
     assert len(rows) == 2, "history is appended to, never erased"
     db.refresh(old)
     replacement = next(r for r in rows if r.id != old.id)
-    assert old.superseded_by_id == replacement.id and old.passed is True  # the old row is intact, only pointed at
+    assert (
+        old.superseded_by_id == replacement.id and old.passed is True
+    )  # the old row is intact, only pointed at
     assert replacement.grader == GradingMode.HUMAN and replacement.passed is False
     state = LearnerStateService(db).state(learner.id, concept.id)
     assert state.ladder != DEMONSTRATED and old in state.evidence  # superseded but still visible
@@ -255,8 +278,14 @@ def test_a_new_assessment_decision_issues_a_human_requested_attempt(db, bootstra
     reviews = AssessmentReviewService(db)
     review = reviews.request(learner, attempt.id, reason=REASON, consent=True)
     reviews.decide(bootstrap.user, review.id, Decision.NEW_ASSESSMENT, "A fresh attempt is fairer here.")
-    fresh = db.query(AssessmentAttempt).filter_by(user_id=learner.id, origin=AssessmentOrigin.HUMAN_REQUESTED).one()
-    assert fresh.previous_attempt_id == attempt.id and fresh.status == AssessmentAttemptStatus.DRAFT  # cooldown bypassed
+    fresh = (
+        db.query(AssessmentAttempt)
+        .filter_by(user_id=learner.id, origin=AssessmentOrigin.HUMAN_REQUESTED)
+        .one()
+    )
+    assert (
+        fresh.previous_attempt_id == attempt.id and fresh.status == AssessmentAttemptStatus.DRAFT
+    )  # cooldown bypassed
     assert svc.effective_result(attempt.id).outcome == AssessmentOutcome.NEEDS_WORK  # the original stands
 
 
@@ -291,23 +320,45 @@ def test_the_report_separates_fact_judgment_reflection_and_coaching(db, bootstra
     adapter = ScriptedGrader()
     svc = AssessmentService(db, adapter_factory=lambda _d, _p: adapter)
     attempt = svc.start(learner, defn.definition_key)
-    svc.save_draft(learner.id, attempt.id, {"fields": {"explanation": EXPLANATION, "reflection": "I found limits hardest."}})
+    svc.save_draft(
+        learner.id,
+        attempt.id,
+        {"fields": {"explanation": EXPLANATION, "reflection": "I found limits hardest."}},
+    )
     done = svc.submit(learner, attempt.id, {"declaration": "used_docs", "note": "read the lesson"})
     report = svc.effective_result(done.id).report
 
     assert {"platform_fact", "grader_judgment", "learner_reflection", "professor_coaching"} <= set(report)
-    labels = [report[k]["label"] for k in ("platform_fact", "grader_judgment", "learner_reflection", "professor_coaching")]
+    labels = [
+        report[k]["label"]
+        for k in ("platform_fact", "grader_judgment", "learner_reflection", "professor_coaching")
+    ]
     assert labels == ["PLATFORM FACT", "GRADER JUDGMENT", "LEARNER REFLECTION", "PROFESSOR COACHING"]
     assert report["learner_reflection"]["reflection"] == "I found limits hardest."
     assert report["learner_reflection"]["attestation"]["declaration"] == "used_docs"
-    assert report["professor_coaching"]["available_after_result"] and "cannot change it" in report["professor_coaching"]["note"]
+    assert (
+        report["professor_coaching"]["available_after_result"]
+        and "cannot change it" in report["professor_coaching"]["note"]
+    )
     judged = report["grader_judgment"]
-    assert judged["ran"] and judged["crosscheck_ran"] and judged["grading_contract_version"] == "grading_contract_v1"
+    assert (
+        judged["ran"]
+        and judged["crosscheck_ran"]
+        and judged["grading_contract_version"] == "grading_contract_v1"
+    )
     assert all(c["confidence"] in ("high", "medium", "low") for c in judged["criteria"])
     assert all(run["cost_status"] in ("exact", "estimated", "unknown") for run in judged["runs"])
     answers = report["answers"]
-    assert {"what_i_demonstrated", "what_evidence_proved_it", "what_i_did_independently", "where_i_needed_help",
-            "what_needs_more_work", "what_to_practice_next", "learner_state", "review_later"} <= set(answers)
+    assert {
+        "what_i_demonstrated",
+        "what_evidence_proved_it",
+        "what_i_did_independently",
+        "where_i_needed_help",
+        "what_needs_more_work",
+        "what_to_practice_next",
+        "learner_state",
+        "review_later",
+    } <= set(answers)
     state = answers["learner_state"][concept.id]
     assert state["before"] and state["after"] and state["concept_name"] == "Structured Output"
 
@@ -324,7 +375,7 @@ def test_the_headline_language_is_honest_and_validated():
     for term in ("certified", "mastered", "an expert", "accredited", "professional-level"):
         with pytest.raises(ValueError):
             assert_truthful_language(f"You are {term}.")
-    from app.services.assessment_report_service import NOTICE, _HEADLINES
+    from app.services.assessment_report_service import _HEADLINES, NOTICE
 
     for sentence in list(_HEADLINES.values()) + [NOTICE]:
         assert_truthful_language(sentence)
@@ -337,7 +388,9 @@ def test_a_demonstrated_pass_produces_a_hashed_evidence_linked_record(db, bootst
     learner, concept, defn, svc, attempt = _kc(db, bootstrap, correct=True)
     final = svc.effective_result(attempt.id)
     record = final.record_snapshot
-    assert record["title"] == "Demonstration Record" and record["notice"] == "Not a certificate or credential."
+    assert (
+        record["title"] == "Demonstration Record" and record["notice"] == "Not a certificate or credential."
+    )
     assert record["assessment"]["definition_version"] == 1
     assert record["assessment"]["definition_content_hash"] == defn.content_hash
     assert record["concepts"][0]["concept_id"] == concept.id and record["concepts"][0]["concept_version"] == 1
@@ -373,7 +426,10 @@ def test_record_status_is_derived_and_history_is_never_edited(db, bootstrap):
 
     graph = ConceptGraphService(db)  # AIL.4A: a material change -> DEMONSTRATED + CHANGED coexist
     draft = graph.create_draft_version(
-        concept_id=concept.id, plain_definition="Changed.", change_severity=ChangeSeverity.MATERIAL, evidence_requirements=REQ_KC
+        concept_id=concept.id,
+        plain_definition="Changed.",
+        change_severity=ChangeSeverity.MATERIAL,
+        evidence_requirements=REQ_KC,
     )
     graph.publish_version(draft.id)
     state = LearnerStateService(db).state(learner.id, concept.id)
@@ -382,7 +438,10 @@ def test_record_status_is_derived_and_history_is_never_edited(db, bootstrap):
     assert status["status"] == "changed_since" and "Concept Version 1" in status["reasons"][0]
     db.refresh(final)
     assert final.record_snapshot["concepts"][0]["concept_version"] == 1  # the historical record is unchanged
-    assert reporter.record_status(learner.id, final, superseded=True, now=now)["status"] == "superseded_by_review"
+    assert (
+        reporter.record_status(learner.id, final, superseded=True, now=now)["status"]
+        == "superseded_by_review"
+    )
 
 
 def test_assessment_evidence_reuses_the_4b_retention_clock(db, bootstrap):
@@ -395,7 +454,10 @@ def test_assessment_evidence_reuses_the_4b_retention_clock(db, bootstrap):
     later = LearnerStateService(db).state(learner.id, concept.id, now=far)
     assert "review_due" in later.overlays and later.ladder == DEMONSTRATED  # DEMONSTRATED is not permanent
     final = svc.effective_result(attempt.id)
-    assert AssessmentReportService(db).record_status(learner.id, final, superseded=False, now=far)["status"] == "review_due"
+    assert (
+        AssessmentReportService(db).record_status(learner.id, final, superseded=False, now=far)["status"]
+        == "review_due"
+    )
     from app.models.learning_review import ReviewAttempt
 
     assert db.query(ReviewAttempt).count() == 0  # no second scheduler

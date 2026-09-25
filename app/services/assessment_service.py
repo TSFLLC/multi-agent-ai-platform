@@ -20,7 +20,6 @@ from sqlalchemy.orm import Session
 
 from app.assessment_contract import GRADING_CONTRACT_VERSION, review_fingerprint, sha256_hex
 from app.assessment_outcome import (
-    GRADING_COMPLETE,
     GRADING_NOT_NEEDED,
     aggregate,
     source_work_summary,
@@ -104,7 +103,9 @@ class AssessmentService:
 
     def get_attempt(self, user_id: str, attempt_id: str) -> AssessmentAttempt:
         attempt = self.db.execute(
-            select(AssessmentAttempt).where(AssessmentAttempt.id == attempt_id, AssessmentAttempt.user_id == user_id)
+            select(AssessmentAttempt).where(
+                AssessmentAttempt.id == attempt_id, AssessmentAttempt.user_id == user_id
+            )
         ).scalar_one_or_none()
         if attempt is None:
             raise NotFoundError("Assessment attempt not found.")
@@ -121,22 +122,30 @@ class AssessmentService:
         )
 
     def original_final(self, attempt_id: str) -> Optional[AssessmentResult]:
-        return self.db.execute(
-            select(AssessmentResult).where(
-                AssessmentResult.attempt_id == attempt_id,
-                AssessmentResult.result_kind == AssessmentResultKind.FINAL,
-                AssessmentResult.supersedes_result_id.is_(None),
+        return (
+            self.db.execute(
+                select(AssessmentResult).where(
+                    AssessmentResult.attempt_id == attempt_id,
+                    AssessmentResult.result_kind == AssessmentResultKind.FINAL,
+                    AssessmentResult.supersedes_result_id.is_(None),
+                )
             )
-        ).scalars().first()
+            .scalars()
+            .first()
+        )
 
     def effective_result(self, attempt_id: str) -> Optional[AssessmentResult]:
         """The result currently in force: the original final, or the latest
         human decision in its supersession chain. History is never edited."""
         current = self.original_final(attempt_id)
         while current is not None:
-            nxt = self.db.execute(
-                select(AssessmentResult).where(AssessmentResult.supersedes_result_id == current.id)
-            ).scalars().first()
+            nxt = (
+                self.db.execute(
+                    select(AssessmentResult).where(AssessmentResult.supersedes_result_id == current.id)
+                )
+                .scalars()
+                .first()
+            )
             if nxt is None:
                 return current
             current = nxt
@@ -147,23 +156,36 @@ class AssessmentService:
 
     # -- readiness ----------------------------------------------------------------------------------
 
-    def _project_attempt_for(self, user_id: str, definition: AssessmentDefinition, project_attempt_id: Optional[str]) -> Optional[ProjectAttempt]:
+    def _project_attempt_for(
+        self, user_id: str, definition: AssessmentDefinition, project_attempt_id: Optional[str]
+    ) -> Optional[ProjectAttempt]:
         if project_attempt_id:
             pa = self.db.execute(
-                select(ProjectAttempt).where(ProjectAttempt.id == project_attempt_id, ProjectAttempt.user_id == user_id)
+                select(ProjectAttempt).where(
+                    ProjectAttempt.id == project_attempt_id, ProjectAttempt.user_id == user_id
+                )
             ).scalar_one_or_none()
             if pa is None:
                 raise NotFoundError("Project attempt not found.")
             return pa
         if definition.project_template_id:
-            return self.db.execute(
-                select(ProjectAttempt)
-                .where(ProjectAttempt.user_id == user_id, ProjectAttempt.project_template_id == definition.project_template_id)
-                .order_by(ProjectAttempt.created_at.desc())
-            ).scalars().first()
+            return (
+                self.db.execute(
+                    select(ProjectAttempt)
+                    .where(
+                        ProjectAttempt.user_id == user_id,
+                        ProjectAttempt.project_template_id == definition.project_template_id,
+                    )
+                    .order_by(ProjectAttempt.created_at.desc())
+                )
+                .scalars()
+                .first()
+            )
         return None
 
-    def readiness(self, user: User, definition_key: str, *, project_attempt_id: Optional[str] = None) -> Dict[str, Any]:
+    def readiness(
+        self, user: User, definition_key: str, *, project_attempt_id: Optional[str] = None
+    ) -> Dict[str, Any]:
         """A deterministic pre-flight. Never a result; every unmet item says what to do."""
         guard = AssessmentModeGuard(self.db, now=self._clock())
         guard.expire_stale(user.id)
@@ -173,13 +195,21 @@ class AssessmentService:
         def add(key: str, label: str, met: bool, detail: str = "", **extra):
             checks.append({"key": key, "label": label, "met": bool(met), "detail": detail, **extra})
 
-        add("published", "This assessment is published", definition is not None,
-            "" if definition else "No published version of this assessment exists.")
+        add(
+            "published",
+            "This assessment is published",
+            definition is not None,
+            "" if definition else "No published version of this assessment exists.",
+        )
         if definition is None:
             return {"ready": False, "checks": checks, "definition": None}
 
-        add("capability", "Nothing extra is needed from the platform", definition.requires_platform_capability is None,
-            "" if definition.requires_platform_capability is None else "Available after MA9.")
+        add(
+            "capability",
+            "Nothing extra is needed from the platform",
+            definition.requires_platform_capability is None,
+            "" if definition.requires_platform_capability is None else "Available after MA9.",
+        )
 
         pa = self._project_attempt_for(user.id, definition, project_attempt_id)
         submission = None
@@ -187,52 +217,88 @@ class AssessmentService:
             if pa is not None:
                 submission = self.db.execute(
                     select(AssessmentReadySubmission).where(
-                        AssessmentReadySubmission.project_attempt_id == pa.id, AssessmentReadySubmission.user_id == user.id
+                        AssessmentReadySubmission.project_attempt_id == pa.id,
+                        AssessmentReadySubmission.user_id == user.id,
                     )
                 ).scalar_one_or_none()
-            add("project_submission", "Your project is submitted for assessment", submission is not None and submission.status == "ready",
+            add(
+                "project_submission",
+                "Your project is submitted for assessment",
+                submission is not None and submission.status == "ready",
                 "" if submission else "Submit your project from Build With Me first.",
-                link={"kind": "project", "project_attempt_id": pa.id if pa else None})
+                link={"kind": "project", "project_attempt_id": pa.id if pa else None},
+            )
 
         indep = definition.independence_policy or {}
         graph_states = LearnerStateService(self.db)
         for req in (indep.get("readiness") or {}).get("prerequisite_states", []):
             state = graph_states.state(user.id, req["concept_id"], now=self._clock())
-            add(f"prerequisite:{req['concept_id']}", f"Reach {req['min_state'].replace('_', ' ')} on a prerequisite Concept",
-                state.is_at_least(req["min_state"]), f"Currently {state.ladder}.",
-                link={"kind": "concept", "concept_id": req["concept_id"]})
-
-        active = self.db.execute(
-            select(AssessmentAttempt).where(
-                AssessmentAttempt.user_id == user.id,
-                AssessmentAttempt.definition_id.in_(
-                    select(AssessmentDefinition.id).where(AssessmentDefinition.definition_key == definition.definition_key)
-                ),
-                AssessmentAttempt.status.in_([AssessmentAttemptStatus(s) for s in ACTIVE_ATTEMPT_STATUSES]),
+            add(
+                f"prerequisite:{req['concept_id']}",
+                f"Reach {req['min_state'].replace('_', ' ')} on a prerequisite Concept",
+                state.is_at_least(req["min_state"]),
+                f"Currently {state.ladder}.",
+                link={"kind": "concept", "concept_id": req["concept_id"]},
             )
-        ).scalars().first()
-        add("no_active_attempt", "You have no assessment of this kind in progress", active is None,
+
+        active = (
+            self.db.execute(
+                select(AssessmentAttempt).where(
+                    AssessmentAttempt.user_id == user.id,
+                    AssessmentAttempt.definition_id.in_(
+                        select(AssessmentDefinition.id).where(
+                            AssessmentDefinition.definition_key == definition.definition_key
+                        )
+                    ),
+                    AssessmentAttempt.status.in_(
+                        [AssessmentAttemptStatus(s) for s in ACTIVE_ATTEMPT_STATUSES]
+                    ),
+                )
+            )
+            .scalars()
+            .first()
+        )
+        add(
+            "no_active_attempt",
+            "You have no assessment of this kind in progress",
+            active is None,
             "" if active is None else "Resume your attempt instead.",
-            resume_attempt_id=active.id if active else None)
+            resume_attempt_id=active.id if active else None,
+        )
 
         cooldown_hours = (definition.grading_policy or {}).get("cooldown_hours", 12)
         available_at = self._cooldown_ends(user.id, definition.definition_key, cooldown_hours)
-        add("cooldown", "You have waited long enough since your last attempt",
+        add(
+            "cooldown",
+            "You have waited long enough since your last attempt",
             available_at is None or available_at <= self._clock(),
             "" if available_at is None else f"You can try again after {available_at.isoformat()}.",
-            available_at=available_at.isoformat() if available_at else None)
+            available_at=available_at.isoformat() if available_at else None,
+        )
 
         fresh_policy = indep.get("fresh_required", "if_assisted")
         source = self._source_work(pa) if pa else {"levels": [], "study_mode_used": False}
         levels = [AssistanceLevel(l) for l in source["levels"]]
         fresh, reason = policy.fresh_challenge_required(
-            fresh_policy, source_levels=levels, study_mode_used=source["study_mode_used"],
+            fresh_policy,
+            source_levels=levels,
+            study_mode_used=source["study_mode_used"],
             kind_is_capstone=definition.assessment_kind == AssessmentKind.CAPSTONE,
         )
-        needs_pool = fresh or definition.assessment_kind in (AssessmentKind.KNOWLEDGE_CHECK, AssessmentKind.EXPLAIN_BACK)
-        add("fresh_challenge", "A fresh challenge is available" if needs_pool else "No fresh challenge is needed",
+        needs_pool = fresh or definition.assessment_kind in (
+            AssessmentKind.KNOWLEDGE_CHECK,
+            AssessmentKind.EXPLAIN_BACK,
+        )
+        add(
+            "fresh_challenge",
+            "A fresh challenge is available" if needs_pool else "No fresh challenge is needed",
             (not needs_pool) or bool(definition.challenge_spec),
-            "" if (not needs_pool or definition.challenge_spec) else "This assessment needs a fresh challenge but none has been authored.")
+            (
+                ""
+                if (not needs_pool or definition.challenge_spec)
+                else "This assessment needs a fresh challenge but none has been authored."
+            ),
+        )
         return {
             "ready": all(c["met"] for c in checks),
             "checks": checks,
@@ -266,22 +332,38 @@ class AssessmentService:
     def _source_work(self, pa: ProjectAttempt) -> Dict[str, Any]:
         """Assistance provenance re-derived from platform records (milestone
         attempts and candidate evidence) — never from the 5B snapshot's claims."""
-        milestones = list(self.db.execute(select(MilestoneAttempt).where(MilestoneAttempt.project_attempt_id == pa.id)).scalars())
-        levels = sorted({m.max_assistance_level.value for m in milestones if m.max_assistance_level is not None})
+        milestones = list(
+            self.db.execute(
+                select(MilestoneAttempt).where(MilestoneAttempt.project_attempt_id == pa.id)
+            ).scalars()
+        )
+        levels = sorted(
+            {m.max_assistance_level.value for m in milestones if m.max_assistance_level is not None}
+        )
         cands = self.db.execute(
-            select(CandidateEvidence.assistance_level).where(CandidateEvidence.project_attempt_id == pa.id, CandidateEvidence.user_id == pa.user_id)
+            select(CandidateEvidence.assistance_level).where(
+                CandidateEvidence.project_attempt_id == pa.id, CandidateEvidence.user_id == pa.user_id
+            )
         ).scalars()
         levels = sorted(set(levels) | {c.value for c in cands if c is not None})
         study = any(
-            m.mode in (MilestoneAttemptMode.STUDY, MilestoneAttemptMode.VARIANT) or m.status == MilestoneAttemptStatus.SKIPPED_STUDY_MODE
+            m.mode in (MilestoneAttemptMode.STUDY, MilestoneAttemptMode.VARIANT)
+            or m.status == MilestoneAttemptStatus.SKIPPED_STUDY_MODE
             for m in milestones
         )
         return {"levels": levels, "study_mode_used": study}
 
-    def _build_manifest(self, user: User, definition: AssessmentDefinition, pa: Optional[ProjectAttempt]) -> Dict[str, Any]:
+    def _build_manifest(
+        self, user: User, definition: AssessmentDefinition, pa: Optional[ProjectAttempt]
+    ) -> Dict[str, Any]:
         manifest: Dict[str, Any] = {
             "schema": "assessment_manifest_v1",
-            "definition": {"id": definition.id, "key": definition.definition_key, "version": definition.version, "content_hash": definition.content_hash},
+            "definition": {
+                "id": definition.id,
+                "key": definition.definition_key,
+                "version": definition.version,
+                "content_hash": definition.content_hash,
+            },
             "project": None,
             "source_submission": None,
             "milestone_attempts": [],
@@ -301,10 +383,16 @@ class AssessmentService:
             from app.models.academy import AcademyEnrollment
 
             enrollment = self.db.get(AcademyEnrollment, pa.enrollment_id)
-            program_version_id = enrollment.program_version_id if enrollment and enrollment.user_id == user.id else None
+            program_version_id = (
+                enrollment.program_version_id if enrollment and enrollment.user_id == user.id else None
+            )
         agent_version_ids: List[str] = []
         if pa.learner_agent_id:
-            agent_version_ids = list(self.db.execute(select(AgentVersion.id).where(AgentVersion.agent_id == pa.learner_agent_id)).scalars())
+            agent_version_ids = list(
+                self.db.execute(
+                    select(AgentVersion.id).where(AgentVersion.agent_id == pa.learner_agent_id)
+                ).scalars()
+            )
         manifest["project"] = {
             "project_attempt_id": pa.id,
             "template_id": pa.project_template_id,
@@ -316,47 +404,119 @@ class AssessmentService:
             "brief_snapshot_hash": sha256_hex(pa.brief_snapshot or {}),
         }
         submission = self.db.execute(
-            select(AssessmentReadySubmission).where(AssessmentReadySubmission.project_attempt_id == pa.id, AssessmentReadySubmission.user_id == user.id)
+            select(AssessmentReadySubmission).where(
+                AssessmentReadySubmission.project_attempt_id == pa.id,
+                AssessmentReadySubmission.user_id == user.id,
+            )
         ).scalar_one_or_none()
         if submission is not None:
-            manifest["source_submission"] = {"id": submission.id, "status": submission.status, "snapshot_hash": sha256_hex(submission.snapshot or {})}
+            manifest["source_submission"] = {
+                "id": submission.id,
+                "status": submission.status,
+                "snapshot_hash": sha256_hex(submission.snapshot or {}),
+            }
 
-        milestones = list(self.db.execute(select(MilestoneAttempt).where(MilestoneAttempt.project_attempt_id == pa.id).order_by(MilestoneAttempt.created_at)).scalars())
+        milestones = list(
+            self.db.execute(
+                select(MilestoneAttempt)
+                .where(MilestoneAttempt.project_attempt_id == pa.id)
+                .order_by(MilestoneAttempt.created_at)
+            ).scalars()
+        )
         manifest["milestone_attempts"] = [
-            {"id": m.id, "milestone_id": m.project_milestone_id, "status": m.status.value, "mode": m.mode.value,
-             "max_assistance_level": m.max_assistance_level.value if m.max_assistance_level else None}
+            {
+                "id": m.id,
+                "milestone_id": m.project_milestone_id,
+                "status": m.status.value,
+                "mode": m.mode.value,
+                "max_assistance_level": m.max_assistance_level.value if m.max_assistance_level else None,
+            }
             for m in milestones
         ]
-        cands = list(self.db.execute(select(CandidateEvidence).where(CandidateEvidence.project_attempt_id == pa.id, CandidateEvidence.user_id == user.id)).scalars())
+        cands = list(
+            self.db.execute(
+                select(CandidateEvidence).where(
+                    CandidateEvidence.project_attempt_id == pa.id, CandidateEvidence.user_id == user.id
+                )
+            ).scalars()
+        )
         manifest["candidate_evidence"] = [
-            {"id": c.id, "source_type": c.source_type, "source_id": c.source_id, "claimed_passed": c.passed,
-             "assistance_level": c.assistance_level.value if c.assistance_level else None,
-             "execution_verification_claim": c.execution_verification.value if c.execution_verification else None,
-             "learning_evidence_id": c.learning_evidence_id}
+            {
+                "id": c.id,
+                "source_type": c.source_type,
+                "source_id": c.source_id,
+                "claimed_passed": c.passed,
+                "assistance_level": c.assistance_level.value if c.assistance_level else None,
+                "execution_verification_claim": (
+                    c.execution_verification.value if c.execution_verification else None
+                ),
+                "learning_evidence_id": c.learning_evidence_id,
+            }
             for c in cands
         ]
         evidence_ids = [c.learning_evidence_id for c in cands if c.learning_evidence_id]
         if evidence_ids:
-            owned = self.db.execute(select(LearningEvidence.id).where(LearningEvidence.user_id == user.id, LearningEvidence.id.in_(evidence_ids))).scalars()
+            owned = self.db.execute(
+                select(LearningEvidence.id).where(
+                    LearningEvidence.user_id == user.id, LearningEvidence.id.in_(evidence_ids)
+                )
+            ).scalars()
             manifest["learning_evidence_ids"] = sorted(owned)
         manifest["explain_back_ids"] = sorted(
-            self.db.execute(select(ExplainBackResponse.id).where(ExplainBackResponse.project_attempt_id == pa.id, ExplainBackResponse.user_id == user.id)).scalars()
+            self.db.execute(
+                select(ExplainBackResponse.id).where(
+                    ExplainBackResponse.project_attempt_id == pa.id, ExplainBackResponse.user_id == user.id
+                )
+            ).scalars()
         )
-        for link in self.db.execute(select(ProjectExperimentLink).where(ProjectExperimentLink.project_attempt_id == pa.id)).scalars():
+        for link in self.db.execute(
+            select(ProjectExperimentLink).where(ProjectExperimentLink.project_attempt_id == pa.id)
+        ).scalars():
             experiment = self.db.get(Experiment, link.experiment_id)
             if experiment is not None and experiment.user_id == user.id:
-                manifest["experiments"].append({"experiment_id": experiment.id, "link_id": link.id, "learner_decision_recorded": bool(link.learner_decision)})
-                manifest["records"].append({"type": "experiment", "id": experiment.id, "facts": {"completed": experiment.status.value == "completed"}})
+                manifest["experiments"].append(
+                    {
+                        "experiment_id": experiment.id,
+                        "link_id": link.id,
+                        "learner_decision_recorded": bool(link.learner_decision),
+                    }
+                )
+                manifest["records"].append(
+                    {
+                        "type": "experiment",
+                        "id": experiment.id,
+                        "facts": {"completed": experiment.status.value == "completed"},
+                    }
+                )
         if agent_version_ids:
             runs = self.db.execute(
-                select(EvaluationRun).join(AgentRun, AgentRun.id == EvaluationRun.subject_agent_run_id)
-                .where(EvaluationRun.requested_by_user_id == user.id, AgentRun.agent_version_id.in_(agent_version_ids))
+                select(EvaluationRun)
+                .join(AgentRun, AgentRun.id == EvaluationRun.subject_agent_run_id)
+                .where(
+                    EvaluationRun.requested_by_user_id == user.id,
+                    AgentRun.agent_version_id.in_(agent_version_ids),
+                )
                 .order_by(EvaluationRun.created_at)
             ).scalars()
             for run in runs:
                 findings = [r.finding.value for r in run.criterion_results]
-                manifest["evaluation_runs"].append({"id": run.id, "status": run.status.value, "subject_artifact_content_hash": run.subject_artifact_content_hash})
-                manifest["records"].append({"type": "evaluation_run", "id": run.id, "facts": {"has_not_met": "not_met" in findings, "completed": run.status == EvaluationRunStatus.COMPLETED}})
+                manifest["evaluation_runs"].append(
+                    {
+                        "id": run.id,
+                        "status": run.status.value,
+                        "subject_artifact_content_hash": run.subject_artifact_content_hash,
+                    }
+                )
+                manifest["records"].append(
+                    {
+                        "type": "evaluation_run",
+                        "id": run.id,
+                        "facts": {
+                            "has_not_met": "not_met" in findings,
+                            "completed": run.status == EvaluationRunStatus.COMPLETED,
+                        },
+                    }
+                )
         for m in milestones:
             manifest["records"].append({"type": "milestone_attempt", "id": m.id, "facts": {}})
         manifest["source_work"] = self._source_work(pa)
@@ -378,17 +538,23 @@ class AssessmentService:
     ) -> AssessmentAttempt:
         if idempotency_key:
             replay = self.db.execute(
-                select(AssessmentAttempt).where(AssessmentAttempt.user_id == user.id, AssessmentAttempt.idempotency_key == idempotency_key)
+                select(AssessmentAttempt).where(
+                    AssessmentAttempt.user_id == user.id, AssessmentAttempt.idempotency_key == idempotency_key
+                )
             ).scalar_one_or_none()
             if replay is not None:
                 return replay
         if previous_attempt_id:
-            self.get_attempt(user.id, previous_attempt_id)  # ownership; retries never reach another learner's attempt
+            self.get_attempt(
+                user.id, previous_attempt_id
+            )  # ownership; retries never reach another learner's attempt
             if origin == AssessmentOrigin.LEARNER_STARTED:
                 origin = AssessmentOrigin.RETRY
 
         report = self.readiness(user, definition_key, project_attempt_id=project_attempt_id)
-        unmet = [c for c in report["checks"] if not c["met"] and not (bypass_cooldown and c["key"] == "cooldown")]
+        unmet = [
+            c for c in report["checks"] if not c["met"] and not (bypass_cooldown and c["key"] == "cooldown")
+        ]
         if unmet:
             raise AssessmentNotReady(
                 "This assessment is not ready to start: " + "; ".join(c["label"] for c in unmet),
@@ -403,18 +569,40 @@ class AssessmentService:
         draw = draw_challenge(self.db, definition, user.id)
         if fresh and draw is None:
             raise AssessmentNotReady("A fresh challenge is required but none could be drawn.")
-        if draw is None and definition.assessment_kind in (AssessmentKind.KNOWLEDGE_CHECK, AssessmentKind.EXPLAIN_BACK):
+        if draw is None and definition.assessment_kind in (
+            AssessmentKind.KNOWLEDGE_CHECK,
+            AssessmentKind.EXPLAIN_BACK,
+        ):
             raise AssessmentNotReady("No challenge could be drawn for this assessment.")
 
         graph = ConceptGraphService(self.db)
         pinned = {
-            "definition": {"id": definition.id, "key": definition.definition_key, "version": definition.version, "content_hash": definition.content_hash},
+            "definition": {
+                "id": definition.id,
+                "key": definition.definition_key,
+                "version": definition.version,
+                "content_hash": definition.content_hash,
+            },
             "concepts": [
-                {"concept_id": l.concept_id, "concept_version_id": l.concept_version_id,
-                 "version": next((v.version for v in graph.list_versions(l.concept_id) if v.id == l.concept_version_id), None)}
+                {
+                    "concept_id": l.concept_id,
+                    "concept_version_id": l.concept_version_id,
+                    "version": next(
+                        (
+                            v.version
+                            for v in graph.list_versions(l.concept_id)
+                            if v.id == l.concept_version_id
+                        ),
+                        None,
+                    ),
+                }
                 for l in links
             ],
-            "project_template": ({"id": pa.project_template_id, "version": (manifest["project"] or {}).get("template_version")} if pa else None),
+            "project_template": (
+                {"id": pa.project_template_id, "version": (manifest["project"] or {}).get("template_version")}
+                if pa
+                else None
+            ),
             "program_version_id": (manifest["project"] or {}).get("program_version_id"),
             "grading_contract_version": GRADING_CONTRACT_VERSION,
             "rubric_version": f"{definition.definition_key}@{definition.version}",
@@ -445,7 +633,12 @@ class AssessmentService:
         )
         self.db.add(attempt)
         self.db.flush()
-        self._audit(user, "assessment.started", attempt, {"definition": definition.definition_key, "version": definition.version, "origin": origin.value})
+        self._audit(
+            user,
+            "assessment.started",
+            attempt,
+            {"definition": definition.definition_key, "version": definition.version, "origin": origin.value},
+        )
         self.db.commit()
         self.db.refresh(attempt)
         return attempt
@@ -460,7 +653,11 @@ class AssessmentService:
             raise AssessmentInvalid("The draft must be a JSON object of reasonable size.")
         changed = self.db.execute(
             update(AssessmentAttempt)
-            .where(AssessmentAttempt.id == attempt_id, AssessmentAttempt.user_id == user_id, AssessmentAttempt.status == AssessmentAttemptStatus.DRAFT)
+            .where(
+                AssessmentAttempt.id == attempt_id,
+                AssessmentAttempt.user_id == user_id,
+                AssessmentAttempt.status == AssessmentAttemptStatus.DRAFT,
+            )
             .values(draft=draft)
             .execution_options(synchronize_session=False)
         ).rowcount
@@ -471,12 +668,15 @@ class AssessmentService:
         return attempt
 
     def abandon(self, user: User, attempt_id: str) -> AssessmentAttempt:
-        """"Leave assessment": releases the Mentor lock. The row and draft are kept."""
+        """ "Leave assessment": releases the Mentor lock. The row and draft are kept."""
         attempt = self.get_attempt(user.id, attempt_id)
         changed = self.db.execute(
             update(AssessmentAttempt)
-            .where(AssessmentAttempt.id == attempt_id, AssessmentAttempt.user_id == user.id,
-                   AssessmentAttempt.status == AssessmentAttemptStatus.DRAFT)
+            .where(
+                AssessmentAttempt.id == attempt_id,
+                AssessmentAttempt.user_id == user.id,
+                AssessmentAttempt.status == AssessmentAttemptStatus.DRAFT,
+            )
             .values(status=AssessmentAttemptStatus.ABANDONED)
             .execution_options(synchronize_session=False)
         ).rowcount
@@ -490,14 +690,19 @@ class AssessmentService:
 
     @staticmethod
     def _valid_attestation(attestation: Any) -> Dict[str, Any]:
-        if not isinstance(attestation, dict) or attestation.get("declaration") not in policy.ATTESTATION_CHOICES:
+        if (
+            not isinstance(attestation, dict)
+            or attestation.get("declaration") not in policy.ATTESTATION_CHOICES
+        ):
             raise AssessmentInvalid("Choose a declaration about the help you used before submitting.")
         note = attestation.get("note")
         if note is not None and (not isinstance(note, str) or len(note) > ATTESTATION_NOTE_MAX):
             raise AssessmentInvalid("The declaration note is too long.")
         return {"declaration": attestation["declaration"], "note": note}
 
-    def submit(self, user: User, attempt_id: str, attestation: Any, *, budget_id: Optional[str] = None) -> AssessmentAttempt:
+    def submit(
+        self, user: User, attempt_id: str, attestation: Any, *, budget_id: Optional[str] = None
+    ) -> AssessmentAttempt:
         attempt = self.get_attempt(user.id, attempt_id)
         if attempt.status != AssessmentAttemptStatus.DRAFT:
             return self._resume_processing(user, attempt, budget_id=budget_id)  # idempotent replay
@@ -511,7 +716,11 @@ class AssessmentService:
         submission = attempt.draft or {}
         frozen = self.db.execute(
             update(AssessmentAttempt)
-            .where(AssessmentAttempt.id == attempt_id, AssessmentAttempt.user_id == user.id, AssessmentAttempt.status == AssessmentAttemptStatus.DRAFT)
+            .where(
+                AssessmentAttempt.id == attempt_id,
+                AssessmentAttempt.user_id == user.id,
+                AssessmentAttempt.status == AssessmentAttemptStatus.DRAFT,
+            )
             .values(
                 status=AssessmentAttemptStatus.SUBMITTED,
                 submitted_at=self._clock(),
@@ -536,7 +745,9 @@ class AssessmentService:
 
     # -- pipeline ---------------------------------------------------------------------------------------------------------------------
 
-    def _resume_processing(self, user: User, attempt: AssessmentAttempt, *, budget_id: Optional[str]) -> AssessmentAttempt:
+    def _resume_processing(
+        self, user: User, attempt: AssessmentAttempt, *, budget_id: Optional[str]
+    ) -> AssessmentAttempt:
         if attempt.status in (AssessmentAttemptStatus.FINALIZED, AssessmentAttemptStatus.ABANDONED):
             return attempt
         definition = self.definitions.get(attempt.definition_id)
@@ -593,18 +804,30 @@ class AssessmentService:
     @staticmethod
     def _crosscheck_required(definition: AssessmentDefinition) -> bool:
         mode = (definition.grading_policy or {}).get("crosscheck", "deciding")
-        grader_required = any(c["method"] == "grader" and c.get("required", True) for c in definition.criteria)
+        grader_required = any(
+            c["method"] == "grader" and c.get("required", True) for c in definition.criteria
+        )
         return mode == "always" or (mode == "deciding" and grader_required)
 
     @staticmethod
     def _skipped_row(criterion: Dict[str, Any]) -> Dict[str, Any]:
-        return {"key": criterion["key"], "label": criterion["label"], "method": "grader", "required": criterion.get("required", True),
-                "finding": None, "status": "skipped", "detail": "Not judged, because a required platform check was not met."}
+        return {
+            "key": criterion["key"],
+            "label": criterion["label"],
+            "method": "grader",
+            "required": criterion.get("required", True),
+            "finding": None,
+            "status": "skipped",
+            "detail": "Not judged, because a required platform check was not met.",
+        }
 
     def _set_status(self, attempt: AssessmentAttempt, status: AssessmentAttemptStatus) -> None:
         self.db.execute(
             update(AssessmentAttempt)
-            .where(AssessmentAttempt.id == attempt.id, AssessmentAttempt.status != AssessmentAttemptStatus.FINALIZED)
+            .where(
+                AssessmentAttempt.id == attempt.id,
+                AssessmentAttempt.status != AssessmentAttemptStatus.FINALIZED,
+            )
             .values(status=status)
             .execution_options(synchronize_session=False)
         )
@@ -612,21 +835,37 @@ class AssessmentService:
         self.db.refresh(attempt)
 
     def _next_seq(self, attempt_id: str) -> int:
-        return (self.db.execute(select(func.max(AssessmentResult.seq)).where(AssessmentResult.attempt_id == attempt_id)).scalar() or 0) + 1
+        return (
+            self.db.execute(
+                select(func.max(AssessmentResult.seq)).where(AssessmentResult.attempt_id == attempt_id)
+            ).scalar()
+            or 0
+        ) + 1
 
     def _deterministic_result(self, attempt_id: str) -> Optional[AssessmentResult]:
-        return self.db.execute(
-            select(AssessmentResult).where(
-                AssessmentResult.attempt_id == attempt_id,
-                AssessmentResult.result_kind == AssessmentResultKind.DETERMINISTIC,
-                AssessmentResult.round == 0,
+        return (
+            self.db.execute(
+                select(AssessmentResult).where(
+                    AssessmentResult.attempt_id == attempt_id,
+                    AssessmentResult.result_kind == AssessmentResultKind.DETERMINISTIC,
+                    AssessmentResult.round == 0,
+                )
             )
-        ).scalars().first()
+            .scalars()
+            .first()
+        )
 
-    def _run_deterministic(self, user: User, attempt: AssessmentAttempt, definition: AssessmentDefinition) -> Optional[AssessmentResult]:
+    def _run_deterministic(
+        self, user: User, attempt: AssessmentAttempt, definition: AssessmentDefinition
+    ) -> Optional[AssessmentResult]:
         ctx = CheckContext(
-            db=self.db, user_id=user.id, attempt=attempt, definition=definition,
-            manifest=attempt.input_manifest, submission=attempt.submission or {}, challenge=attempt.challenge_instance or {},
+            db=self.db,
+            user_id=user.id,
+            attempt=attempt,
+            definition=definition,
+            manifest=attempt.input_manifest,
+            submission=attempt.submission or {},
+            challenge=attempt.challenge_instance or {},
         )
         rows: List[Dict[str, Any]] = []
         try:
@@ -635,16 +874,28 @@ class AssessmentService:
                     continue
                 outcome = run_check(ctx, criterion)
                 rows.append(
-                    {"key": criterion["key"], "label": criterion["label"], "method": "deterministic",
-                     "required": criterion.get("required", True), "check_type": criterion["check"]["type"],
-                     "finding": outcome.finding.value, "detail": outcome.detail, "facts": outcome.facts, "refs": outcome.refs}
+                    {
+                        "key": criterion["key"],
+                        "label": criterion["label"],
+                        "method": "deterministic",
+                        "required": criterion.get("required", True),
+                        "check_type": criterion["check"]["type"],
+                        "finding": outcome.finding.value,
+                        "detail": outcome.detail,
+                        "facts": outcome.facts,
+                        "refs": outcome.refs,
+                    }
                 )
         except CheckUnavailable as exc:
             self._finalize_unable(user, attempt, definition, str(exc))
             return None
         result = AssessmentResult(
-            attempt_id=attempt.id, user_id=user.id, seq=self._next_seq(attempt.id), round=0,
-            result_kind=AssessmentResultKind.DETERMINISTIC, criteria=rows,
+            attempt_id=attempt.id,
+            user_id=user.id,
+            seq=self._next_seq(attempt.id),
+            round=0,
+            result_kind=AssessmentResultKind.DETERMINISTIC,
+            criteria=rows,
             facts={"manifest_hash": attempt.input_manifest_hash, "submission_hash": attempt.submission_hash},
         )
         self.db.add(result)
@@ -654,14 +905,22 @@ class AssessmentService:
 
     # -- finalize (one transaction) -----------------------------------------------------------------------------------------------------------------
 
-    def _finalize_unable(self, user: User, attempt: AssessmentAttempt, definition: AssessmentDefinition, detail: str) -> None:
+    def _finalize_unable(
+        self, user: User, attempt: AssessmentAttempt, definition: AssessmentDefinition, detail: str
+    ) -> None:
         from app.assessment_outcome import Aggregate
         from app.db.enums import DemonstrationEffect
 
-        agg = Aggregate(outcome=AssessmentOutcome.UNABLE_TO_ASSESS, effect=DemonstrationEffect.NONE,
-                        reason_code="check_unavailable", independence={})
+        agg = Aggregate(
+            outcome=AssessmentOutcome.UNABLE_TO_ASSESS,
+            effect=DemonstrationEffect.NONE,
+            reason_code="check_unavailable",
+            independence={},
+        )
         agg.remediation = [{"kind": "retry", "label": "Try again later"}]
-        self._finalize(user, attempt, definition, self._links(definition.id), None, [], [], None, agg, note=detail)
+        self._finalize(
+            user, attempt, definition, self._links(definition.id), None, [], [], None, agg, note=detail
+        )
 
     def _finalize(
         self,
@@ -683,9 +942,18 @@ class AssessmentService:
         # Compare-and-swap: exactly one finalizer wins; a replay returns the same final.
         won = self.db.execute(
             update(AssessmentAttempt)
-            .where(AssessmentAttempt.id == attempt.id, AssessmentAttempt.user_id == user.id,
-                   AssessmentAttempt.status.in_([AssessmentAttemptStatus.SUBMITTED, AssessmentAttemptStatus.CHECKING,
-                                                 AssessmentAttemptStatus.GRADING, AssessmentAttemptStatus.AWAITING_GRADING]))
+            .where(
+                AssessmentAttempt.id == attempt.id,
+                AssessmentAttempt.user_id == user.id,
+                AssessmentAttempt.status.in_(
+                    [
+                        AssessmentAttemptStatus.SUBMITTED,
+                        AssessmentAttemptStatus.CHECKING,
+                        AssessmentAttemptStatus.GRADING,
+                        AssessmentAttemptStatus.AWAITING_GRADING,
+                    ]
+                ),
+            )
             .values(status=AssessmentAttemptStatus.FINALIZED, finalized_at=self._clock())
             .execution_options(synchronize_session=False)
         ).rowcount
@@ -711,34 +979,74 @@ class AssessmentService:
             }
             final = Result(
                 id=new_uuid(),  # known up front: the evidence rows cite it before the row is flushed
-                attempt_id=attempt.id, user_id=user.id, seq=self._next_seq(attempt.id), round=0,
-                result_kind=Kind.FINAL, outcome=agg.outcome, demonstration_effect=agg.effect,
-                criteria=criteria_rows, facts=facts, gaps=agg.gaps, remediation=agg.remediation,
-                grader_agent_run_ids=(grader_result.grader_agent_run_ids if grader_result is not None else None),
-                grader_agent_version_id=(grader_result.grader_agent_version_id if grader_result is not None else None),
+                attempt_id=attempt.id,
+                user_id=user.id,
+                seq=self._next_seq(attempt.id),
+                round=0,
+                result_kind=Kind.FINAL,
+                outcome=agg.outcome,
+                demonstration_effect=agg.effect,
+                criteria=criteria_rows,
+                facts=facts,
+                gaps=agg.gaps,
+                remediation=agg.remediation,
+                grader_agent_run_ids=(
+                    grader_result.grader_agent_run_ids if grader_result is not None else None
+                ),
+                grader_agent_version_id=(
+                    grader_result.grader_agent_version_id if grader_result is not None else None
+                ),
                 grading_contract_version=(GRADING_CONTRACT_VERSION if grader_result is not None else None),
             )
-            evidence = AssessmentEvidenceWriter(self.db).write(attempt=attempt, definition=definition, links=links, result=final)
+            evidence = AssessmentEvidenceWriter(self.db).write(
+                attempt=attempt, definition=definition, links=links, result=final
+            )
             after = {cid: states.state(user.id, cid, now=self._clock()) for cid in concept_ids}
             AssessmentReportService(self.db).populate(
-                final=final, attempt=attempt, definition=definition, links=links, evidence=evidence,
-                state_before=before, state_after=after, now=self._clock(),
+                final=final,
+                attempt=attempt,
+                definition=definition,
+                links=links,
+                evidence=evidence,
+                state_before=before,
+                state_after=after,
+                now=self._clock(),
             )
             self.db.add(final)
             self.db.flush()
             if agg.outcome == AssessmentOutcome.HUMAN_REVIEW_REQUIRED:
                 # Opened WITHOUT consent: a reviewer sees no content until the learner agrees.
-                self.db.add(AssessmentReview(
-                    attempt_id=attempt.id, result_id=final.id, user_id=user.id,
-                    trigger=AssessmentReviewTrigger.MODEL_DISAGREEMENT,
-                    fingerprint=review_fingerprint(final.id, attempt.input_manifest_hash, attempt.submission_hash),
-                ))
+                self.db.add(
+                    AssessmentReview(
+                        attempt_id=attempt.id,
+                        result_id=final.id,
+                        user_id=user.id,
+                        trigger=AssessmentReviewTrigger.MODEL_DISAGREEMENT,
+                        fingerprint=review_fingerprint(
+                            final.id, attempt.input_manifest_hash, attempt.submission_hash
+                        ),
+                    )
+                )
                 self.db.flush()
             self._apply_project_effects(user, attempt, definition, agg)
-            self._audit(user, "assessment.finalized", attempt,
-                        {"result_id": final.id, "outcome": agg.outcome.value, "effect": agg.effect.value, "reason": agg.reason_code})
+            self._audit(
+                user,
+                "assessment.finalized",
+                attempt,
+                {
+                    "result_id": final.id,
+                    "outcome": agg.outcome.value,
+                    "effect": agg.effect.value,
+                    "reason": agg.reason_code,
+                },
+            )
             if evidence:
-                self._audit(user, "assessment.evidence_written", attempt, {"result_id": final.id, "evidence_ids": [e.id for e in evidence]})
+                self._audit(
+                    user,
+                    "assessment.evidence_written",
+                    attempt,
+                    {"result_id": final.id, "evidence_ids": [e.id for e in evidence]},
+                )
             self.db.commit()
         except Exception:
             self.db.rollback()
@@ -746,9 +1054,14 @@ class AssessmentService:
         self.db.refresh(attempt)
         return attempt
 
-    def _apply_project_effects(self, user: User, attempt: AssessmentAttempt, definition: AssessmentDefinition, agg) -> None:
+    def _apply_project_effects(
+        self, user: User, attempt: AssessmentAttempt, definition: AssessmentDefinition, agg
+    ) -> None:
         """Only 5C writes 5B's project status and submission finalization."""
-        if definition.assessment_kind not in (AssessmentKind.PROJECT, AssessmentKind.CAPSTONE) or not attempt.project_attempt_id:
+        if (
+            definition.assessment_kind not in (AssessmentKind.PROJECT, AssessmentKind.CAPSTONE)
+            or not attempt.project_attempt_id
+        ):
             return
         pa = self.db.get(ProjectAttempt, attempt.project_attempt_id)
         if pa is None or pa.user_id != user.id:
@@ -757,7 +1070,11 @@ class AssessmentService:
             pa.status = ProjectAttemptStatus.PASSED
             if attempt.source_submission_id:
                 submission = self.db.get(AssessmentReadySubmission, attempt.source_submission_id)
-                if submission is not None and submission.user_id == user.id and submission.finalized_at is None:
+                if (
+                    submission is not None
+                    and submission.user_id == user.id
+                    and submission.finalized_at is None
+                ):
                     submission.finalized_at = self._clock()
         elif agg.outcome == AssessmentOutcome.NEEDS_WORK:
             pa.status = ProjectAttemptStatus.NEEDS_WORK
@@ -765,8 +1082,12 @@ class AssessmentService:
     def _audit(self, user: User, event: str, attempt: AssessmentAttempt, detail: Dict[str, Any]) -> None:
         # Detail carries ids / hashes / outcomes only — never learner content.
         AuditService(self.db).record(
-            org_id=user.org_id, event_type=event, actor_user_id=user.id,
-            target_ref=f"assessment_attempt:{attempt.id}", detail=detail, commit=False,
+            org_id=user.org_id,
+            event_type=event,
+            actor_user_id=user.id,
+            target_ref=f"assessment_attempt:{attempt.id}",
+            detail=detail,
+            commit=False,
         )
 
     # -- learner-safe views -----------------------------------------------------------------------------------------------------------------------------

@@ -34,6 +34,10 @@ FORMATIVE = "formative"
 # the number lives.
 MAX_DEMONSTRATION_ASSISTANCE_RANK = 2
 
+# Fresh work done in Assessment Mode (the Mentor is locked) is independent by
+# construction. Every writer of assessment evidence records THIS level.
+ASSESSMENT_MODE_ASSISTANCE = AssistanceLevel.H0
+
 _RANK = {
     AssistanceLevel.H0: 0,
     AssistanceLevel.H1: 1,
@@ -107,13 +111,14 @@ def _parse_assistance(value: Any) -> Optional[int]:
 # -- Practiced ----------------------------------------------------------------
 
 
+def level_counts_toward_practiced(level: Optional[AssistanceLevel]) -> bool:
+    """H5 (solution shown) is never practice; every other level is."""
+    return level is None or AssistanceLevel(level) != AssistanceLevel.H5
+
+
 def counts_toward_practiced(row) -> bool:
     """Superseded rows never count; H5 (solution shown) is never practice."""
-    if row.superseded_by_id is not None:
-        return False
-    if row.assistance_level is not None and AssistanceLevel(row.assistance_level) == AssistanceLevel.H5:
-        return False
-    return True
+    return row.superseded_by_id is None and level_counts_toward_practiced(row.assistance_level)
 
 
 # -- Demonstrated: platform floor ----------------------------------------------
@@ -168,10 +173,7 @@ def leg_constraints_ok(row, requirement: dict) -> bool:
             return False
 
     grader_in: Optional[Iterable[str]] = requirement.get("grader_in")
-    if grader_in is not None:
-        if getattr(row.grader, "value", row.grader) not in set(grader_in):
-            return False
-    return True
+    return grader_in is None or getattr(row.grader, "value", row.grader) in set(grader_in)
 
 
 def counts_toward_demonstrated(row, requirement: Optional[dict] = None) -> bool:

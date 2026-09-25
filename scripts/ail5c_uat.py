@@ -16,9 +16,19 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 def main() -> int:
-    command = [sys.executable, "-m", "pytest", "tests/test_ail5c_uat.py", "-v", "-p", "no:cacheprovider", "-W", "ignore"]
+    command = [
+        sys.executable,
+        "-m",
+        "pytest",
+        "tests/test_ail5c_uat.py",
+        "-v",
+        "-p",
+        "no:cacheprovider",
+        "-W",
+        "ignore",
+    ]
     print("AIL.5C deterministic local UAT (disposable DB, scripted provider)\n")
-    result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True)
+    result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, check=False)
     scenarios = [line for line in result.stdout.splitlines() if "::test_uat" in line]
     for line in scenarios:
         name = line.split("::")[1].split(" ")[0]

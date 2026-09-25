@@ -5,7 +5,13 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from app.assessment_curriculum import FOUNDATION_ASSESSMENTS, seed_foundation_assessments
-from app.db.enums import AssessmentKind, AssessmentOutcome, AssistanceLevel, DemonstrationEffect, ProjectAttemptStatus
+from app.db.enums import (
+    AssessmentKind,
+    AssessmentOutcome,
+    AssistanceLevel,
+    DemonstrationEffect,
+    ProjectAttemptStatus,
+)
 from app.models.academy import ProjectAttempt, ProjectTemplate
 from app.models.assessment import AssessmentDefinition
 from app.services.assessment_definition_service import AssessmentDefinitionService
@@ -13,6 +19,7 @@ from app.services.assessment_service import AssessmentService
 from app.services.build_with_me_service import ProjectTemplateService
 from app.services.learner_state_service import DEMONSTRATED, LearnerStateService
 from app.services.system_project_service import ensure_ail_system_project
+from tests.ail1a_factories import make_concept, make_published_version
 from tests.ail5c_factories import (
     ScriptedGrader,
     add_milestone_evidence,
@@ -21,14 +28,15 @@ from tests.ail5c_factories import (
     make_project_attempt,
     setup_free_models,
 )
-from tests.ail1a_factories import make_concept, make_published_version
 
 # The capstone row includes a judged criterion, so it is AI-graded: on its own it can never
 # demonstrate. A real capstone Concept pairs it with deterministic, verified milestone evidence.
-REQ_CAPSTONE = {"requires_all": [
-    {"evidence_type": "lab", "min_passed": 1, "min_verification": "platform_verified"},
-    {"evidence_type": "project_assessment", "min_passed": 1},
-]}
+REQ_CAPSTONE = {
+    "requires_all": [
+        {"evidence_type": "lab", "min_passed": 1, "min_verification": "platform_verified"},
+        {"evidence_type": "project_assessment", "min_passed": 1},
+    ]
+}
 
 
 def _all_slugs():
@@ -60,8 +68,13 @@ def test_the_authored_set_publishes_and_is_hash_frozen(seeded, db):
     assert {d.definition_key for d in created} == {s["key"] for s in FOUNDATION_ASSESSMENTS}
     service = AssessmentDefinitionService(db)
     kinds = {d.assessment_kind for d in created}
-    assert kinds == {AssessmentKind.KNOWLEDGE_CHECK, AssessmentKind.EXPLAIN_BACK, AssessmentKind.MODIFICATION,
-                     AssessmentKind.PROJECT, AssessmentKind.CAPSTONE}
+    assert kinds == {
+        AssessmentKind.KNOWLEDGE_CHECK,
+        AssessmentKind.EXPLAIN_BACK,
+        AssessmentKind.MODIFICATION,
+        AssessmentKind.PROJECT,
+        AssessmentKind.CAPSTONE,
+    }
     for defn in created:
         assert service.verify_hash(defn) and defn.version == 1
         for link in service.links(defn.id):
@@ -78,7 +91,9 @@ def test_seeding_is_idempotent_and_never_republishes(seeded, db, bootstrap):
 
 
 def test_seeding_refuses_when_a_concept_or_template_is_missing_and_creates_nothing(db, bootstrap):
-    make_concept(db, slug="structured-output", name="Structured Output")  # one concept, no version, no templates
+    make_concept(
+        db, slug="structured-output", name="Structured Output"
+    )  # one concept, no version, no templates
     db.commit()
     with pytest.raises(ValueError) as exc:
         seed_foundation_assessments(db, bootstrap.user.id)
@@ -86,7 +101,11 @@ def test_seeding_refuses_when_a_concept_or_template_is_missing_and_creates_nothi
     assert db.query(AssessmentDefinition).count() == 0
 
 
-@pytest.mark.parametrize("spec", [s for s in FOUNDATION_ASSESSMENTS if s["kind"] == AssessmentKind.KNOWLEDGE_CHECK], ids=lambda s: s["key"])
+@pytest.mark.parametrize(
+    "spec",
+    [s for s in FOUNDATION_ASSESSMENTS if s["kind"] == AssessmentKind.KNOWLEDGE_CHECK],
+    ids=lambda s: s["key"],
+)
 def test_knowledge_check_content_is_well_formed(spec):
     pool = spec["challenge"]["pool"]
     assert len(pool) >= 3 * spec["challenge"]["draw_size"]
@@ -103,9 +122,14 @@ def test_every_judged_criterion_has_authored_reference_points_and_a_remediation_
     for spec in FOUNDATION_ASSESSMENTS:
         for c in spec["criteria"]:
             if c["method"] == "grader":
-                assert c["reference_points"] and all(p.strip() for p in c["reference_points"]), (spec["key"], c["key"])
+                assert c["reference_points"] and all(p.strip() for p in c["reference_points"]), (
+                    spec["key"],
+                    c["key"],
+                )
     for spec in FOUNDATION_ASSESSMENTS:
-        assert spec["kind"] != AssessmentKind.KNOWLEDGE_CHECK or all(c["method"] == "deterministic" for c in spec["criteria"])
+        assert spec["kind"] != AssessmentKind.KNOWLEDGE_CHECK or all(
+            c["method"] == "deterministic" for c in spec["criteria"]
+        )
 
 
 # -- capstone --------------------------------------------------------------------------------------------------
@@ -128,9 +152,19 @@ def _capstone(db, bootstrap, *, levels=(AssistanceLevel.H1,)):
 
 
 def _fill(attempt, run, evaluation, *, readme=READMEE):
-    responses = {i["entry_key"]: {"text": f"In my project I chose this deliberately and verified it by rerunning ({i['entry_key']})."}
-                 for i in attempt.challenge_instance["items"] if i.get("fixed")}
-    return {"evaluation_run_ids": [evaluation.id], "run_ids": [run.id], "fields": {"readme": readme}, "responses": responses}
+    responses = {
+        i["entry_key"]: {
+            "text": f"In my project I chose this deliberately and verified it by rerunning ({i['entry_key']})."
+        }
+        for i in attempt.challenge_instance["items"]
+        if i.get("fixed")
+    }
+    return {
+        "evaluation_run_ids": [evaluation.id],
+        "run_ids": [run.id],
+        "fields": {"readme": readme},
+        "responses": responses,
+    }
 
 
 def test_capstone_needs_a_fresh_challenge_and_passes_with_verified_work(db, bootstrap):
@@ -143,8 +177,13 @@ def test_capstone_needs_a_fresh_challenge_and_passes_with_verified_work(db, boot
     fixed = [i for i in attempt.challenge_instance["items"] if i.get("fixed")]
     assert len(fixed) == 3 and any(not i.get("fixed") for i in attempt.challenge_instance["items"])
     needle = attempt.challenge_instance["parameters"]["input_text"]
-    run = make_owned_run(db, user, project=ensure_ail_system_project(db, user), description=f"Rerun on {needle}",
-                         created_at=datetime.now(timezone.utc) + timedelta(minutes=2))
+    run = make_owned_run(
+        db,
+        user,
+        project=ensure_ail_system_project(db, user),
+        description=f"Rerun on {needle}",
+        created_at=datetime.now(timezone.utc) + timedelta(minutes=2),
+    )
     svc.save_draft(user.id, attempt.id, _fill(attempt, run, make_evaluation_run(db, user, ["met", "met"])))
     done = svc.submit(user, attempt.id, {"declaration": "no_external_help"})
     final = svc.effective_result(done.id)
@@ -161,7 +200,12 @@ def test_capstone_needs_a_fresh_challenge_and_passes_with_verified_work(db, boot
     from app.models.learner import LearningEvidence
 
     for row in db.query(LearningEvidence).filter_by(user_id=user.id, evidence_type=EvidenceType.LAB).all():
-        row.superseded_by_id = db.query(LearningEvidence).filter_by(user_id=user.id, evidence_type=EvidenceType.PROJECT_ASSESSMENT).first().id
+        row.superseded_by_id = (
+            db.query(LearningEvidence)
+            .filter_by(user_id=user.id, evidence_type=EvidenceType.PROJECT_ASSESSMENT)
+            .first()
+            .id
+        )
     db.commit()
     assert LearnerStateService(db).state(user.id, concept.id).ladder != DEMONSTRATED
 
@@ -172,9 +216,18 @@ def test_capstone_missing_a_required_section_is_needs_work_without_grading(db, b
     svc = AssessmentService(db, adapter_factory=lambda _d, _p: adapter)
     attempt = svc.start(user, "capstone-foundations", project_attempt_id=pa.id)
     needle = attempt.challenge_instance["parameters"]["input_text"]
-    run = make_owned_run(db, user, project=ensure_ail_system_project(db, user), description=needle,
-                         created_at=datetime.now(timezone.utc) + timedelta(minutes=2))
-    svc.save_draft(user.id, attempt.id, _fill(attempt, run, make_evaluation_run(db, user, ["met"]), readme="## Problem\nOnly one section."))
+    run = make_owned_run(
+        db,
+        user,
+        project=ensure_ail_system_project(db, user),
+        description=needle,
+        created_at=datetime.now(timezone.utc) + timedelta(minutes=2),
+    )
+    svc.save_draft(
+        user.id,
+        attempt.id,
+        _fill(attempt, run, make_evaluation_run(db, user, ["met"]), readme="## Problem\nOnly one section."),
+    )
     final = svc.effective_result(svc.submit(user, attempt.id, {"declaration": "no_external_help"}).id)
     assert final.outcome == AssessmentOutcome.NEEDS_WORK and adapter.requests == []
     assert db.get(ProjectAttempt, pa.id).status == ProjectAttemptStatus.NEEDS_WORK

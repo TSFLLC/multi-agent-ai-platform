@@ -387,7 +387,7 @@ export async function renderAssessmentResult(root, attemptId, view) {
   const review = model.answers.review_later || {};
   const next = Object.values(review).filter(Boolean).map((r) => (r.next_review_at ? `Next review around ${String(r.next_review_at).slice(0, 10)}.` : "")).filter(Boolean);
   if (next.length) root.appendChild(el("p", { class: "hint" }, next.join(" ")));
-  if (model.hasRecord) root.appendChild(el("a", { class: "button", href: `#/academy/assessments/records/${enc(model.id)}` }, "Open my Demonstration Record"));
+  if (model.hasRecord) root.appendChild(el("a", { class: "button", href: `#/academy/assessments/records/${enc(model.recordResultId)}` }, "Open my Demonstration Record"));
   root.appendChild(reviewBlock(model.review, attemptId, reload));
   root.appendChild(el("details", { class: "card" }, [el("summary", {}, `History of this attempt (${model.history.length} records)`), el("ul", {}, model.history.map((h) => el("li", {}, `${h.kind}${h.outcome ? ` — ${outcomeInfo(h.outcome).label}` : ""}`)))]));
 }

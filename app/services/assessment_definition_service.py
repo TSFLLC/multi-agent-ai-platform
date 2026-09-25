@@ -15,8 +15,8 @@ from sqlalchemy.orm import Session
 from app.assessment_contract import (
     DEFAULT_GRADING_POLICY,
     DEFAULT_INDEPENDENCE_POLICY,
-    DefinitionInvalid,
     KIND_TO_EVIDENCE,
+    DefinitionInvalid,
     sha256_hex,
     validate_definition,
 )
@@ -91,21 +91,29 @@ class AssessmentDefinitionService:
 
     def current(self, definition_key: str) -> Optional[AssessmentDefinition]:
         """The newest PUBLISHED version of a key (retired versions are skipped)."""
-        return self.db.execute(
-            select(AssessmentDefinition)
-            .where(
-                AssessmentDefinition.definition_key == definition_key,
-                AssessmentDefinition.status == AssessmentDefinitionStatus.PUBLISHED,
+        return (
+            self.db.execute(
+                select(AssessmentDefinition)
+                .where(
+                    AssessmentDefinition.definition_key == definition_key,
+                    AssessmentDefinition.status == AssessmentDefinitionStatus.PUBLISHED,
+                )
+                .order_by(AssessmentDefinition.version.desc())
             )
-            .order_by(AssessmentDefinition.version.desc())
-        ).scalars().first()
+            .scalars()
+            .first()
+        )
 
     def list_current(self) -> List[AssessmentDefinition]:
-        keys = self.db.execute(
-            select(AssessmentDefinition.definition_key)
-            .where(AssessmentDefinition.status == AssessmentDefinitionStatus.PUBLISHED)
-            .distinct()
-        ).scalars().all()
+        keys = (
+            self.db.execute(
+                select(AssessmentDefinition.definition_key)
+                .where(AssessmentDefinition.status == AssessmentDefinitionStatus.PUBLISHED)
+                .distinct()
+            )
+            .scalars()
+            .all()
+        )
         found = [self.current(key) for key in sorted(keys)]
         return [d for d in found if d is not None]
 
@@ -138,7 +146,9 @@ class AssessmentDefinitionService:
         "concept_version_id"?}``. An omitted version is resolved NOW to the
         Concept's current version and pinned — never left as "latest"."""
         latest = self.db.execute(
-            select(func.max(AssessmentDefinition.version)).where(AssessmentDefinition.definition_key == definition_key)
+            select(func.max(AssessmentDefinition.version)).where(
+                AssessmentDefinition.definition_key == definition_key
+            )
         ).scalar()
         defn = AssessmentDefinition(
             definition_key=definition_key,
@@ -202,8 +212,14 @@ class AssessmentDefinitionService:
             raise ConflictError(str(exc))
         for link in links:
             version = self.db.get(ConceptVersion, link.concept_version_id)
-            if version is None or version.concept_id != link.concept_id or version.status == VersionStatus.DRAFT:
-                raise ConflictError("Every linked Concept Version must be a published version of that Concept.")
+            if (
+                version is None
+                or version.concept_id != link.concept_id
+                or version.status == VersionStatus.DRAFT
+            ):
+                raise ConflictError(
+                    "Every linked Concept Version must be a published version of that Concept."
+                )
         if defn.project_template_id:
             template = self.db.get(ProjectTemplate, defn.project_template_id)
             if template is None or template.status != "published":
@@ -240,20 +256,42 @@ class AssessmentDefinitionService:
                 continue
             check, kind = c["check"], c["check"]["type"]
             if kind in ("length_bounds", "section_present"):
-                add(check["field"], c["label"], "long_text", sections=check.get("sections"), min_chars=check.get("min_chars"))
+                add(
+                    check["field"],
+                    c["label"],
+                    "long_text",
+                    sections=check.get("sections"),
+                    min_chars=check.get("min_chars"),
+                )
             elif kind in ("schema_valid", "numeric_match"):
                 add(check["field"], c["label"], "text")
-            elif kind in ("run_exists_owned_terminal", "run_after_challenge_start", "inputs_match_challenge", "artifact_present", "cost_within"):
+            elif kind in (
+                "run_exists_owned_terminal",
+                "run_after_challenge_start",
+                "inputs_match_challenge",
+                "artifact_present",
+                "cost_within",
+            ):
                 add(check.get("field", "run_ids"), "The runs you made (paste their ids)", "ids")
             elif kind == "evaluation_run_findings":
-                add(check.get("field", "evaluation_run_ids"), "Your app's evaluation runs (paste their ids)", "ids")
+                add(
+                    check.get("field", "evaluation_run_ids"),
+                    "Your app's evaluation runs (paste their ids)",
+                    "ids",
+                )
             elif kind in ("experiment_concluded", "experiment_claim"):
                 add(check.get("field", "experiment_id"), "Your experiment (paste its id)", "id")
                 if check.get("claim_field"):
-                    add(check["claim_field"], "Which variant did better, according to the recorded results?", "text")
+                    add(
+                        check["claim_field"],
+                        "Which variant did better, according to the recorded results?",
+                        "text",
+                    )
         entry_kind = (defn.challenge_spec or {}).get("entry_kind")
-        if any(c["method"] == "grader" for c in defn.criteria) and entry_kind != "prompt" and not any(
-            f["input"] == "long_text" for f in fields.values()
+        if (
+            any(c["method"] == "grader" for c in defn.criteria)
+            and entry_kind != "prompt"
+            and not any(f["input"] == "long_text" for f in fields.values())
         ):
             add("fields.explanation", "Your explanation, in your own words", "long_text")
         return list(fields.values())

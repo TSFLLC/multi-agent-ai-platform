@@ -71,7 +71,9 @@ def derive_candidate_facts(
         if run is None or run.requested_by_user_id != user_id:
             raise LookupError("Evaluation run not found")
         if run.status != EvaluationRunStatus.COMPLETED:
-            return DerivedFacts(False, ExecutionVerification.PLATFORM_VERIFIED, "evaluation_run_not_completed")
+            return DerivedFacts(
+                False, ExecutionVerification.PLATFORM_VERIFIED, "evaluation_run_not_completed"
+            )
         findings = [r.finding for r in run.criterion_results]
         passed = bool(findings) and all(
             f in (EvaluationFinding.MET, EvaluationFinding.NOT_APPLICABLE) for f in findings

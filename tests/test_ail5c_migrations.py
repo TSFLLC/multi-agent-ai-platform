@@ -57,45 +57,88 @@ def _clean(conn):
 
 def _seed(conn):
     conn.execute(text(f"INSERT INTO organizations (id, name, created_at) VALUES ('org-1', 'Org', '{NOW}')"))
-    conn.execute(text(f"INSERT INTO users (id, org_id, email, role, created_at) VALUES ('u-1', 'org-1', 'a@x.io', 'owner', '{NOW}')"))
-    conn.execute(text(f"INSERT INTO concepts (id, slug, name, level, kind, is_core, created_at) VALUES ('c-1', 's', 'C', 'foundational', 'mechanism', 0, '{NOW}')"))
-    conn.execute(text(
-        "INSERT INTO concept_versions (id, concept_id, version, plain_definition, content_origin, status, created_at) "
-        f"VALUES ('cv-1', 'c-1', 1, 'd', 'ai_drafted_unreviewed', 'active', '{NOW}')"
-    ))
-    conn.execute(text(f"INSERT INTO projects (id, org_id, name, kind, ail_evidence_opt_in, created_at) VALUES ('p-1', 'org-1', 'AIL', 'system_ail', 0, '{NOW}')"))
-    conn.execute(text(f"INSERT INTO agents (id, project_id, name, role, current_status, created_at) VALUES ('a-1', 'p-1', 'A', 'professor', 'active', '{NOW}')"))
-    conn.execute(text(f"INSERT INTO agent_versions (id, agent_id, version, name, role, default_model_strategy, status, created_at) VALUES ('av-1', 'a-1', 1, 'A', 'professor', 'manual_required', 'active', '{NOW}')"))
-    conn.execute(text(f"INSERT INTO tasks (id, project_id, title, execution_mode, status, created_at) VALUES ('t-1', 'p-1', 'T', 'single_agent', 'ready', '{NOW}')"))
-    conn.execute(text(f"INSERT INTO task_runs (id, task_id, status, timeout_seconds, created_at) VALUES ('tr-1', 't-1', 'created', 60, '{NOW}')"))
+    conn.execute(
+        text(
+            f"INSERT INTO users (id, org_id, email, role, created_at) VALUES ('u-1', 'org-1', 'a@x.io', 'owner', '{NOW}')"
+        )
+    )
+    conn.execute(
+        text(
+            f"INSERT INTO concepts (id, slug, name, level, kind, is_core, created_at) VALUES ('c-1', 's', 'C', 'foundational', 'mechanism', 0, '{NOW}')"
+        )
+    )
+    conn.execute(
+        text(
+            "INSERT INTO concept_versions (id, concept_id, version, plain_definition, content_origin, status, created_at) "
+            f"VALUES ('cv-1', 'c-1', 1, 'd', 'ai_drafted_unreviewed', 'active', '{NOW}')"
+        )
+    )
+    conn.execute(
+        text(
+            f"INSERT INTO projects (id, org_id, name, kind, ail_evidence_opt_in, created_at) VALUES ('p-1', 'org-1', 'AIL', 'system_ail', 0, '{NOW}')"
+        )
+    )
+    conn.execute(
+        text(
+            f"INSERT INTO agents (id, project_id, name, role, current_status, created_at) VALUES ('a-1', 'p-1', 'A', 'professor', 'active', '{NOW}')"
+        )
+    )
+    conn.execute(
+        text(
+            f"INSERT INTO agent_versions (id, agent_id, version, name, role, default_model_strategy, status, created_at) VALUES ('av-1', 'a-1', 1, 'A', 'professor', 'manual_required', 'active', '{NOW}')"
+        )
+    )
+    conn.execute(
+        text(
+            f"INSERT INTO tasks (id, project_id, title, execution_mode, status, created_at) VALUES ('t-1', 'p-1', 'T', 'single_agent', 'ready', '{NOW}')"
+        )
+    )
+    conn.execute(
+        text(
+            f"INSERT INTO task_runs (id, task_id, status, timeout_seconds, created_at) VALUES ('tr-1', 't-1', 'created', 60, '{NOW}')"
+        )
+    )
     for i, role in enumerate(("primary", "reviewer", "repair", "evaluator", "professor")):
-        conn.execute(text(
-            "INSERT INTO agent_runs (id, task_run_id, agent_version_id, status, role, timeout_seconds, fencing_token, created_at) "
-            f"VALUES ('run-{i}', 'tr-1', 'av-1', 'created', '{role}', 60, 0, '{NOW}')"
-        ))
+        conn.execute(
+            text(
+                "INSERT INTO agent_runs (id, task_run_id, agent_version_id, status, role, timeout_seconds, fencing_token, created_at) "
+                f"VALUES ('run-{i}', 'tr-1', 'av-1', 'created', '{role}', 60, 0, '{NOW}')"
+            )
+        )
     for i, (etype, ref) in enumerate(
-        [("knowledge_check", "none"), ("lab", "experiment"), ("interpretation", "human"), ("self_report", "none")]
+        [
+            ("knowledge_check", "none"),
+            ("lab", "experiment"),
+            ("interpretation", "human"),
+            ("self_report", "none"),
+        ]
     ):
-        conn.execute(text(
-            "INSERT INTO learning_evidence (id, user_id, concept_id, concept_version_id, evidence_type, grader, "
-            f"on_demo_data, ref_type, ref_id, created_at) VALUES ('le-{i}', 'u-1', 'c-1', 'cv-1', '{etype}', "
-            f"'deterministic', 0, '{ref}', {'NULL' if ref == 'none' else repr('ref-' + str(i))}, '{NOW}')"
-        ))
+        conn.execute(
+            text(
+                "INSERT INTO learning_evidence (id, user_id, concept_id, concept_version_id, evidence_type, grader, "
+                f"on_demo_data, ref_type, ref_id, created_at) VALUES ('le-{i}', 'u-1', 'c-1', 'cv-1', '{etype}', "
+                f"'deterministic', 0, '{ref}', {'NULL' if ref == 'none' else repr('ref-' + str(i))}, '{NOW}')"
+            )
+        )
 
 
 def _evidence_insert(conn, ident, etype, ref, ref_id):
-    conn.execute(text(
-        "INSERT INTO learning_evidence (id, user_id, concept_id, concept_version_id, evidence_type, grader, "
-        f"on_demo_data, ref_type, ref_id, created_at) VALUES ('{ident}', 'u-1', 'c-1', 'cv-1', '{etype}', "
-        f"'deterministic', 0, '{ref}', '{ref_id}', '{NOW}')"
-    ))
+    conn.execute(
+        text(
+            "INSERT INTO learning_evidence (id, user_id, concept_id, concept_version_id, evidence_type, grader, "
+            f"on_demo_data, ref_type, ref_id, created_at) VALUES ('{ident}', 'u-1', 'c-1', 'cv-1', '{etype}', "
+            f"'deterministic', 0, '{ref}', '{ref_id}', '{NOW}')"
+        )
+    )
 
 
 def _agent_run_insert(conn, ident, role):
-    conn.execute(text(
-        "INSERT INTO agent_runs (id, task_run_id, agent_version_id, status, role, timeout_seconds, fencing_token, created_at) "
-        f"VALUES ('{ident}', 'tr-1', 'av-1', 'created', '{role}', 60, 0, '{NOW}')"
-    ))
+    conn.execute(
+        text(
+            "INSERT INTO agent_runs (id, task_run_id, agent_version_id, status, role, timeout_seconds, fencing_token, created_at) "
+            f"VALUES ('{ident}', 'tr-1', 'av-1', 'created', '{role}', 60, 0, '{NOW}')"
+        )
+    )
 
 
 def _checks(engine, table):
@@ -134,7 +177,9 @@ def test_r2_extends_evidence_enums_preserving_every_row_and_constraint(db_path):
     engine = _engine(db_path)
     with engine.begin() as conn:
         assert conn.execute(text("SELECT * FROM learning_evidence ORDER BY id")).fetchall() == old_rows
-        for i, etype in enumerate(("explain_back", "modification", "reproduction", "debugging", "project_assessment")):
+        for i, etype in enumerate(
+            ("explain_back", "modification", "reproduction", "debugging", "project_assessment")
+        ):
             _evidence_insert(conn, f"new-{i}", etype, "assessment_result", f"res-{i}")
         _clean(conn)
     new_checks = _checks(engine, "learning_evidence")
@@ -153,17 +198,26 @@ def test_r2_database_enforces_assessment_evidence_idempotency(db_path):
     with engine.begin() as conn:
         _seed(conn)
         _evidence_insert(conn, "e-1", "modification", "assessment_result", "res-1")
-    with pytest.raises(IntegrityError):
-        with engine.begin() as conn:
-            _evidence_insert(conn, "e-2", "modification", "assessment_result", "res-1")
+    with pytest.raises(IntegrityError), engine.begin() as conn:
+        _evidence_insert(conn, "e-2", "modification", "assessment_result", "res-1")
     with engine.begin() as conn:  # same result, different concept would be a different row
-        conn.execute(text(f"INSERT INTO concepts (id, slug, name, level, kind, is_core, created_at) VALUES ('c-2', 's2', 'C2', 'foundational', 'mechanism', 0, '{NOW}')"))
-        conn.execute(text(f"INSERT INTO concept_versions (id, concept_id, version, plain_definition, content_origin, status, created_at) VALUES ('cv-2', 'c-2', 1, 'd', 'ai_drafted_unreviewed', 'active', '{NOW}')"))
-        conn.execute(text(
-            "INSERT INTO learning_evidence (id, user_id, concept_id, concept_version_id, evidence_type, grader, "
-            f"on_demo_data, ref_type, ref_id, created_at) VALUES ('e-3', 'u-1', 'c-2', 'cv-2', 'modification', "
-            f"'deterministic', 0, 'assessment_result', 'res-1', '{NOW}')"
-        ))
+        conn.execute(
+            text(
+                f"INSERT INTO concepts (id, slug, name, level, kind, is_core, created_at) VALUES ('c-2', 's2', 'C2', 'foundational', 'mechanism', 0, '{NOW}')"
+            )
+        )
+        conn.execute(
+            text(
+                f"INSERT INTO concept_versions (id, concept_id, version, plain_definition, content_origin, status, created_at) VALUES ('cv-2', 'c-2', 1, 'd', 'ai_drafted_unreviewed', 'active', '{NOW}')"
+            )
+        )
+        conn.execute(
+            text(
+                "INSERT INTO learning_evidence (id, user_id, concept_id, concept_version_id, evidence_type, grader, "
+                f"on_demo_data, ref_type, ref_id, created_at) VALUES ('e-3', 'u-1', 'c-2', 'cv-2', 'modification', "
+                f"'deterministic', 0, 'assessment_result', 'res-1', '{NOW}')"
+            )
+        )
     with pytest.raises(IntegrityError):  # a value outside the extended enum is still rejected
         with engine.begin() as conn:
             _evidence_insert(conn, "e-4", "mastery", "none", "x")
@@ -184,9 +238,8 @@ def test_r3_adds_grader_role_preserving_agent_runs(db_path):
         roles = {r[0] for r in conn.execute(text("SELECT role FROM agent_runs"))}
         assert roles == {"primary", "reviewer", "repair", "evaluator", "professor", "grader"}
         _clean(conn)
-    with pytest.raises(IntegrityError):
-        with engine.begin() as conn:
-            _agent_run_insert(conn, "run-bad", "teacher")
+    with pytest.raises(IntegrityError), engine.begin() as conn:
+        _agent_run_insert(conn, "run-bad", "teacher")
     engine.dispose()
 
 
@@ -229,16 +282,20 @@ def test_downgrades_refuse_while_assessment_data_exists_and_change_nothing(db_pa
     command.upgrade(_cfg(), R1)
     engine = _engine(db_path)
     with engine.begin() as conn:
-        conn.execute(text(
-            "INSERT INTO assessment_definitions (id, definition_key, version, status, assessment_kind, title, "
-            "instructions_md, produces_evidence_type, criteria_json, independence_policy_json, grading_policy_json, "
-            f"allowed_resources_json, author_user_id, created_at) VALUES ('d-1', 'k', 1, 'draft', 'knowledge_check', 't', 'i', "
-            f"'knowledge_check', '[]', '{{}}', '{{}}', '[]', 'u-1', '{NOW}')"
-        ))
-        conn.execute(text(
-            "INSERT INTO assessment_attempts (id, user_id, definition_id, origin, status, pinned_versions_json, "
-            f"fresh_required, grading_round, started_at, created_at) VALUES ('at-1', 'u-1', 'd-1', 'learner_started', 'draft', '{{}}', 0, 0, '{NOW}', '{NOW}')"
-        ))
+        conn.execute(
+            text(
+                "INSERT INTO assessment_definitions (id, definition_key, version, status, assessment_kind, title, "
+                "instructions_md, produces_evidence_type, criteria_json, independence_policy_json, grading_policy_json, "
+                f"allowed_resources_json, author_user_id, created_at) VALUES ('d-1', 'k', 1, 'draft', 'knowledge_check', 't', 'i', "
+                f"'knowledge_check', '[]', '{{}}', '{{}}', '[]', 'u-1', '{NOW}')"
+            )
+        )
+        conn.execute(
+            text(
+                "INSERT INTO assessment_attempts (id, user_id, definition_id, origin, status, pinned_versions_json, "
+                f"fresh_required, grading_round, started_at, created_at) VALUES ('at-1', 'u-1', 'd-1', 'learner_started', 'draft', '{{}}', 0, 0, '{NOW}', '{NOW}')"
+            )
+        )
     engine.dispose()
     with pytest.raises(RuntimeError, match="assessment attempt"):
         command.downgrade(_cfg(), PREVIOUS_HEAD)

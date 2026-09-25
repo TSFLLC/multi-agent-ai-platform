@@ -13,7 +13,7 @@ activity to infer one (spec Sec 30 "No inference from unrelated content").
 from datetime import datetime, timezone
 from typing import List, Optional
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.orm import Session
 
 from app.errors import ConflictError, NotFoundError
@@ -137,6 +137,63 @@ class LearnerProfileService:
             "interests": [_interest_to_dict(i) for i in interests],
             "plan_items": [_plan_item_to_dict(p) for p in plan_items],
             "evidence": [_evidence_to_dict(e) for e in evidence],
+            "assessments": self._export_assessments(user_id),
+        }
+
+    def _delete_assessments(self, user_id: str) -> None:
+        """AIL.5C: remove the learner's assessment history AND the Grader runs that
+        quoted their words (bookkeeping tasks, runs, artifact rows and files)."""
+        from app.models.artifacts_eval import Artifact
+        from app.models.assessment import AssessmentAttempt, AssessmentResult, AssessmentReview
+        from app.models.tasks import AgentRun, Task, TaskRun
+
+        self.db.execute(delete(AssessmentReview).where(AssessmentReview.user_id == user_id))
+        # A result may supersede an earlier one (RESTRICT); delete newest-first so no
+        # parent is removed while a superseding row still points at it.
+        result_ids = self.db.execute(
+            select(AssessmentResult.id).where(AssessmentResult.user_id == user_id).order_by(AssessmentResult.seq.desc())
+        ).scalars().all()
+        for result_id in result_ids:
+            self.db.execute(delete(AssessmentResult).where(AssessmentResult.id == result_id))
+        self.db.execute(delete(AssessmentAttempt).where(AssessmentAttempt.user_id == user_id))
+
+        grader_tasks = select(Task.id).where(Task.created_by == user_id, Task.title.like("assessment-grading:%"))
+        runs = select(AgentRun.id).join(TaskRun, TaskRun.id == AgentRun.task_run_id).where(TaskRun.task_id.in_(grader_tasks))
+        files = list(self.db.execute(select(Artifact.storage_ref).where(Artifact.agent_run_id.in_(runs))).scalars())
+        self.db.execute(delete(Task).where(Task.id.in_(grader_tasks)))
+        _remove_files(files)
+
+    def _export_assessments(self, user_id: str) -> dict:
+        """AIL.5C: the learner's own attempts, results and reviews (spec Sec 30)."""
+        from app.models.assessment import AssessmentAttempt, AssessmentResult, AssessmentReview
+
+        def rows(model):
+            return list(self.db.execute(select(model).where(model.user_id == user_id).order_by(model.created_at)).scalars())
+
+        return {
+            "attempts": [
+                {"id": a.id, "definition_id": a.definition_id, "status": a.status.value, "origin": a.origin.value,
+                 "pinned_versions": a.pinned_versions, "challenge": a.challenge_instance and a.challenge_instance.get("items"),
+                 "draft": a.draft, "submission": a.submission, "attestation": a.attestation,
+                 "started_at": a.started_at.isoformat() if a.started_at else None,
+                 "submitted_at": a.submitted_at.isoformat() if a.submitted_at else None,
+                 "finalized_at": a.finalized_at.isoformat() if a.finalized_at else None}
+                for a in rows(AssessmentAttempt)
+            ],
+            "results": [
+                {"id": r.id, "attempt_id": r.attempt_id, "kind": r.result_kind.value, "seq": r.seq,
+                 "outcome": r.outcome.value if r.outcome else None,
+                 "demonstration_effect": r.demonstration_effect.value if r.demonstration_effect else None,
+                 "criteria": r.criteria, "gaps": r.gaps, "remediation": r.remediation, "report": r.report,
+                 "record": r.record_snapshot, "supersedes_result_id": r.supersedes_result_id}
+                for r in rows(AssessmentResult)
+            ],
+            "reviews": [
+                {"id": v.id, "attempt_id": v.attempt_id, "result_id": v.result_id, "trigger": v.trigger.value,
+                 "status": v.status.value, "reason": v.reason_text,
+                 "decision": v.decision.value if v.decision else None, "decision_rationale": v.decision_rationale}
+                for v in rows(AssessmentReview)
+            ],
         }
 
     def delete_learner_data(self, user_id: str) -> None:
@@ -147,11 +204,25 @@ class LearnerProfileService:
         if user is None:
             raise NotFoundError(f"User {user_id} not found")
 
+        self._delete_assessments(user_id)
+        # A superseded row points at its replacement; clear the pointers first so
+        # the bulk delete never trips a row-level foreign-key check.
+        self.db.execute(update(LearningEvidence).where(LearningEvidence.user_id == user_id).values(superseded_by_id=None))
         self.db.execute(delete(LearningEvidence).where(LearningEvidence.user_id == user_id))
         self.db.execute(delete(LearningPlanItem).where(LearningPlanItem.user_id == user_id))
         self.db.execute(delete(LearnerInterest).where(LearnerInterest.user_id == user_id))
         self.db.execute(delete(LearnerProfile).where(LearnerProfile.user_id == user_id))
         self.db.commit()
+
+
+def _remove_files(paths) -> None:
+    import os
+
+    for path in paths:
+        try:
+            os.remove(path)
+        except OSError:
+            pass  # best effort: the row is gone either way
 
 
 def _profile_to_dict(profile: LearnerProfile) -> dict:

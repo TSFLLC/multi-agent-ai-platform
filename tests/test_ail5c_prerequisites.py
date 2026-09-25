@@ -54,12 +54,29 @@ def _row(**kw):
     return SimpleNamespace(**base)
 
 
-def _lab(db, user, version, *, assistance=None, verification=None, grader=GradingMode.DETERMINISTIC,
-         demo=False, kind=EvidenceType.LAB, milestone=None):
+def _lab(
+    db,
+    user,
+    version,
+    *,
+    assistance=None,
+    verification=None,
+    grader=GradingMode.DETERMINISTIC,
+    demo=False,
+    kind=EvidenceType.LAB,
+    milestone=None,
+):
     return LearningEvidenceService(db).record_evidence(
-        user_id=user.id, concept_id=version.concept_id, concept_version_id=version.id,
-        evidence_type=kind, grader=grader, passed=True, assistance_level=assistance,
-        execution_verification=verification, on_demo_data=demo, milestone_attempt_id=milestone,
+        user_id=user.id,
+        concept_id=version.concept_id,
+        concept_version_id=version.id,
+        evidence_type=kind,
+        grader=grader,
+        passed=True,
+        assistance_level=assistance,
+        execution_verification=verification,
+        on_demo_data=demo,
+        milestone_attempt_id=milestone,
     )
 
 
@@ -102,7 +119,10 @@ def test_policy_classifies_assistance_in_one_place():
         ({"assistance_level": H.H3}, "h3_partial_structure"),
         ({"assistance_level": H.H4}, "h4_guided_walkthrough"),
         ({"assistance_level": H.H5}, "h5_solution_shown"),
-        ({"evidence_type": EvidenceType.MODIFICATION, "execution_verification": V.NOT_APPLICABLE}, "unverified_execution"),
+        (
+            {"evidence_type": EvidenceType.MODIFICATION, "execution_verification": V.NOT_APPLICABLE},
+            "unverified_execution",
+        ),
         ({"milestone_attempt_id": "m1", "execution_verification": V.NOT_APPLICABLE}, "unverified_execution"),
     ],
 )
@@ -112,8 +132,9 @@ def test_platform_floor_reasons(kwargs, reason):
 
 
 def test_platform_floor_passes_independent_verified_work():
-    assert policy.demonstration_floor(_row(assistance_level=H.H2, execution_verification=V.PLATFORM_VERIFIED,
-                                           milestone_attempt_id="m1")) == (True, "ok")
+    assert policy.demonstration_floor(
+        _row(assistance_level=H.H2, execution_verification=V.PLATFORM_VERIFIED, milestone_attempt_id="m1")
+    ) == (True, "ok")
     assert policy.demonstration_floor(_row()) == (True, "ok")  # e.g. a 3C experiment lab row
 
 
@@ -130,10 +151,16 @@ def test_leg_constraints_can_only_tighten_the_floor():
 
 
 def test_fresh_challenge_policy_is_deterministic():
-    assert policy.fresh_challenge_required(policy.IF_ASSISTED, source_levels=[H.H1]) == (False, "source_work_independent")
+    assert policy.fresh_challenge_required(policy.IF_ASSISTED, source_levels=[H.H1]) == (
+        False,
+        "source_work_independent",
+    )
     assert policy.fresh_challenge_required(policy.IF_ASSISTED, source_levels=[H.H3])[0]
     assert policy.fresh_challenge_required(policy.IF_ASSISTED, source_levels=[H.H5])[0]
-    assert policy.fresh_challenge_required(policy.IF_ASSISTED, study_mode_used=True) == (True, "study_mode_used")
+    assert policy.fresh_challenge_required(policy.IF_ASSISTED, study_mode_used=True) == (
+        True,
+        "study_mode_used",
+    )
     assert policy.fresh_challenge_required(policy.NEVER, source_levels=[H.H5]) == (False, "policy_never")
     assert policy.fresh_challenge_required(policy.NEVER, kind_is_capstone=True)[0]
     assert policy.fresh_challenge_required(policy.ALWAYS)[0]
@@ -165,7 +192,14 @@ def test_verified_h2_lab_demonstrates(db):
 def test_assisted_lab_reaches_practiced_never_demonstrated(db, assistance):
     """Regression for the pre-5C defect: an H3/H4 LAB row used to satisfy DEMONSTRATED."""
     user, concept, version = _user_concept(db)
-    _lab(db, user, version, assistance=assistance, verification=V.PLATFORM_VERIFIED, milestone=_milestone(db, user))
+    _lab(
+        db,
+        user,
+        version,
+        assistance=assistance,
+        verification=V.PLATFORM_VERIFIED,
+        milestone=_milestone(db, user),
+    )
     assert _state(db, user, concept.id).ladder == PRACTICED
 
 
@@ -178,7 +212,15 @@ def test_h5_only_work_never_demonstrates_or_practices(db):
 
 def test_self_reported_and_demo_evidence_never_demonstrate(db):
     user, concept, version = _user_concept(db)
-    _lab(db, user, version, assistance=H.H0, verification=V.SELF_REPORTED, grader=GradingMode.SELF, milestone=_milestone(db, user))
+    _lab(
+        db,
+        user,
+        version,
+        assistance=H.H0,
+        verification=V.SELF_REPORTED,
+        grader=GradingMode.SELF,
+        milestone=_milestone(db, user),
+    )
     _lab(db, user, version, demo=True)
     assert _state(db, user, concept.id).ladder == PRACTICED
 
@@ -207,8 +249,17 @@ def test_superseded_evidence_counts_toward_nothing_but_stays_visible(db):
 
 
 def test_v2_constraints_tighten_a_requirement(db):
-    req = {"requires_all": [{"evidence_type": "lab", "min_passed": 1, "max_assistance": "h1",
-                             "min_verification": "platform_verified", "grader_in": ["deterministic"]}]}
+    req = {
+        "requires_all": [
+            {
+                "evidence_type": "lab",
+                "min_passed": 1,
+                "max_assistance": "h1",
+                "min_verification": "platform_verified",
+                "grader_in": ["deterministic"],
+            }
+        ]
+    }
     user, concept, version = _user_concept(db, req)
     _lab(db, user, version, assistance=H.H2, verification=V.PLATFORM_VERIFIED, milestone=_milestone(db, user))
     assert _state(db, user, concept.id).ladder == PRACTICED  # h2 is inside the floor but outside this leg
@@ -228,8 +279,12 @@ def test_state_is_recomputed_never_stored(db):
 
 def _publish(db, concept, severity):
     service = ConceptGraphService(db)
-    draft = service.create_draft_version(concept_id=concept.id, plain_definition="Updated.",
-                                         change_severity=severity, evidence_requirements=_LAB_LEG)
+    draft = service.create_draft_version(
+        concept_id=concept.id,
+        plain_definition="Updated.",
+        change_severity=severity,
+        evidence_requirements=_LAB_LEG,
+    )
     return service.publish_version(draft.id)
 
 
@@ -264,7 +319,8 @@ def test_publish_rejects_an_ai_judged_only_requirement_set(db):
     concept = make_concept(db, slug="only-ai", name="Only AI")
     service = ConceptGraphService(db)
     draft = service.create_draft_version(
-        concept_id=concept.id, plain_definition="x",
+        concept_id=concept.id,
+        plain_definition="x",
         evidence_requirements={"requires_all": [{"evidence_type": "explain_back", "min_passed": 1}]},
     )
     with pytest.raises(ConflictError):
@@ -275,24 +331,33 @@ def test_publish_accepts_ai_leg_paired_with_a_deterministic_leg(db):
     concept = make_concept(db, slug="paired", name="Paired")
     service = ConceptGraphService(db)
     draft = service.create_draft_version(
-        concept_id=concept.id, plain_definition="x",
-        evidence_requirements={"requires_all": [
-            {"evidence_type": "knowledge_check", "min_passed": 1},
-            {"evidence_type": "explain_back", "min_passed": 1}]},
+        concept_id=concept.id,
+        plain_definition="x",
+        evidence_requirements={
+            "requires_all": [
+                {"evidence_type": "knowledge_check", "min_passed": 1},
+                {"evidence_type": "explain_back", "min_passed": 1},
+            ]
+        },
     )
     assert service.publish_version(draft.id).status.value == "active"
 
 
-@pytest.mark.parametrize("bad", [
-    {"requires_all": [{"evidence_type": "nonsense"}]},
-    {"requires_all": [{"evidence_type": "lab", "max_assistance": "h9"}]},
-    {"requires_all": [{"evidence_type": "lab", "min_verification": "self_reported"}]},
-    {"requires_all": [{"evidence_type": "lab", "grader_in": ["oracle"]}]},
-])
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"requires_all": [{"evidence_type": "nonsense"}]},
+        {"requires_all": [{"evidence_type": "lab", "max_assistance": "h9"}]},
+        {"requires_all": [{"evidence_type": "lab", "min_verification": "self_reported"}]},
+        {"requires_all": [{"evidence_type": "lab", "grader_in": ["oracle"]}]},
+    ],
+)
 def test_publish_rejects_malformed_requirements(db, bad):
     concept = make_concept(db, slug=f"bad-{uuid4().hex[:6]}", name="Bad")
     service = ConceptGraphService(db)
-    draft = service.create_draft_version(concept_id=concept.id, plain_definition="x", evidence_requirements=bad)
+    draft = service.create_draft_version(
+        concept_id=concept.id, plain_definition="x", evidence_requirements=bad
+    )
     with pytest.raises(ConflictError):
         service.publish_version(draft.id)
 
@@ -300,9 +365,14 @@ def test_publish_rejects_malformed_requirements(db, bad):
 def test_reviewed_knowledge_check_still_understood(db):
     user, concept, version = _user_concept(db)
     LearningEvidenceService(db).record_evidence(
-        user_id=user.id, concept_id=concept.id, concept_version_id=version.id,
-        evidence_type=EvidenceType.KNOWLEDGE_CHECK, grader=GradingMode.DETERMINISTIC, passed=True,
-        question_origin=QuestionOrigin.REVIEWED)
+        user_id=user.id,
+        concept_id=concept.id,
+        concept_version_id=version.id,
+        evidence_type=EvidenceType.KNOWLEDGE_CHECK,
+        grader=GradingMode.DETERMINISTIC,
+        passed=True,
+        question_origin=QuestionOrigin.REVIEWED,
+    )
     assert _state(db, user, concept.id).ladder == UNDERSTOOD
 
 
@@ -332,8 +402,13 @@ def test_client_cannot_mint_platform_verified_evidence(client, db, bootstrap, au
     resp = client.post(
         f"/academy/build-with-me/attempts/{attempt_id}/milestones/{milestone.id}/evidence",
         headers=auth_headers,
-        json={"concept_id": concept.id, "passed": True, "source_type": "manual",
-              "execution_verification": "platform_verified", "assistance_level": "h0"},
+        json={
+            "concept_id": concept.id,
+            "passed": True,
+            "source_type": "manual",
+            "execution_verification": "platform_verified",
+            "assistance_level": "h0",
+        },
     )
     assert resp.status_code == 200
     body = resp.json()
@@ -417,7 +492,9 @@ def test_ail_system_records_are_private_to_their_creator(client, db, bootstrap, 
     db.commit()
 
     # the creator can list and read
-    assert any(t["id"] == task.id for t in client.get(f"/tasks?project_id={project.id}", headers=auth_headers).json())
+    assert any(
+        t["id"] == task.id for t in client.get(f"/tasks?project_id={project.id}", headers=auth_headers).json()
+    )
     assert client.get(f"/agent-runs/{agent_run.id}", headers=auth_headers).status_code == 200
 
     # a second learner in the same org (also OWNER of the shared AIL project) cannot

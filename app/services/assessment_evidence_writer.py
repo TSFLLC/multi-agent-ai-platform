@@ -37,13 +37,18 @@ from app.db.enums import (
     EvidenceRefType,
     EvidenceType,
     ExecutionVerification,
-    GradingMode,
     GraderConfidence,
+    GradingMode,
     QuestionOrigin,
 )
-from app.models.assessment import AssessmentAttempt, AssessmentDefinition, AssessmentDefinitionConcept, AssessmentResult
+from app.models.assessment import (
+    AssessmentAttempt,
+    AssessmentDefinition,
+    AssessmentDefinitionConcept,
+    AssessmentResult,
+)
 from app.models.learner import LearningEvidence
-from app.services.independence_policy import EXECUTION_EVIDENCE_TYPES
+from app.services.independence_policy import ASSESSMENT_MODE_ASSISTANCE, EXECUTION_EVIDENCE_TYPES
 from app.services.learning_evidence_service import LearningEvidenceService
 
 # Categorical confidence -> the fixed numbers stored in the existing
@@ -59,7 +64,7 @@ def evidence_assistance(independence: Dict[str, Any]) -> Optional[AssistanceLeve
     """Fresh work in Assessment Mode is H0 by construction (the Mentor was
     locked); source-work assessments inherit the worst recorded level."""
     if independence.get("challenge_issued"):
-        return AssistanceLevel.H0
+        return ASSESSMENT_MODE_ASSISTANCE
     top = independence.get("source_max_assistance")
     return AssistanceLevel(top) if top else None
 
@@ -70,14 +75,18 @@ class AssessmentEvidenceWriter:
         self._evidence = LearningEvidenceService(db)
 
     def existing(self, user_id: str, result_id: str, concept_id: str) -> Optional[LearningEvidence]:
-        return self.db.execute(
-            select(LearningEvidence).where(
-                LearningEvidence.user_id == user_id,
-                LearningEvidence.ref_type == EvidenceRefType.ASSESSMENT_RESULT,
-                LearningEvidence.ref_id == result_id,
-                LearningEvidence.concept_id == concept_id,
+        return (
+            self.db.execute(
+                select(LearningEvidence).where(
+                    LearningEvidence.user_id == user_id,
+                    LearningEvidence.ref_type == EvidenceRefType.ASSESSMENT_RESULT,
+                    LearningEvidence.ref_id == result_id,
+                    LearningEvidence.concept_id == concept_id,
+                )
             )
-        ).scalars().first()
+            .scalars()
+            .first()
+        )
 
     def write(
         self,
@@ -110,7 +119,9 @@ class AssessmentEvidenceWriter:
         by_key = {c["key"]: c for c in result.criteria}
         rows: List[LearningEvidence] = []
         for link in links:
-            deciding = [by_key[k] for k in link.criterion_keys if k in by_key and by_key[k].get("required", True)]
+            deciding = [
+                by_key[k] for k in link.criterion_keys if k in by_key and by_key[k].get("required", True)
+            ]
             if not deciding:
                 continue
             judged = [c for c in deciding if c.get("method") == "grader"]

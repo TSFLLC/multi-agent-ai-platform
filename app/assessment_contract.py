@@ -87,7 +87,11 @@ def parse_grading_response(
         payload = json.loads(text)
     except (TypeError, ValueError):
         raise GradingResponseInvalid("response is not valid JSON")
-    if not isinstance(payload, dict) or set(payload) != {"criteria"} or not isinstance(payload["criteria"], list):
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != {"criteria"}
+        or not isinstance(payload["criteria"], list)
+    ):
         raise GradingResponseInvalid("response must be exactly an object with a 'criteria' array")
 
     haystack = _squash(response_text)
@@ -126,7 +130,9 @@ def parse_grading_response(
             if not isinstance(quote, str) or not quote.strip() or len(quote) > MAX_QUOTE_CHARS:
                 raise GradingResponseInvalid(f"criterion {key!r}: invalid quote")
             if _squash(quote) not in haystack:
-                raise GradingResponseInvalid(f"criterion {key!r}: quote is not verbatim from the learner response")
+                raise GradingResponseInvalid(
+                    f"criterion {key!r}: quote is not verbatim from the learner response"
+                )
         if finding == EvaluationFinding.NOT_APPLICABLE and quotes:
             raise GradingResponseInvalid(f"criterion {key!r}: not_applicable takes no quotes")
         if finding in (EvaluationFinding.MET, EvaluationFinding.PARTIAL) and haystack and not quotes:
@@ -232,8 +238,14 @@ def validate_definition(
                 raise DefinitionInvalid(f"criterion {key!r}: unknown or missing deterministic check type")
         else:
             points = c.get("reference_points")
-            if not isinstance(points, list) or not points or not all(isinstance(p, str) and p.strip() for p in points):
-                raise DefinitionInvalid(f"criterion {key!r}: a grader criterion needs authored reference_points")
+            if (
+                not isinstance(points, list)
+                or not points
+                or not all(isinstance(p, str) and p.strip() for p in points)
+            ):
+                raise DefinitionInvalid(
+                    f"criterion {key!r}: a grader criterion needs authored reference_points"
+                )
         for step in c.get("on_not_met") or []:
             if not isinstance(step, dict) or step.get("kind") not in (
                 "learning_item",
@@ -261,7 +273,9 @@ def validate_definition(
     if kind == AssessmentKind.CAPSTONE:
         share = sum(1 for c in required if c["method"] == "deterministic") / len(required)
         if share < CAPSTONE_MIN_DETERMINISTIC_SHARE:
-            raise DefinitionInvalid("a capstone needs at least 70% of its required criteria to be deterministic")
+            raise DefinitionInvalid(
+                "a capstone needs at least 70% of its required criteria to be deterministic"
+            )
         if independence_policy.get("fresh_required", "always") != "always":
             raise DefinitionInvalid("a capstone always requires a fresh challenge")
 
@@ -281,7 +295,11 @@ def validate_definition(
         if not isinstance(fixed, list):
             raise DefinitionInvalid("challenge_spec.fixed must be a list")
         entry_keys = [e.get("entry_key") for e in list(pool) + list(fixed) if isinstance(e, dict)]
-        if len(entry_keys) != len(pool) + len(fixed) or len(set(entry_keys)) != len(entry_keys) or not all(entry_keys):
+        if (
+            len(entry_keys) != len(pool) + len(fixed)
+            or len(set(entry_keys)) != len(entry_keys)
+            or not all(entry_keys)
+        ):
             raise DefinitionInvalid("every challenge entry needs a unique entry_key")
         if len(pool) < MIN_POOL_MULTIPLIER * draw:
             raise DefinitionInvalid(

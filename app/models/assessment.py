@@ -94,7 +94,9 @@ class AssessmentDefinition(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     # Authored variant pool + input pools; the source of deterministic fresh
     # challenge selection (never model-generated).
     challenge_spec: Mapped[Optional[dict]] = mapped_column("challenge_spec_json", nullable=True)
-    independence_policy: Mapped[dict] = mapped_column("independence_policy_json", nullable=False, default=dict)
+    independence_policy: Mapped[dict] = mapped_column(
+        "independence_policy_json", nullable=False, default=dict
+    )
     grading_policy: Mapped[dict] = mapped_column("grading_policy_json", nullable=False, default=dict)
     allowed_resources: Mapped[list] = mapped_column("allowed_resources_json", nullable=False, default=list)
     requires_platform_capability: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
@@ -108,7 +110,9 @@ class AssessmentDefinition(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
 class AssessmentDefinitionConcept(UUIDPrimaryKeyMixin, Base):
     __tablename__ = "assessment_definition_concepts"
     __table_args__ = (
-        UniqueConstraint("definition_id", "concept_id", name="uq_assessment_definition_concepts_definition_concept"),
+        UniqueConstraint(
+            "definition_id", "concept_id", name="uq_assessment_definition_concepts_definition_concept"
+        ),
     )
 
     definition_id: Mapped[str] = mapped_column(
@@ -131,7 +135,9 @@ class AssessmentAttempt(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
             "definition_id",
             unique=True,
             sqlite_where=text("status IN ('draft', 'submitted', 'checking', 'awaiting_grading', 'grading')"),
-            postgresql_where=text("status IN ('draft', 'submitted', 'checking', 'awaiting_grading', 'grading')"),
+            postgresql_where=text(
+                "status IN ('draft', 'submitted', 'checking', 'awaiting_grading', 'grading')"
+            ),
         ),
         Index(
             "uq_assessment_attempts_idempotency",
@@ -143,8 +149,12 @@ class AssessmentAttempt(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
         ),
     )
 
-    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
-    definition_id: Mapped[str] = mapped_column(ForeignKey("assessment_definitions.id", ondelete="RESTRICT"), nullable=False)
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    definition_id: Mapped[str] = mapped_column(
+        ForeignKey("assessment_definitions.id", ondelete="RESTRICT"), nullable=False
+    )
     origin: Mapped[AssessmentOrigin] = mapped_column(
         sa_enum(AssessmentOrigin), nullable=False, default=AssessmentOrigin.LEARNER_STARTED
     )
@@ -154,7 +164,9 @@ class AssessmentAttempt(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     source_submission_id: Mapped[Optional[str]] = mapped_column(
         ForeignKey("assessment_ready_submissions.id", ondelete="SET NULL"), nullable=True
     )
-    enrollment_id: Mapped[Optional[str]] = mapped_column(ForeignKey("enrollments.id", ondelete="SET NULL"), nullable=True)
+    enrollment_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("enrollments.id", ondelete="SET NULL"), nullable=True
+    )
     previous_attempt_id: Mapped[Optional[str]] = mapped_column(
         ForeignKey("assessment_attempts.id", ondelete="SET NULL"), nullable=True
     )
@@ -175,7 +187,9 @@ class AssessmentAttempt(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     input_manifest_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     attestation: Mapped[Optional[dict]] = mapped_column("attestation_json", nullable=True)
     grading_round: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    grader_agent_version_id: Mapped[Optional[str]] = mapped_column(ForeignKey("agent_versions.id"), nullable=True)
+    grader_agent_version_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("agent_versions.id"), nullable=True
+    )
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
     submitted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     finalized_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -222,9 +236,13 @@ class AssessmentResult(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
         ),
     )
 
-    attempt_id: Mapped[str] = mapped_column(ForeignKey("assessment_attempts.id", ondelete="CASCADE"), nullable=False)
+    attempt_id: Mapped[str] = mapped_column(
+        ForeignKey("assessment_attempts.id", ondelete="CASCADE"), nullable=False
+    )
     # Denormalised ownership: every read filters on this directly.
-    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
     seq: Mapped[int] = mapped_column(Integer, nullable=False)
     round: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     result_kind: Mapped[AssessmentResultKind] = mapped_column(sa_enum(AssessmentResultKind), nullable=False)
@@ -239,7 +257,9 @@ class AssessmentResult(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     remediation: Mapped[list] = mapped_column("remediation_json", nullable=False, default=list)
     report: Mapped[Optional[dict]] = mapped_column("report_json", nullable=True)
     grader_agent_run_ids: Mapped[Optional[list]] = mapped_column("grader_agent_run_ids_json", nullable=True)
-    grader_agent_version_id: Mapped[Optional[str]] = mapped_column(ForeignKey("agent_versions.id"), nullable=True)
+    grader_agent_version_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("agent_versions.id"), nullable=True
+    )
     grading_contract_version: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
     # For ``human`` rows: the review that produced it. Validated in the
     # service layer (a hard FK would make results <-> reviews circular).
@@ -263,9 +283,15 @@ class AssessmentReview(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
         ),
     )
 
-    attempt_id: Mapped[str] = mapped_column(ForeignKey("assessment_attempts.id", ondelete="CASCADE"), nullable=False)
-    result_id: Mapped[str] = mapped_column(ForeignKey("assessment_results.id", ondelete="CASCADE"), nullable=False)
-    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    attempt_id: Mapped[str] = mapped_column(
+        ForeignKey("assessment_attempts.id", ondelete="CASCADE"), nullable=False
+    )
+    result_id: Mapped[str] = mapped_column(
+        ForeignKey("assessment_results.id", ondelete="CASCADE"), nullable=False
+    )
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
     trigger: Mapped[AssessmentReviewTrigger] = mapped_column(sa_enum(AssessmentReviewTrigger), nullable=False)
     status: Mapped[AssessmentReviewStatus] = mapped_column(
         sa_enum(AssessmentReviewStatus), nullable=False, default=AssessmentReviewStatus.OPEN
@@ -274,7 +300,9 @@ class AssessmentReview(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     # The learner's explicit consent to let a reviewer see THIS attempt. Without
     # it a reviewer sees only non-content metadata.
     consent_shared_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
-    reviewer_user_id: Mapped[Optional[str]] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    reviewer_user_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
     decision: Mapped[Optional[AssessmentReviewDecision]] = mapped_column(
         sa_enum(AssessmentReviewDecision), nullable=True
     )
@@ -330,7 +358,8 @@ def _guard_definition(mapper, connection, target):
             f"(attempted change: {', '.join(changed)})"
         )
     if status_history.has_changes() and not (
-        previous == AssessmentDefinitionStatus.PUBLISHED and target.status == AssessmentDefinitionStatus.RETIRED
+        previous == AssessmentDefinitionStatus.PUBLISHED
+        and target.status == AssessmentDefinitionStatus.RETIRED
     ):
         raise ImmutableRecordError("A published assessment definition can only be retired")
 
@@ -338,6 +367,48 @@ def _guard_definition(mapper, connection, target):
 @event.listens_for(AssessmentDefinitionConcept, "before_update")
 def _guard_definition_concept(mapper, connection, target):
     raise ImmutableRecordError("Assessment definition concept links are immutable")
+
+
+# Everything an attempt pinned, drew, froze or attested is write-once: set at
+# start / by the submit compare-and-swap, never edited afterwards through the ORM.
+_ATTEMPT_WRITE_ONCE = (
+    "user_id",
+    "definition_id",
+    "origin",
+    "project_attempt_id",
+    "source_submission_id",
+    "enrollment_id",
+    "previous_attempt_id",
+    "pinned_versions",
+    "fresh_required",
+    "fresh_reason",
+    "challenge_seed",
+    "challenge_instance",
+    "input_manifest",
+    "input_manifest_hash",
+    "started_at",
+    "idempotency_key",
+    "submission",
+    "submission_hash",
+    "attestation",
+)
+
+
+@event.listens_for(AssessmentAttempt, "before_update")
+def _guard_attempt(mapper, connection, target):
+    state = inspect(target)
+    changed = [f for f in _ATTEMPT_WRITE_ONCE if state.attrs[f].history.has_changes()]
+    if changed:
+        raise ImmutableRecordError(
+            f"An assessment attempt's pinned and frozen fields are write-once ({', '.join(changed)})"
+        )
+    grader = state.attrs.grader_agent_version_id.history
+    if grader.has_changes() and any(v is not None for v in (grader.deleted or [])):
+        raise ImmutableRecordError("The Grader Agent Version is pinned at first grade and never changes")
+    status = state.attrs.status.history
+    was = (status.deleted or status.unchanged or [None])[0]
+    if state.attrs.draft.history.has_changes() and was != AssessmentAttemptStatus.DRAFT:
+        raise ImmutableRecordError("The draft can only change while the attempt is a draft")
 
 
 @event.listens_for(AssessmentResult, "before_update")

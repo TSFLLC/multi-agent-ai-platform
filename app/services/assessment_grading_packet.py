@@ -28,7 +28,7 @@ profile or learner-state code. ``tests/test_ail5c_isolation.py`` enforces it.
 import json
 import re
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 from sqlalchemy.orm import Session
 
@@ -151,7 +151,10 @@ class GradingPacketBuilder:
             version = self.db.get(ConceptVersion, link.concept_version_id)
             if version is not None:
                 concept_blocks.append(
-                    {"plain_definition": version.plain_definition, "technical_explanation": version.technical_explanation}
+                    {
+                        "plain_definition": version.plain_definition,
+                        "technical_explanation": version.technical_explanation,
+                    }
                 )
 
         experiment_blocks = self._experiment_blocks(attempt, definition)
@@ -161,7 +164,11 @@ class GradingPacketBuilder:
         response_text = "\n".join(text for _label, text in blocks)
 
         statement = [
-            {k: v for k, v in item.items() if k in ("entry_key", "prompt", "prompt_md", "title", "statement_md", "options")}
+            {
+                k: v
+                for k, v in item.items()
+                if k in ("entry_key", "prompt", "prompt_md", "title", "statement_md", "options")
+            }
             for item in (challenge.get("items") or [])
         ]
 
@@ -183,13 +190,30 @@ class GradingPacketBuilder:
             "<<<END CONCEPT REFERENCE>>>",
         ]
         if facts_blocks:
-            lines += ["", "<<<PLATFORM FACTS (immutable; cite, never contradict)>>>",
-                      json.dumps(facts_blocks, sort_keys=True, ensure_ascii=False, indent=2), "<<<END PLATFORM FACTS>>>"]
+            lines += [
+                "",
+                "<<<PLATFORM FACTS (immutable; cite, never contradict)>>>",
+                json.dumps(facts_blocks, sort_keys=True, ensure_ascii=False, indent=2),
+                "<<<END PLATFORM FACTS>>>",
+            ]
         for label, payload in experiment_blocks:
-            lines += ["", f"<<<{label}>>>", json.dumps(payload, sort_keys=True, ensure_ascii=False, indent=2), f"<<<END {label}>>>"]
+            lines += [
+                "",
+                f"<<<{label}>>>",
+                json.dumps(payload, sort_keys=True, ensure_ascii=False, indent=2),
+                f"<<<END {label}>>>",
+            ]
         for label, text in blocks:
-            lines += ["", f"<<<LEARNER RESPONSE DATA: {label}>>>", _defang(text), "<<<END LEARNER RESPONSE DATA>>>"]
-        lines += ["", "Return ONLY a JSON object: {\"criteria\": [ ... ]} with exactly one entry per criterion key above."]
+            lines += [
+                "",
+                f"<<<LEARNER RESPONSE DATA: {label}>>>",
+                _defang(text),
+                "<<<END LEARNER RESPONSE DATA>>>",
+            ]
+        lines += [
+            "",
+            'Return ONLY a JSON object: {"criteria": [ ... ]} with exactly one entry per criterion key above.',
+        ]
 
         text = "\n".join(lines)
         from app.config import settings
@@ -199,17 +223,26 @@ class GradingPacketBuilder:
         packet_hash = sha256_hex(text)
         if expected_hash is not None and expected_hash != packet_hash:
             raise GradingPacketError("The grading packet no longer matches the packet that was requested.")
-        return GradingPacket(text=text, packet_hash=packet_hash, grader_keys=[c["key"] for c in judged], response_text=response_text)
+        return GradingPacket(
+            text=text,
+            packet_hash=packet_hash,
+            grader_keys=[c["key"] for c in judged],
+            response_text=response_text,
+        )
 
     def _deterministic_result(self, attempt_id: str) -> Optional[AssessmentResult]:
         return (
             self.db.query(AssessmentResult)
-            .filter(AssessmentResult.attempt_id == attempt_id, AssessmentResult.result_kind == "deterministic")
+            .filter(
+                AssessmentResult.attempt_id == attempt_id, AssessmentResult.result_kind == "deterministic"
+            )
             .order_by(AssessmentResult.seq.desc())
             .first()
         )
 
-    def _experiment_blocks(self, attempt: AssessmentAttempt, definition: AssessmentDefinition) -> List[Tuple[str, Any]]:
+    def _experiment_blocks(
+        self, attempt: AssessmentAttempt, definition: AssessmentDefinition
+    ) -> List[Tuple[str, Any]]:
         """Experiment interpretation only: the platform observation and the
         learner's own conclusion as two SEPARATE labelled blocks."""
         if definition.assessment_kind.value != "experiment_interpretation":
@@ -219,6 +252,15 @@ class GradingPacketBuilder:
         if experiment is None or experiment.user_id != attempt.user_id:
             return []
         return [
-            ("PLATFORM OBSERVATION (experiment result)", experiment_facts(self.db, attempt.user_id, experiment.id)),
-            ("LEARNER CONCLUSION (human interpretation)", {"conclusion_type": experiment.conclusion_type, "conclusion_text": _defang(experiment.conclusion_text or "")}),
+            (
+                "PLATFORM OBSERVATION (experiment result)",
+                experiment_facts(self.db, attempt.user_id, experiment.id),
+            ),
+            (
+                "LEARNER CONCLUSION (human interpretation)",
+                {
+                    "conclusion_type": experiment.conclusion_type,
+                    "conclusion_text": _defang(experiment.conclusion_text or ""),
+                },
+            ),
         ]

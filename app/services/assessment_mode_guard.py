@@ -11,15 +11,17 @@ Kept free of any grading code so importing it from Mentor / Professor
 execution can never give them a path to grading (an import-graph test checks).
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Iterable, List, Optional
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.db.enums import AssessmentAttemptStatus
 from app.errors import ConflictError
 from app.models.assessment import AssessmentAttempt, AssessmentDefinition, AssessmentDefinitionConcept
+
+DRAFT_RETENTION_DAYS = 30
 
 
 class AssessmentModeActive(ConflictError):
@@ -45,30 +47,70 @@ class AssessmentModeGuard:
         rows and drafts are kept; only the status changes."""
         now = self._clock()
         expired = 0
-        rows = self.db.execute(
-            select(AssessmentAttempt).where(
-                AssessmentAttempt.user_id == user_id, AssessmentAttempt.status == AssessmentAttemptStatus.DRAFT
+        rows = (
+            self.db.execute(
+                select(AssessmentAttempt).where(
+                    AssessmentAttempt.user_id == user_id,
+                    AssessmentAttempt.status == AssessmentAttemptStatus.DRAFT,
+                )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         for attempt in rows:
             if attempt.expires_at is not None and _aware(attempt.expires_at) <= now:
                 attempt.status = AssessmentAttemptStatus.ABANDONED
                 expired += 1
         if expired:
             self.db.commit()
+        self.purge_stale_drafts(user_id)
         return expired
+
+    def purge_stale_drafts(self, user_id: str) -> int:
+        """Unsubmitted drafts of abandoned attempts are cleared after 30 days.
+        The attempt row itself is kept (as ABANDONED) — only the learner's
+        unsent words go."""
+        cutoff = self._clock() - timedelta(days=DRAFT_RETENTION_DAYS)
+        stale = (
+            self.db.execute(
+                select(AssessmentAttempt).where(
+                    AssessmentAttempt.user_id == user_id,
+                    AssessmentAttempt.status == AssessmentAttemptStatus.ABANDONED,
+                    AssessmentAttempt.started_at < cutoff,
+                )
+            )
+            .scalars()
+            .all()
+        )
+        purged = 0
+        for attempt in stale:
+            if attempt.draft:
+                self.db.execute(
+                    update(AssessmentAttempt)
+                    .where(AssessmentAttempt.id == attempt.id)
+                    .values(draft={})
+                    .execution_options(synchronize_session=False)
+                )
+                purged += 1
+        if purged:
+            self.db.commit()
+        return purged
 
     def active_locks(self, user_id: str) -> List[Dict]:
         self.expire_stale(user_id)
         rows = self.db.execute(
             select(AssessmentAttempt, AssessmentDefinition)
             .join(AssessmentDefinition, AssessmentDefinition.id == AssessmentAttempt.definition_id)
-            .where(AssessmentAttempt.user_id == user_id, AssessmentAttempt.status == AssessmentAttemptStatus.DRAFT)
+            .where(
+                AssessmentAttempt.user_id == user_id,
+                AssessmentAttempt.status == AssessmentAttemptStatus.DRAFT,
+            )
         ).all()
         locks = []
         for attempt, definition in rows:
             concept_ids = [
-                c for c in self.db.execute(
+                c
+                for c in self.db.execute(
                     select(AssessmentDefinitionConcept.concept_id).where(
                         AssessmentDefinitionConcept.definition_id == definition.id
                     )
@@ -98,7 +140,9 @@ class AssessmentModeGuard:
     ) -> None:
         wanted = set(concept_ids)
         for lock in self.active_locks(user_id):
-            if (project_attempt_id and lock["project_attempt_id"] == project_attempt_id) or wanted & set(lock["concept_ids"]):
+            if (project_attempt_id and lock["project_attempt_id"] == project_attempt_id) or wanted & set(
+                lock["concept_ids"]
+            ):
                 self._raise(lock, "The Project Mentor")
 
     def assert_professor_available(
