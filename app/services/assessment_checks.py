@@ -37,9 +37,10 @@ from app.models.artifacts_eval import Artifact
 from app.models.assessment import AssessmentAttempt, AssessmentDefinition
 from app.models.evaluation_runs import EvaluationRun
 from app.models.execution import ModelCall
-from app.models.lab import Experiment, ExperimentTaskRun
+from app.models.lab import Experiment
 from app.models.learner import LearningEvidence
 from app.models.tasks import AgentRun, Task, TaskRun
+from app.services.assessment_experiment_facts import experiment_facts
 from app.services.independence_policy import counts_toward_practiced
 from app.services.project_evidence_verification import _owned_agent_run
 
@@ -210,26 +211,32 @@ def check_manifest_unchanged(ctx: CheckContext, spec: dict) -> CheckOutcome:
 
 def check_milestones_evidenced(ctx: CheckContext, spec: dict) -> CheckOutcome:
     """A milestone counts only with real learning evidence — a "Complete" click
-    proves nothing."""
-    milestones = [
+    proves nothing. Judged per MILESTONE: any of its attempts (e.g. an
+    independent Study Mode variant after an H5 attempt) may carry the evidence;
+    worked-example (study) attempts themselves never count."""
+    attempts = [
         m for m in ctx.manifest.get("milestone_attempts", [])
         if m.get("status") != MilestoneAttemptStatus.SKIPPED_STUDY_MODE.value and m.get("mode") != "study"
     ]
-    ids = [m["id"] for m in milestones]
-    evidenced = set()
+    ids = [m["id"] for m in attempts]
+    evidenced_attempts = set()
     if ids:
         rows = ctx.db.execute(
             select(LearningEvidence).where(
                 LearningEvidence.user_id == ctx.user_id, LearningEvidence.milestone_attempt_id.in_(ids)
             )
         ).scalars()
-        evidenced = {r.milestone_attempt_id for r in rows if r.passed and counts_toward_practiced(r)}
-    need = len(ids) if spec.get("min", "all") == "all" else int(spec["min"])
-    ok = len(ids) > 0 and len(evidenced) >= need
+        evidenced_attempts = {r.milestone_attempt_id for r in rows if r.passed and counts_toward_practiced(r)}
+    milestones: Dict[str, bool] = {}
+    for m in attempts:
+        milestones[m["milestone_id"]] = milestones.get(m["milestone_id"], False) or m["id"] in evidenced_attempts
+    done = sum(1 for ok in milestones.values() if ok)
+    need = len(milestones) if spec.get("min", "all") == "all" else int(spec["min"])
+    ok = len(milestones) > 0 and done >= need
     return CheckOutcome(
-        MET if ok else (PARTIAL if evidenced else NOT_MET),
-        f"{len(evidenced)} of {len(ids)} milestones have real evidence (needed {need})",
-        {"evidenced": len(evidenced), "total": len(ids), "needed": need},
+        MET if ok else (PARTIAL if done else NOT_MET),
+        f"{done} of {len(milestones)} milestones have real evidence (needed {need})",
+        {"evidenced": done, "total": len(milestones), "needed": need},
     )
 
 
@@ -369,34 +376,6 @@ def check_cost_within(ctx: CheckContext, spec: dict) -> CheckOutcome:
 
 
 # -- Personal Lab -------------------------------------------------------------------------
-
-
-def experiment_facts(db: Session, user_id: str, experiment_id: str) -> Optional[Dict[str, Any]]:
-    """READ-ONLY platform observation of one of the learner's own experiments:
-    per-label MA6 finding counts. The learner's conclusion is NOT read here."""
-    experiment = db.get(Experiment, experiment_id)
-    if experiment is None or experiment.user_id != user_id:
-        return None
-    labels: Dict[str, Dict[str, int]] = {}
-    rows = db.execute(select(ExperimentTaskRun).where(ExperimentTaskRun.experiment_id == experiment.id)).scalars()
-    for etr in rows:
-        counts = labels.setdefault(etr.label, {"met": 0, "partial": 0, "not_met": 0, "not_applicable": 0})
-        for agent_run in db.execute(select(AgentRun).where(AgentRun.task_run_id == etr.task_run_id)).scalars():
-            latest = db.execute(
-                select(EvaluationRun)
-                .where(EvaluationRun.subject_agent_run_id == agent_run.id, EvaluationRun.status == EvaluationRunStatus.COMPLETED)
-                .order_by(EvaluationRun.created_at.desc())
-            ).scalars().first()
-            if latest is not None:
-                for result in latest.criterion_results:
-                    counts[result.finding.value] += 1
-    return {
-        "experiment_id": experiment.id,
-        "status": experiment.status.value,
-        "completed": experiment.status == ExperimentStatus.COMPLETED,
-        "labels": labels,
-        "has_findings": any(sum(c.values()) for c in labels.values()),
-    }
 
 
 def check_experiment_concluded(ctx: CheckContext, spec: dict) -> CheckOutcome:

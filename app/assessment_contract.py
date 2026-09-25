@@ -182,6 +182,13 @@ DEFAULT_GRADING_POLICY = {"crosscheck": "deciding", "expiry_hours": 24, "cooldow
 DEFAULT_INDEPENDENCE_POLICY = {"fresh_required": "if_assisted"}
 
 
+# Deterministic checks that verify the learner actually engaged with the issued
+# challenge (rather than merely being handed one).
+CHALLENGE_BOUND_CHECKS = frozenset(
+    {"choice_match", "run_after_challenge_start", "inputs_match_challenge", "numeric_match"}
+)
+
+
 class DefinitionInvalid(ValueError):
     pass
 
@@ -278,3 +285,9 @@ def validate_definition(
                 f"the challenge pool must hold at least {MIN_POOL_MULTIPLIER}x the draw size "
                 f"({MIN_POOL_MULTIPLIER * draw}); it has {len(pool)}"
             )
+        # A fresh challenge only demonstrates independence if something checks it.
+        bound = any(c["method"] == "grader" for c in required) or any(
+            c["method"] == "deterministic" and c["check"]["type"] in CHALLENGE_BOUND_CHECKS for c in required
+        )
+        if not bound:
+            raise DefinitionInvalid("a fresh challenge must be bound to a required criterion that checks it")

@@ -118,6 +118,26 @@ class ProfessorExecutionService:
                 )
                 for attempt, concept in reviews
             )
+        elif intent == ProfessorIntent.HELP_ME_AFTER_ASSESSMENT:
+            from app.models.assessment import AssessmentAttempt, AssessmentDefinition, AssessmentResult
+
+            rows = self.db.execute(
+                select(AssessmentResult, AssessmentDefinition)
+                .join(AssessmentAttempt, AssessmentAttempt.id == AssessmentResult.attempt_id)
+                .join(AssessmentDefinition, AssessmentDefinition.id == AssessmentAttempt.definition_id)
+                .where(AssessmentResult.user_id == user.id, AssessmentResult.outcome.isnot(None))
+                .order_by(AssessmentResult.created_at.desc())
+                .limit(40)
+            ).all()
+            options.extend(
+                ProfessorTargetOption(
+                    type=ProfessorTargetType.ASSESSMENT_RESULT,
+                    id=result.id,
+                    label=definition.title,
+                    subtitle=result.outcome.value.replace("_", " ").title(),
+                )
+                for result, definition in rows
+            )
         elif intent == ProfessorIntent.WHY_DOES_THIS_MATTER:
             developments = self.db.execute(
                 select(Development)
@@ -153,6 +173,17 @@ class ProfessorExecutionService:
                 attempt = self.db.get(ReviewAttempt, target.id)
                 if attempt is not None and attempt.user_id == user.id:
                     concept_ids.append(attempt.concept_id)
+            elif target.type == ProfessorTargetType.ASSESSMENT_RESULT:
+                from app.models.assessment import AssessmentAttempt, AssessmentDefinitionConcept, AssessmentResult
+
+                concept_ids.extend(
+                    self.db.execute(
+                        select(AssessmentDefinitionConcept.concept_id)
+                        .join(AssessmentAttempt, AssessmentAttempt.definition_id == AssessmentDefinitionConcept.definition_id)
+                        .join(AssessmentResult, AssessmentResult.attempt_id == AssessmentAttempt.id)
+                        .where(AssessmentResult.id == target.id, AssessmentResult.user_id == user.id)
+                    ).scalars()
+                )
         AssessmentModeGuard(self.db).assert_professor_available(
             user.id, concept_ids=concept_ids, untargeted=target is None
         )
@@ -406,6 +437,7 @@ CANONICAL_PROFESSOR_RESPONSE_JSON_SCHEMA:
             ProfessorIntent.WHY_DOES_THIS_MATTER: "Why does this matter to my learning?",
             ProfessorIntent.HELP_ME_REVIEW: "Help me understand this review without changing its result.",
             ProfessorIntent.UNDERSTAND_MY_EXPERIMENT: "Help me understand my experiment and preserve my conclusion.",
+            ProfessorIntent.HELP_ME_AFTER_ASSESSMENT: "Explain my assessment result and what to practise next, without changing the result.",
             ProfessorIntent.EXPLAIN_THIS: "Explain this selected AIL item.",
         }.get(intent, "Answer my learning question using my authorized AIL context.")
 

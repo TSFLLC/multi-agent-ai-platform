@@ -41,6 +41,7 @@ from app.models.assessment import (
 )
 from app.models.concepts import ConceptVersion
 from app.models.lab import Experiment
+from app.services.assessment_experiment_facts import experiment_facts
 
 PACKET_ALLOWLIST = (
     "criteria",
@@ -217,8 +218,6 @@ class GradingPacketBuilder:
         experiment = self.db.get(Experiment, experiment_id) if isinstance(experiment_id, str) else None
         if experiment is None or experiment.user_id != attempt.user_id:
             return []
-        from app.services.assessment_checks import experiment_facts
-
         return [
             ("PLATFORM OBSERVATION (experiment result)", experiment_facts(self.db, attempt.user_id, experiment.id)),
             ("LEARNER CONCLUSION (human interpretation)", {"conclusion_type": experiment.conclusion_type, "conclusion_text": _defang(experiment.conclusion_text or "")}),

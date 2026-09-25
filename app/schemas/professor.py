@@ -20,6 +20,9 @@ class ProfessorIntent(str, Enum):
     UNDERSTAND_MY_EXPERIMENT = "UNDERSTAND_MY_EXPERIMENT"
     HELP_ME_REVIEW = "HELP_ME_REVIEW"
     WHY_DOES_THIS_MATTER = "WHY_DOES_THIS_MATTER"
+    # AIL.5C: coaching AFTER an assessment. Read-only; the Professor explains
+    # and recommends but can never grade, regrade or rewrite a result.
+    HELP_ME_AFTER_ASSESSMENT = "HELP_ME_AFTER_ASSESSMENT"
 
 
 class ProfessorTargetType(str, Enum):
@@ -27,6 +30,7 @@ class ProfessorTargetType(str, Enum):
     DEVELOPMENT = "development"
     EXPERIMENT = "experiment"
     REVIEW_ATTEMPT = "review_attempt"
+    ASSESSMENT_RESULT = "assessment_result"
 
 
 class ProfessorAttachmentType(str, Enum):

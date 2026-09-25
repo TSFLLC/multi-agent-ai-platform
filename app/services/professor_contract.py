@@ -28,6 +28,29 @@ _FORBIDDEN_LEARNING_ASSERTIONS = (
 )
 
 
+# AIL.5C: after an assessment the Professor may explain and recommend, but it can
+# never regrade, overturn or restate the outcome, or make evidence/state claims.
+_ASSESSMENT_REWRITE = (
+    r"\bre-?grad(?:e|ed|es|ing)\b",
+    r"\b(?:change|changed|overturn|overturned|override|overrode|amend|amended)\s+(?:your|the|this)\s+(?:result|grade|outcome|score)\b",
+    r"\b(?:this|it)\s+(?:now\s+)?(?:counts?|counted)\s+(?:as|toward)\b",
+    r"\b(?:i|we)\s+(?:have\s+)?(?:graded|scored|assessed)\b",
+)
+_CLAIMS_PASSED = (r"\byou\s+(?:have\s+)?passed\b", r"\bpassed\s+(?:the|this)\s+assessment\b")
+_CLAIMS_NOT_PASSED = (r"\byou\s+(?:did\s+not|didn.?t)\s+pass\b", r"\byou\s+failed\b", r"\bnot\s+passed\b")
+
+
+def _validate_assessment_coaching(text: str, context: ProfessorContext) -> None:
+    for pattern in _ASSESSMENT_REWRITE:
+        if re.search(pattern, text, flags=re.IGNORECASE):
+            raise ProfessorResponseValidationError("Professor coaching cannot rewrite or regrade an assessment result.")
+    outcome = context.deterministic_facts.get("assessment_outcome")
+    contradicting = _CLAIMS_PASSED if outcome != "passed" else _CLAIMS_NOT_PASSED
+    for pattern in contradicting:
+        if re.search(pattern, text, flags=re.IGNORECASE):
+            raise ProfessorResponseValidationError("Professor wording must match the recorded assessment outcome.")
+
+
 def _key(ref_type: str, ref_id: str) -> str:
     return f"{ref_type}:{ref_id}"
 
@@ -95,6 +118,9 @@ def validate_professor_response(response: ProfessorResponse, context: ProfessorC
             raise ProfessorResponseValidationError(
                 "Professor response implies a learning or review state mutation."
             )
+
+    if context.intent.value == "HELP_ME_AFTER_ASSESSMENT":
+        _validate_assessment_coaching(text, context)
 
     permitted = context.permitted_references
     for reference in response.evidence:

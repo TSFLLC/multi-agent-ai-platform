@@ -136,6 +136,8 @@ class ProfessorContextAssembler:
                 self._assemble_experiment(user_id, request.target, records, facts)
             elif request.target.type == ProfessorTargetType.REVIEW_ATTEMPT:
                 self._assemble_review(user_id, request.target, records, facts)
+            elif request.target.type == ProfessorTargetType.ASSESSMENT_RESULT:
+                self._assemble_assessment_result(user_id, request.target, records, facts)
             elif request.target.type == ProfessorTargetType.DEVELOPMENT:
                 self._assemble_development(user_id, request.target, records, facts)
 
@@ -165,6 +167,7 @@ class ProfessorContextAssembler:
             ProfessorIntent.UNDERSTAND_MY_EXPERIMENT,
             ProfessorIntent.HELP_ME_REVIEW,
             ProfessorIntent.WHY_DOES_THIS_MATTER,
+            ProfessorIntent.HELP_ME_AFTER_ASSESSMENT,
         }
         if intent in required and target is None:
             raise ProfessorContextError("This Professor intent requires an explicit target.")
@@ -175,6 +178,12 @@ class ProfessorContextAssembler:
             ProfessorTargetType.CONCEPT,
         }:
             raise ProfessorContextError("HELP_ME_REVIEW requires a review attempt or Concept target.")
+        if (
+            intent == ProfessorIntent.HELP_ME_AFTER_ASSESSMENT
+            and target
+            and target.type != ProfessorTargetType.ASSESSMENT_RESULT
+        ):
+            raise ProfessorContextError("HELP_ME_AFTER_ASSESSMENT requires an assessment result target.")
         if intent == ProfessorIntent.WHY_DOES_THIS_MATTER and target and target.type != ProfessorTargetType.DEVELOPMENT:
             raise ProfessorContextError("WHY_DOES_THIS_MATTER requires a Development target.")
 
@@ -401,6 +410,51 @@ class ProfessorContextAssembler:
                     ProfessorProvenanceKind.LEARNING_RECORD,
                     data=_model_data(evidence, ["concept_id", "concept_version_id", "evidence_type", "passed", "grader", "created_at"]),
                 )
+
+    def _assemble_assessment_result(
+        self, user_id: str, target: ProfessorTarget, records: List[ProfessorContextRecord], facts: Dict[str, Any]
+    ) -> None:
+        """AIL.5C: the learner's OWN result, read-only. The Professor sees the
+        report's platform-fact and grader-judgment blocks plus the remediation
+        map, never the learner's raw submission and never anyone else's
+        result. It may coach; it cannot change the result."""
+        from app.models.assessment import AssessmentResult
+
+        result = self.db.execute(
+            select(AssessmentResult).where(AssessmentResult.id == target.id, AssessmentResult.user_id == user_id)
+        ).scalar_one_or_none()
+        if result is None or result.outcome is None or not result.report:
+            raise ProfessorContextError("Assessment result context is unavailable.")
+        report = result.report
+        self._add(
+            records, "assessment_result", result.id, "assessment_result", ProfessorProvenanceKind.PLATFORM_OBSERVATION,
+            data={
+                "outcome": result.outcome.value,
+                "demonstration_effect": result.demonstration_effect.value if result.demonstration_effect else None,
+                "result_kind": result.result_kind.value,
+                "reason_code": report.get("reason_code"),
+            },
+        )
+        self._add(
+            records, "assessment_platform_fact", result.id, "assessment_platform_fact",
+            ProfessorProvenanceKind.PLATFORM_OBSERVATION,
+            data={k: report["platform_fact"].get(k) for k in ("deterministic_checks", "assistance", "independence", "execution_verification")},
+        )
+        if report.get("grader_judgment", {}).get("ran"):
+            self._add(
+                records, "assessment_grader_judgment", result.id, "assessment_grader_judgment",
+                ProfessorProvenanceKind.AI_EXPLANATION,
+                data={"criteria": report["grader_judgment"]["criteria"]},
+            )
+        self._add(
+            records, "assessment_next_steps", result.id, "assessment_remediation", ProfessorProvenanceKind.LEARNING_RECORD,
+            data={
+                "gaps": report.get("answers", {}).get("what_needs_more_work", []),
+                "remediation": report.get("answers", {}).get("what_to_practice_next", []),
+            },
+        )
+        facts["assessment_outcome"] = result.outcome.value
+        facts["assessment_result_id"] = result.id
 
     def _assemble_development(
         self, user_id: str, target: ProfessorTarget, records: List[ProfessorContextRecord], facts: Dict[str, Any]
