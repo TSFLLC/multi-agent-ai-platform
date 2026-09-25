@@ -108,7 +108,7 @@ def kc_definition(
 
 
 def explain_definition(
-    db, author, concept, *, key="eb-structured-output", crosscheck="deciding", publish=True
+    db, author, concept, *, key="eb-structured-output", crosscheck="deciding", publish=True, template=None
 ):
     """Explain-back: one deterministic length check + two required judged criteria."""
     criteria = [
@@ -165,6 +165,7 @@ def explain_definition(
         concept_links=[{"concept_id": concept.id, "criterion_keys": ["long_enough", "accuracy", "limits"]}],
         challenge_spec={"entry_kind": "prompt", "draw_size": 1, "pool": prompts},
         grading_policy={"crosscheck": crosscheck},
+        project_template_id=template.id if template else None,
     )
     return AssessmentDefinitionService(db).publish(defn.id) if publish else defn
 

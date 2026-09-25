@@ -63,7 +63,7 @@ from app.models.lab import Experiment
 from app.models.learner import LearningEvidence
 from app.models.tasks import AgentRun
 from app.services import independence_policy as policy
-from app.services.assessment_challenge_service import draw_challenge, public_challenge
+from app.services.assessment_challenge_service import draw_challenge, is_authored_challenge, public_challenge
 from app.services.assessment_checks import CheckContext, CheckUnavailable, aware, run_check
 from app.services.assessment_definition_service import AssessmentDefinitionService
 from app.services.assessment_evidence_writer import AssessmentEvidenceWriter
@@ -789,7 +789,7 @@ class AssessmentService:
             grading_status, judged_rows, grader_result = round_.status, round_.judged, round_.result
 
         independence = source_work_summary(
-            attempt.input_manifest, bool(attempt.challenge_instance), attempt.attestation
+            attempt.input_manifest, is_authored_challenge(attempt.challenge_instance), attempt.attestation
         )
         independence["fresh_required"] = attempt.fresh_required
         independence["fresh_reason"] = attempt.fresh_reason

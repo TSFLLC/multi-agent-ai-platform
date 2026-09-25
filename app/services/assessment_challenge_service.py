@@ -22,6 +22,14 @@ from app.models.concepts import LearningItem
 from app.services.review_attempt_service import choice_spec
 
 GENERATOR = "authored_pool_v1"
+# Only challenges drawn from an authored, versioned pool can show independence.
+# A challenge from any other generator (e.g. a model) is recorded but never credited:
+# it cannot independently establish DEMONSTRATED.
+AUTHORED_GENERATORS = frozenset({GENERATOR})
+
+
+def is_authored_challenge(instance) -> bool:
+    return bool(instance) and instance.get("generator") in AUTHORED_GENERATORS
 
 
 @dataclass(frozen=True)
