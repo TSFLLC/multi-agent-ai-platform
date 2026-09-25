@@ -124,7 +124,7 @@ def upgrade() -> None:
         batch_op.create_foreign_key(batch_op.f('fk_artifacts_enrollment_id_enrollments'), 'enrollments', ['enrollment_id'], ['id'])
 
     with op.batch_alter_table('comparison_runs', schema=None) as batch_op:
-        batch_op.drop_constraint(None, type_='foreignkey')
+        batch_op.drop_constraint(batch_op.f('fk_comparison_runs_experiment_id_experiments'), type_='foreignkey')
         batch_op.create_foreign_key(batch_op.f('fk_comparison_runs_experiment_id_experiments'), 'experiments', ['experiment_id'], ['id'], ondelete='CASCADE')
 
     with op.batch_alter_table('development_concepts', schema=None) as batch_op:
@@ -152,7 +152,7 @@ def upgrade() -> None:
         batch_op.create_foreign_key(batch_op.f('fk_learning_evidence_milestone_attempt_id_milestone_attempts'), 'milestone_attempts', ['milestone_attempt_id'], ['id'])
 
     with op.batch_alter_table('task_runs', schema=None) as batch_op:
-        batch_op.drop_constraint(None, type_='foreignkey')
+        batch_op.drop_constraint(batch_op.f('fk_task_runs_experiment_id_experiments'), type_='foreignkey')
         batch_op.create_foreign_key(batch_op.f('fk_task_runs_experiment_id_experiments'), 'experiments', ['experiment_id'], ['id'], ondelete='SET NULL')
 
     # ### end Alembic commands ###

@@ -312,3 +312,277 @@ def make_provider_model(db, model=None, provider=None, **kwargs):
     db.add(pm)
     db.flush()
     return pm
+
+
+# --- AIL.5B Build With Me fixtures -----------------------------------------------
+
+
+@pytest.fixture()
+def ail5b_user(db):
+    """Test user for AIL.5B tests."""
+    from app.models.identity import Organization, User
+    from uuid import uuid4
+
+    org = Organization(
+        id=str(uuid4()),
+        name="AIL.5B Test Org",
+    )
+    db.add(org)
+    db.flush()
+
+    user = User(
+        id=str(uuid4()),
+        org_id=org.id,
+        email=f"ail5b-test-{str(uuid4())[:8]}@example.com",
+    )
+    db.add(user)
+    db.commit()
+    return user
+
+
+@pytest.fixture()
+def ail5b_author_user(db):
+    """Template author user (id='user-1' for tests)."""
+    from app.models.identity import Organization, User
+
+    org = Organization(id="org-author", name="Author Org")
+    db.add(org)
+    db.flush()
+
+    user = User(id="user-1", org_id=org.id, email="template-author@test.local")
+    db.add(user)
+    db.commit()
+    return user
+
+
+@pytest.fixture()
+def ail5b_learner_user(db):
+    """Project learner user (id='learner-1' for tests)."""
+    from app.models.identity import Organization, User
+
+    org = Organization(id="org-learner", name="Learner Org")
+    db.add(org)
+    db.flush()
+
+    user = User(id="learner-1", org_id=org.id, email="project-learner@test.local")
+    db.add(user)
+    db.commit()
+    return user
+
+
+@pytest.fixture()
+def ail5b_user_a(db):
+    """User A for access isolation tests."""
+    from app.models.identity import Organization, User
+
+    org = Organization(id="org-user-a", name="User A Org")
+    db.add(org)
+    db.flush()
+
+    user = User(id="user-a", org_id=org.id, email="user-a@test.local")
+    db.add(user)
+    db.commit()
+    return user
+
+
+@pytest.fixture()
+def ail5b_user_b(db):
+    """User B for access isolation tests."""
+    from app.models.identity import Organization, User
+
+    org = Organization(id="org-user-b", name="User B Org")
+    db.add(org)
+    db.flush()
+
+    user = User(id="user-b", org_id=org.id, email="user-b@test.local")
+    db.add(user)
+    db.commit()
+    return user
+
+
+@pytest.fixture()
+def ail5b_program_version(db, ail5b_user):
+    """Program version for AIL.5B enrollment."""
+    from app.models.academy import AcademyProgram, AcademyProgramVersion
+    from app.db.enums import AcademyProgramVersionStatus
+    from uuid import uuid4
+    from datetime import datetime
+
+    program = AcademyProgram(
+        id=str(uuid4()),
+        slug="ail5b-test-program",
+        title="AIL.5B Test Program",
+        author_user_id=ail5b_user.id,
+    )
+    db.add(program)
+    db.flush()
+
+    version = AcademyProgramVersion(
+        id=str(uuid4()),
+        program_id=program.id,
+        version=1,
+        status=AcademyProgramVersionStatus.PUBLISHED,
+        duration_days=30,
+        completion_rules={},
+        published_at=datetime.utcnow(),
+    )
+    db.add(version)
+    db.commit()
+    return version
+
+
+@pytest.fixture()
+def ail5b_enrollment(db, ail5b_user, ail5b_program_version):
+    """Enrollment for AIL.5B project attempts."""
+    from app.models.academy import AcademyEnrollment
+    from app.db.enums import AcademyPace, AcademyEnrollmentStatus
+    from uuid import uuid4
+
+    enrollment = AcademyEnrollment(
+        id=str(uuid4()),
+        user_id=ail5b_user.id,
+        program_version_id=ail5b_program_version.id,
+        pace=AcademyPace.SCHEDULED,
+        status=AcademyEnrollmentStatus.ACTIVE,
+    )
+    db.add(enrollment)
+    db.commit()
+    return enrollment
+
+
+@pytest.fixture()
+def ail5b_template(db, ail5b_user):
+    """Published project template for tests."""
+    from app.models.academy import ProjectTemplate
+    from app.db.enums import ProjectAudienceLevel, ProjectLadderLevel, ProjectTemplateBuildMode
+    from uuid import uuid4
+    from datetime import datetime
+
+    template = ProjectTemplate(
+        id=str(uuid4()),
+        template_key="ail5b-test-template",
+        version=1,
+        status="published",
+        title="AIL.5B Test Project",
+        audience_level=ProjectAudienceLevel.BEGINNER,
+        ladder_level=ProjectLadderLevel.L2,
+        build_mode=ProjectTemplateBuildMode.NO_CODE,
+        brief_md="# Test Brief",
+        author_user_id=ail5b_user.id,
+        published_at=datetime.utcnow(),
+    )
+    db.add(template)
+    db.commit()
+    return template
+
+
+@pytest.fixture()
+def ail5b_attempt(db, ail5b_user, ail5b_template, ail5b_enrollment):
+    """Project attempt for milestone tests."""
+    from app.models.academy import ProjectAttempt
+    from app.db.enums import ProjectAttemptStatus
+    from uuid import uuid4
+
+    attempt = ProjectAttempt(
+        id=str(uuid4()),
+        user_id=ail5b_user.id,
+        project_template_id=ail5b_template.id,
+        enrollment_id=ail5b_enrollment.id,
+        is_capstone=False,
+        status=ProjectAttemptStatus.ACTIVE,
+        brief_snapshot={},
+    )
+    db.add(attempt)
+    db.commit()
+    return attempt
+
+
+@pytest.fixture()
+def ail5b_milestone(db, ail5b_template):
+    """Project milestone for attempt."""
+    from app.models.academy import ProjectMilestone
+    from uuid import uuid4
+
+    milestone = ProjectMilestone(
+        id=str(uuid4()),
+        project_template_id=ail5b_template.id,
+        position=1,
+        title="Test Milestone",
+        instructions_md="# Instructions",
+        check_spec={"type": "test", "cases": []},
+    )
+    db.add(milestone)
+    db.commit()
+    return milestone
+
+
+@pytest.fixture()
+def ail5b_milestone_attempt(db, ail5b_attempt, ail5b_milestone):
+    """Milestone attempt for state tests."""
+    from app.models.academy import MilestoneAttempt
+    from app.db.enums import MilestoneAttemptStatus, MilestoneAttemptMode
+    from uuid import uuid4
+
+    milestone_attempt = MilestoneAttempt(
+        id=str(uuid4()),
+        project_attempt_id=ail5b_attempt.id,
+        project_milestone_id=ail5b_milestone.id,
+        status=MilestoneAttemptStatus.NOT_STARTED,
+        attempts_count=0,
+        mode=MilestoneAttemptMode.NORMAL,
+    )
+    db.add(milestone_attempt)
+    db.commit()
+    return milestone_attempt
+
+
+@pytest.fixture()
+def ail5b_template_for_user_a(db, ail5b_author_user):
+    """Project template for User A's attempts."""
+    from app.models.academy import ProjectTemplate
+    from app.db.enums import ProjectAudienceLevel, ProjectLadderLevel, ProjectTemplateBuildMode
+    from uuid import uuid4
+    from datetime import datetime
+
+    template = ProjectTemplate(
+        id=str(uuid4()),
+        template_key="template-user-a",
+        version=1,
+        status="published",
+        title="Template for User A",
+        audience_level=ProjectAudienceLevel.BEGINNER,
+        ladder_level=ProjectLadderLevel.L2,
+        build_mode=ProjectTemplateBuildMode.NO_CODE,
+        brief_md="# User A Template",
+        author_user_id=ail5b_author_user.id,
+        published_at=datetime.utcnow(),
+    )
+    db.add(template)
+    db.commit()
+    return template
+
+
+@pytest.fixture()
+def ail5b_template_for_user_b(db, ail5b_author_user):
+    """Project template for User B's attempts."""
+    from app.models.academy import ProjectTemplate
+    from app.db.enums import ProjectAudienceLevel, ProjectLadderLevel, ProjectTemplateBuildMode
+    from uuid import uuid4
+    from datetime import datetime
+
+    template = ProjectTemplate(
+        id=str(uuid4()),
+        template_key="template-user-b",
+        version=1,
+        status="published",
+        title="Template for User B",
+        audience_level=ProjectAudienceLevel.BEGINNER,
+        ladder_level=ProjectLadderLevel.L2,
+        build_mode=ProjectTemplateBuildMode.NO_CODE,
+        brief_md="# User B Template",
+        author_user_id=ail5b_author_user.id,
+        published_at=datetime.utcnow(),
+    )
+    db.add(template)
+    db.commit()
+    return template
