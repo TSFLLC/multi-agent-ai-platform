@@ -371,14 +371,28 @@ def eligible_experiments(attempt_id: str, db: Session = Depends(get_db), user: U
 def count_experiment(attempt_id: str, experiment_id: str, body: CountLearningRequest, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     if not body.confirmed:
         raise HTTPException(status_code=400, detail="Explicit confirmation is required")
+    from app.models.academy import CandidateEvidence
+    from app.models.lab import Experiment
     from app.services.experiment_learning_qualification_service import ExperimentLearningQualificationService
     from app.services.learner_state_service import LearnerStateService
     ProjectAttemptService.own_attempt(db, attempt_id, user.id)
+    experiment = db.query(Experiment).filter(Experiment.id == experiment_id, Experiment.user_id == user.id).first()
+    if experiment is None:
+        raise HTTPException(status_code=404, detail="Experiment not found")
+    candidate = db.query(CandidateEvidence).filter_by(project_attempt_id=attempt_id, source_type="experiment", source_id=experiment_id, user_id=user.id).first()
+    if candidate is None:
+        candidate = CandidateEvidence(id=__import__("uuid").uuid4().hex, user_id=user.id, project_attempt_id=attempt_id, concept_id=experiment.concept_id, source_type="experiment", source_id=experiment_id, evidence_type="lab", passed=False, qualified=False)
+        db.add(candidate)
+        db.commit()
     evidence, created, qualification = ExperimentLearningQualificationService(db).count_toward_learning(user.id, experiment_id)
     if evidence is None:
         raise HTTPException(status_code=409, detail=qualification)
+    candidate.passed = True
+    candidate.qualified = True
+    candidate.learning_evidence_id = evidence.id
+    db.commit()
     state = LearnerStateService(db).state(user.id, evidence.concept_id)
-    return {"created": created, "candidate_evidence": {"source": "experiment", "source_id": experiment_id}, "learning_evidence_id": evidence.id, "qualification": qualification, "learner_state": {"ladder": state.ladder, "overlays": sorted(state.overlays)}}
+    return {"created": created, "candidate_evidence": {"id": candidate.id, "source": "experiment", "source_id": experiment_id, "qualified": candidate.qualified}, "learning_evidence_id": evidence.id, "qualification": qualification, "learner_state": {"ladder": state.ladder, "overlays": sorted(state.overlays)}}
 
 
 @router.post("/attempts/{attempt_id}/submit")
