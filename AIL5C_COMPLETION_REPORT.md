@@ -78,3 +78,18 @@ obtain fresh deploy authorization.
 `::test_upgrade_is_reapplicable_after_downgrade`, `test_model_selection::test_model_policy_via_api`.
 The head assertions still expect `ail5a_academy_foundation`. They were failing before this work and
 were not touched.
+
+## Final validation (code SHA `d887910`)
+
+* Full backend suite: **2199 passed, 10 failed** — the 9 pre-existing failures above plus one
+  timing flake in `tests/test_ma7_8b_failed_branch_resume.py`. That file fails intermittently on the
+  pristine 5B baseline too (5 alternating runs each: 5C 2 of 5 runs failed, baseline 4 of 5).
+  Unrelated to AIL.5C.
+* AIL.5C backend tests: 201+ (11 files, incl. 8 UAT scenarios); frontend: 472 pass (36 new).
+* Three contracts pinned by older tests were respected rather than loosened: the evidence service's
+  two-method write surface (supersession lives in the review service), `create_and_execute`'s
+  signature, and — deliberately updated — the Professor intent list (now includes the design-frozen
+  `HELP_ME_AFTER_ASSESSMENT`).
+* Review triggers: learner dispute, low confidence (learner request on a PROVISIONAL result),
+  model disagreement (platform-opened, consent-gated), capstone exception. "Authorized manual
+  correction" is a reviewer decision (override) on an open review.
