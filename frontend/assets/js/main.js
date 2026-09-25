@@ -15,6 +15,7 @@ import { renderWorkflowRun } from "./pages/workflowRun.js";
 import { renderToday, renderRadar, renderDevelopmentDetail } from "./pages/radar.js";
 import { renderLab, renderExperimentDetail } from "./pages/lab.js";
 import { renderProfessor } from "./pages/professor.js";
+import { renderAssessmentCenter, renderAssessmentDefinition, renderAssessmentAttempt, renderDemonstrationRecord, renderReviewQueue, renderReviewDetail } from "./pages/assessments.js";
 import { renderAcademyHome, renderAcademyProgram, renderAcademyToday, renderAcademyProgress, renderProjectLibrary, renderProjectOverview, renderBuildWorkspace } from "./pages/academy.js";
 
 registerRoute("/ask", renderAsk);
@@ -44,6 +45,12 @@ registerRoute("/academy/enrollments/:id/progress", renderAcademyProgress);
 registerRoute("/academy/projects", renderProjectLibrary);
 registerRoute("/academy/projects/:id", renderProjectOverview);
 registerRoute("/academy/projects/attempts/:id", renderBuildWorkspace);
+registerRoute("/academy/assessments", renderAssessmentCenter);
+registerRoute("/academy/assessments/definitions/:key", renderAssessmentDefinition);
+registerRoute("/academy/assessments/attempts/:id", renderAssessmentAttempt);
+registerRoute("/academy/assessments/records/:id", renderDemonstrationRecord);
+registerRoute("/academy/assessments/reviews", renderReviewQueue);
+registerRoute("/academy/assessments/reviews/:id", renderReviewDetail);
 
 // Locally this resolves immediately (the server already injected the
 // token — see tokenGate.js). In hosted mode it blocks the app shell

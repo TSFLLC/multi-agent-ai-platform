@@ -277,9 +277,12 @@ def validate_definition(
         draw = challenge_spec.get("draw_size", 1)
         if not isinstance(pool, list) or not isinstance(draw, int) or draw < 1:
             raise DefinitionInvalid("challenge_spec needs a pool list and a positive draw_size")
-        entry_keys = [e.get("entry_key") for e in pool if isinstance(e, dict)]
-        if len(entry_keys) != len(pool) or len(set(entry_keys)) != len(pool) or not all(entry_keys):
-            raise DefinitionInvalid("every challenge pool entry needs a unique entry_key")
+        fixed = challenge_spec.get("fixed") or []
+        if not isinstance(fixed, list):
+            raise DefinitionInvalid("challenge_spec.fixed must be a list")
+        entry_keys = [e.get("entry_key") for e in list(pool) + list(fixed) if isinstance(e, dict)]
+        if len(entry_keys) != len(pool) + len(fixed) or len(set(entry_keys)) != len(entry_keys) or not all(entry_keys):
+            raise DefinitionInvalid("every challenge entry needs a unique entry_key")
         if len(pool) < MIN_POOL_MULTIPLIER * draw:
             raise DefinitionInvalid(
                 f"the challenge pool must hold at least {MIN_POOL_MULTIPLIER}x the draw size "

@@ -1138,3 +1138,32 @@ button.link:hover:not(:disabled) { background: none; color: #8fb0ff; }
 .lab-run-details { margin-top: 8px; }
 .lab-run-details summary { cursor: pointer; color: var(--accent); }
 .lab-no-conclusion { color: var(--text-muted); font-style: italic; }
+
+/* --- AIL.5C Assessment + Demonstration -------------------------------------- */
+.assessment-banner {
+  border: 2px solid var(--accent);
+  background: var(--accent-soft);
+  border-radius: var(--radius);
+  padding: 12px 16px;
+  margin-bottom: 14px;
+}
+.assessment-banner p { margin: 4px 0; color: var(--text); }
+.assessment-card, .challenge-item { padding: 14px 16px; }
+.checklist { list-style: none; padding-left: 0; }
+.checklist li { padding: 6px 0; border-bottom: 1px solid var(--border-soft); }
+.check-met strong { color: var(--free); }
+.check-unmet strong { color: var(--paid); }
+.callout { border-left: 3px solid var(--paid); background: var(--paid-bg); padding: 8px 12px; border-radius: 6px; }
+.outcome { border-left: 4px solid var(--unknown); }
+.outcome-good { border-left-color: var(--free); }
+.outcome-warn { border-left-color: var(--paid); }
+.block-fact { border-left: 4px solid var(--accent); }
+.block-judgment { border-left: 4px solid var(--paid); }
+.block-reflection { border-left: 4px solid var(--free); }
+.block-coaching { border-left: 4px dashed var(--unknown); }
+.block-needswork { border-left: 4px solid var(--paid); }
+.judged { padding: 8px 0; border-bottom: 1px solid var(--border-soft); }
+.option { display: block; padding: 4px 0; cursor: pointer; }
+.field { margin: 12px 0; }
+.field textarea, .challenge-item textarea, .block-review textarea { width: 100%; }
+.prose { white-space: pre-wrap; }

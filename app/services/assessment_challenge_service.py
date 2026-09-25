@@ -101,11 +101,16 @@ def draw_challenge(
     if len(candidates) < size:
         return None
     drawn = sorted(candidates, key=lambda e: _rank(seed, e["entry_key"]))[:size]
+    # Fixed entries (e.g. a capstone's explain-back questions) are always issued
+    # alongside the seeded draw; they are authored, never generated.
+    fixed = [e for e in (_resolve_entry(db, e) for e in spec.get("fixed") or []) if e is not None]
 
     items: List[dict] = []
     server_only: Dict[str, Any] = {"answer_keys": {}, "reference_points": {}, "values": {}}
-    for entry in drawn:
+    for entry in drawn + fixed:
         public = {k: v for k, v in entry.items() if k not in ("answer_key", "reference_points", "server_only")}
+        if entry in fixed:
+            public["fixed"] = True
         items.append(public)
         if "answer_key" in entry:
             server_only["answer_keys"][entry["entry_key"]] = sorted(entry["answer_key"])

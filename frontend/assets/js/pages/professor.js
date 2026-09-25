@@ -7,6 +7,7 @@ const intents = [
   ["UNDERSTAND_MY_EXPERIMENT", "Help me understand an experiment"],
   ["HELP_ME_REVIEW", "Help me review"],
   ["WHY_DOES_THIS_MATTER", "Why does this matter?"],
+  ["HELP_ME_AFTER_ASSESSMENT", "Help me after an assessment"],
 ];
 
 const targetIntentLabels = {
@@ -14,6 +15,7 @@ const targetIntentLabels = {
   UNDERSTAND_MY_EXPERIMENT: "Help me understand an experiment",
   HELP_ME_REVIEW: "Help me review",
   WHY_DOES_THIS_MATTER: "Why does this matter?",
+  HELP_ME_AFTER_ASSESSMENT: "Explain my assessment result and what to practise next, without changing the result.",
 };
 
 export function targetRequired(intent) {
@@ -26,6 +28,7 @@ export function targetCompatible(intent, target) {
   if (intent === "UNDERSTAND_MY_EXPERIMENT") return target.type === "experiment";
   if (intent === "HELP_ME_REVIEW") return target.type === "review_attempt" || target.type === "concept";
   if (intent === "WHY_DOES_THIS_MATTER") return target.type === "development";
+  if (intent === "HELP_ME_AFTER_ASSESSMENT") return target.type === "assessment_result";
   return ["concept", "development"].includes(target.type);
 }
 

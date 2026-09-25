@@ -226,6 +226,39 @@ class AssessmentDefinitionService:
     # -- learner-facing view ------------------------------------------------------------------------
 
     @staticmethod
+    def response_fields(defn: AssessmentDefinition) -> List[Dict]:
+        """The inputs this assessment expects, derived from its own checks so the
+        UI never hard-codes a form per definition. Challenge items (questions,
+        prompts, variants) are rendered from the issued challenge itself."""
+        fields: Dict[str, Dict] = {}
+
+        def add(path: str, label: str, kind: str, **extra) -> None:
+            fields.setdefault(path, {"path": path, "label": label, "input": kind, **extra})
+
+        for c in defn.criteria:
+            if c["method"] != "deterministic":
+                continue
+            check, kind = c["check"], c["check"]["type"]
+            if kind in ("length_bounds", "section_present"):
+                add(check["field"], c["label"], "long_text", sections=check.get("sections"), min_chars=check.get("min_chars"))
+            elif kind in ("schema_valid", "numeric_match"):
+                add(check["field"], c["label"], "text")
+            elif kind in ("run_exists_owned_terminal", "run_after_challenge_start", "inputs_match_challenge", "artifact_present", "cost_within"):
+                add(check.get("field", "run_ids"), "The runs you made (paste their ids)", "ids")
+            elif kind == "evaluation_run_findings":
+                add(check.get("field", "evaluation_run_ids"), "Your app's evaluation runs (paste their ids)", "ids")
+            elif kind in ("experiment_concluded", "experiment_claim"):
+                add(check.get("field", "experiment_id"), "Your experiment (paste its id)", "id")
+                if check.get("claim_field"):
+                    add(check["claim_field"], "Which variant did better, according to the recorded results?", "text")
+        entry_kind = (defn.challenge_spec or {}).get("entry_kind")
+        if any(c["method"] == "grader" for c in defn.criteria) and entry_kind != "prompt" and not any(
+            f["input"] == "long_text" for f in fields.values()
+        ):
+            add("fields.explanation", "Your explanation, in your own words", "long_text")
+        return list(fields.values())
+
+    @staticmethod
     def learner_view(defn: AssessmentDefinition, links: List[AssessmentDefinitionConcept]) -> Dict:
         """Everything a learner may know BEFORE they start: what is assessed,
         in plain language, and how each part is decided. Never reference
@@ -253,6 +286,7 @@ class AssessmentDefinitionService:
                 }
                 for c in defn.criteria
             ],
+            "response_fields": AssessmentDefinitionService.response_fields(defn),
             "evidence_collected": [
                 "your responses and any runs, experiments or artifacts you cite",
                 "the help level (H0-H5) recorded on your earlier project work",

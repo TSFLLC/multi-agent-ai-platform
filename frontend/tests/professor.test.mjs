@@ -44,3 +44,15 @@ test("incompatible or missing targets cannot be submitted", () => {
     question: "What next?",
   });
 });
+
+test("Professor can coach after an assessment, but only against an assessment result target", () => {
+  assert.equal(targetRequired("HELP_ME_AFTER_ASSESSMENT"), true);
+  const result = { type: "assessment_result", id: "res-1", label: "Check" };
+  assert.equal(targetCompatible("HELP_ME_AFTER_ASSESSMENT", result), true);
+  assert.equal(targetCompatible("HELP_ME_AFTER_ASSESSMENT", { type: "concept", id: "c" }), false);
+  assert.equal(targetCompatible("HELP_ME_AFTER_ASSESSMENT", null), false);
+  assert.equal(targetCompatible("EXPLAIN_THIS", result), false, "an assessment result is not an explain-this target");
+  assert.deepEqual(buildProfessorRequest({ intent: "HELP_ME_AFTER_ASSESSMENT", question: "Why?", target: result }), {
+    intent: "HELP_ME_AFTER_ASSESSMENT", question: "Why?", target: { type: "assessment_result", id: "res-1" },
+  });
+});

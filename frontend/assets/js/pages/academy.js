@@ -59,6 +59,7 @@ function itemCard(item) {
 function navLinks(enrollmentId) {
   return el("div", { class: "row" }, [
     el("a", { class: "button-link", href: "#/academy" }, "Academy Home"),
+    el("a", { class: "button-link", href: "#/academy/assessments" }, "Assessment Center"),
     enrollmentId ? el("a", { class: "button-link", href: `#/academy/enrollments/${encodeURIComponent(enrollmentId)}/today` }, "Today") : null,
     enrollmentId ? el("a", { class: "button-link", href: `#/academy/enrollments/${encodeURIComponent(enrollmentId)}/progress` }, "Progress") : null,
   ]);
