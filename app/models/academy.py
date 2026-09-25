@@ -200,7 +200,9 @@ class MilestoneAttempt(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     """Work on a single milestone."""
 
     __tablename__ = "milestone_attempts"
-    __table_args__ = (UniqueConstraint("project_attempt_id", "project_milestone_id", name="uq_milestone_attempts"),)
+    # Retries and Study Mode variants are intentionally append-only.  A
+    # project can therefore have several attempts for one milestone.
+    __table_args__ = (Index("ix_milestone_attempts_project_milestone", "project_attempt_id", "project_milestone_id"),)
 
     project_attempt_id: Mapped[str] = mapped_column(ForeignKey("project_attempts.id", ondelete="CASCADE"), nullable=False)
     project_milestone_id: Mapped[str] = mapped_column(ForeignKey("project_milestones.id", ondelete="RESTRICT"), nullable=False)
@@ -213,3 +215,52 @@ class MilestoneAttempt(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
 
     project_attempt: Mapped["ProjectAttempt"] = relationship(back_populates="milestones")
     milestone: Mapped["ProjectMilestone"] = relationship(back_populates="attempts")
+
+
+class ProjectExperimentLink(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
+    """A bounded link to an existing Personal Lab Experiment."""
+    __tablename__ = "project_experiment_links"
+    __table_args__ = (UniqueConstraint("milestone_attempt_id", "experiment_id", name="uq_project_experiment_link"),)
+
+    project_attempt_id: Mapped[str] = mapped_column(ForeignKey("project_attempts.id", ondelete="CASCADE"), nullable=False)
+    milestone_attempt_id: Mapped[Optional[str]] = mapped_column(ForeignKey("milestone_attempts.id", ondelete="CASCADE"), nullable=True)
+    experiment_id: Mapped[str] = mapped_column(ForeignKey("experiments.id", ondelete="CASCADE"), nullable=False)
+    project_question: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    learner_decision: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+
+class ExplainBackResponse(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
+    __tablename__ = "explain_back_responses"
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    project_attempt_id: Mapped[str] = mapped_column(ForeignKey("project_attempts.id", ondelete="CASCADE"), nullable=False)
+    milestone_attempt_id: Mapped[str] = mapped_column(ForeignKey("milestone_attempts.id", ondelete="CASCADE"), nullable=False)
+    concept_id: Mapped[Optional[str]] = mapped_column(ForeignKey("concepts.id", ondelete="RESTRICT"), nullable=True)
+    question: Mapped[str] = mapped_column(Text, nullable=False)
+    response: Mapped[str] = mapped_column(Text, nullable=False)
+    assistance_level: Mapped[Optional[AssistanceLevel]] = mapped_column(sa_enum(AssistanceLevel), nullable=True)
+
+
+class CandidateEvidence(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
+    """Append-only project evidence before the canonical learning service."""
+    __tablename__ = "candidate_evidence"
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    project_attempt_id: Mapped[str] = mapped_column(ForeignKey("project_attempts.id", ondelete="CASCADE"), nullable=False)
+    milestone_attempt_id: Mapped[Optional[str]] = mapped_column(ForeignKey("milestone_attempts.id", ondelete="CASCADE"), nullable=True)
+    concept_id: Mapped[Optional[str]] = mapped_column(ForeignKey("concepts.id", ondelete="RESTRICT"), nullable=True)
+    source_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    source_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
+    evidence_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    passed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    assistance_level: Mapped[Optional[AssistanceLevel]] = mapped_column(sa_enum(AssistanceLevel), nullable=True)
+    execution_verification: Mapped[Optional[ExecutionVerification]] = mapped_column(sa_enum(ExecutionVerification), nullable=True)
+    qualified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    learning_evidence_id: Mapped[Optional[str]] = mapped_column(ForeignKey("learning_evidence.id", ondelete="SET NULL"), nullable=True)
+
+
+class AssessmentReadySubmission(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
+    __tablename__ = "assessment_ready_submissions"
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    project_attempt_id: Mapped[str] = mapped_column(ForeignKey("project_attempts.id", ondelete="CASCADE"), nullable=False, unique=True)
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="ready")
+    snapshot: Mapped[dict] = mapped_column("snapshot_json", nullable=False, default=dict)
+    finalized_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)

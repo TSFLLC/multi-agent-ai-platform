@@ -8,9 +8,11 @@
 - EvidenceQualification: candidate→qualified pipeline
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
-from app.db.enums import AssistanceLevel, MilestoneAttemptStatus, ProjectAttemptStatus
+from uuid import uuid4
+from sqlalchemy import select
+from app.db.enums import AssistanceLevel, MilestoneAttemptMode, MilestoneAttemptStatus, ProjectAttemptStatus
 from sqlalchemy.orm import Session
 
 
@@ -36,6 +38,30 @@ class ProjectTemplateService:
             return True
         return False
 
+    @staticmethod
+    def seed_foundation_projects(db: Session, author_user_id: str):
+        """Idempotently seed the four published learner project versions."""
+        from app.academy_curriculum import BUILD_WITH_ME_PROJECTS
+        from app.models.academy import ProjectTemplate, ProjectTemplateConceptLink, ProjectMilestone
+        from app.models.concepts import Concept
+        from app.db.enums import ProjectAudienceLevel, ProjectLadderLevel, ProjectTemplateBuildMode
+        created = []
+        for spec in BUILD_WITH_ME_PROJECTS:
+            if db.query(ProjectTemplate).filter_by(template_key=spec["key"], version=1).first():
+                continue
+            concepts = [db.query(Concept).filter_by(slug=slug).first() for slug in spec["concepts"]]
+            missing = [slug for slug, concept in zip(spec["concepts"], concepts) if concept is None]
+            if missing:
+                raise ValueError("Missing Concept Graph slugs: " + ", ".join(missing))
+            template = ProjectTemplate(id=str(uuid4()), template_key=spec["key"], version=1, status="published", title=spec["title"], audience_level=ProjectAudienceLevel.BEGINNER, ladder_level=ProjectLadderLevel(spec["level"]), build_mode=ProjectTemplateBuildMode(spec["mode"]), brief_md=spec["brief"], difficulty_profile={"project": True}, evidence_requirements={"requires_actual_result": True}, variant_spec={"authored": True}, requires_platform_capability=spec.get("capability"), est_minutes_min=45, est_minutes_max=180, capstone_eligible=False, author_user_id=author_user_id, published_at=datetime.utcnow())
+            db.add(template); db.flush()
+            for concept in concepts: db.add(ProjectTemplateConceptLink(id=str(uuid4()), project_template_id=template.id, concept_id=concept.id, role="applied"))
+            for position, title in enumerate(spec["milestones"], 1):
+                db.add(ProjectMilestone(id=str(uuid4()), project_template_id=template.id, position=position, title=title, instructions_md=f"{title}. Record your own work and what you observed.", check_spec={"deterministic": True, "requires_result": True}, evidence_type="lab", hint_content={"variant": f"{title} — use a new example with the same skill."}, reference_solution_ref=f"academy/{spec['key']}/v1/milestone-{position}.md"))
+            created.append(template)
+        db.commit()
+        return created
+
 
 class ProjectAttemptService:
     """Manages learner project attempts: create, resume, check readiness."""
@@ -44,15 +70,16 @@ class ProjectAttemptService:
     def create_attempt(db: Session, user_id: str, template_id: str, enrollment_id: Optional[str] = None) -> str:
         """Create a new project attempt."""
         from app.models.academy import ProjectAttempt
-        from uuid import uuid4
-
+        template = db.get(__import__("app.models.academy", fromlist=["ProjectTemplate"]).ProjectTemplate, template_id)
+        if template is None or template.status != "published":
+            raise ValueError("Published project template not found")
         attempt = ProjectAttempt(
             id=str(uuid4()),
             user_id=user_id,
             project_template_id=template_id,
             enrollment_id=enrollment_id,
             status=ProjectAttemptStatus.ACTIVE,
-            brief_snapshot={},
+            brief_snapshot={"template_key": template.template_key, "version": template.version, "title": template.title},
             started_at=datetime.utcnow(),
         )
         db.add(attempt)
@@ -69,8 +96,17 @@ class ProjectAttemptService:
             "id": attempt.id,
             "status": attempt.status,
             "started_at": attempt.started_at,
-            "milestones": [],
+            "template_id": attempt.project_template_id,
+            "milestones": [{"id": m.id, "milestone_id": m.project_milestone_id, "status": m.status, "mode": m.mode, "attempts_count": m.attempts_count, "max_assistance_level": m.max_assistance_level} for m in attempt.milestones],
         } if attempt else None
+
+    @staticmethod
+    def own_attempt(db: Session, attempt_id: str, user_id: str):
+        from app.models.academy import ProjectAttempt
+        attempt = db.execute(select(ProjectAttempt).where(ProjectAttempt.id == attempt_id, ProjectAttempt.user_id == user_id)).scalar_one_or_none()
+        if attempt is None:
+            raise LookupError("Project attempt not found")
+        return attempt
 
 
 class MilestoneAttemptService:
@@ -80,8 +116,6 @@ class MilestoneAttemptService:
     def start_milestone(db: Session, project_attempt_id: str, milestone_id: str) -> str:
         """Start a milestone."""
         from app.models.academy import MilestoneAttempt
-        from uuid import uuid4
-
         attempt = MilestoneAttempt(
             id=str(uuid4()),
             project_attempt_id=project_attempt_id,
@@ -93,6 +127,19 @@ class MilestoneAttemptService:
         db.add(attempt)
         db.commit()
         return attempt.id
+
+    @staticmethod
+    def start_variant(db: Session, project_attempt_id: str, milestone_id: str) -> str:
+        """Create a template-authored variant attempt; never grants state."""
+        from app.models.academy import MilestoneAttempt
+        attempt = MilestoneAttempt(id=str(uuid4()), project_attempt_id=project_attempt_id, project_milestone_id=milestone_id, status=MilestoneAttemptStatus.IN_PROGRESS, mode=MilestoneAttemptMode.VARIANT, started_at=datetime.utcnow())
+        db.add(attempt); db.commit()
+        return attempt.id
+
+    @staticmethod
+    def attempts(db: Session, project_attempt_id: str, milestone_id: str):
+        from app.models.academy import MilestoneAttempt
+        return list(db.execute(select(MilestoneAttempt).where(MilestoneAttempt.project_attempt_id == project_attempt_id, MilestoneAttempt.project_milestone_id == milestone_id).order_by(MilestoneAttempt.created_at)).scalars())
 
     @staticmethod
     def record_attempt(db: Session, milestone_attempt_id: str) -> None:
@@ -212,3 +259,18 @@ class EvidenceQualification:
         if assistance_level is None:
             return True
         return assistance_level in (AssistanceLevel.H0, AssistanceLevel.H1, AssistanceLevel.H2)
+
+    @staticmethod
+    def qualify_candidate(db: Session, candidate, *, concept_version_id: str):
+        """Move candidate evidence through the existing append-only evidence service."""
+        from app.db.enums import EvidenceRefType, EvidenceType, GradingMode
+        from app.services.learning_evidence_service import LearningEvidenceService
+        if not candidate.passed or candidate.concept_id is None:
+            return None
+        if not EvidenceQualification.can_qualify_practiced(candidate.assistance_level):
+            return None
+        evidence = LearningEvidenceService(db).record_evidence(user_id=candidate.user_id, concept_id=candidate.concept_id, concept_version_id=concept_version_id, evidence_type=EvidenceType.LAB, grader=GradingMode.DETERMINISTIC, passed=True, ref_type=EvidenceRefType.NONE, ref_id=candidate.id, assistance_level=candidate.assistance_level, execution_verification=candidate.execution_verification, milestone_attempt_id=candidate.milestone_attempt_id, commit=False)
+        candidate.qualified = True
+        candidate.learning_evidence_id = evidence.id
+        db.commit()
+        return evidence

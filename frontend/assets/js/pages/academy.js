@@ -114,3 +114,45 @@ export async function renderAcademyProgress(root, params) {
     root.appendChild(progressCard(detail.progress));
   } catch (err) { error(root, err); }
 }
+
+export async function renderProjectLibrary(root) {
+  loading(root);
+  try {
+    const projects = await api.get("/academy/build-with-me/projects");
+    clear(root);
+    root.appendChild(el("div", { class: "page-header" }, [el("h1", {}, "Build With Me"), el("p", { class: "subtitle" }, "Choose a project and build it with a coach. Your work stays primary.")]));
+    root.appendChild(el("div", { class: "stack" }, projects.map((project) => el("article", { class: "card" }, [
+      el("div", { class: "row between" }, [el("h2", {}, project.title), el("span", { class: "badge badge-neutral" }, project.availability)]),
+      el("p", {}, `${project.ladder_level.toUpperCase()} · ${project.est_minutes_min}–${project.est_minutes_max} minutes`),
+      el("p", { class: "hint" }, (project.concepts || []).map((c) => c.role).join(" · ") || "Concept-guided project"),
+      el("a", { class: "button-link", href: `#/academy/projects/${encodeURIComponent(project.id)}` }, "View project"),
+    ]))));
+  } catch (err) { error(root, err); }
+}
+
+export async function renderProjectOverview(root, params) {
+  loading(root);
+  try {
+    const project = await api.get(`/academy/build-with-me/projects/${encodeURIComponent(params.id)}`);
+    clear(root);
+    root.appendChild(el("div", { class: "page-header" }, [el("h1", {}, project.title), el("p", { class: "subtitle" }, project.brief)]));
+    root.appendChild(el("section", { class: "card" }, [el("h2", {}, "Milestones"), el("ol", {}, (project.milestones || []).map((m) => el("li", {}, [el("strong", {}, m.title), el("p", {}, m.instructions)])))]));
+    root.appendChild(el("p", { class: "hint" }, `Estimated ${project.estimated_minutes?.min || ""}–${project.estimated_minutes?.max || ""} minutes · ${project.availability || "available"}`));
+    const button = el("button", { class: "button", type: "button" }, "Start project");
+    button.addEventListener("click", async () => { const result = await api.post(`/academy/build-with-me/attempts?template_id=${encodeURIComponent(project.id)}`); window.location.hash = `#/academy/projects/attempts/${encodeURIComponent(result.attempt_id)}`; });
+    root.appendChild(button);
+  } catch (err) { error(root, err); }
+}
+
+export async function renderBuildWorkspace(root, params) {
+  loading(root);
+  try {
+    const attempt = await api.get(`/academy/build-with-me/attempts/${encodeURIComponent(params.id)}`);
+    const evidence = await api.get(`/academy/build-with-me/attempts/${encodeURIComponent(params.id)}/evidence`);
+    clear(root);
+    root.appendChild(el("div", { class: "page-header" }, [el("h1", {}, "Build With Me workspace"), el("p", { class: "subtitle" }, "Understand · plan · build · test · debug · explain · reflect") ]));
+    root.appendChild(el("section", { class: "card" }, [el("h2", {}, "Milestone progress"), el("div", { class: "stack" }, (attempt.milestones || []).map((m) => el("p", {}, `${m.status} · ${m.attempts_count} tries · assistance ${m.max_assistance_level || "h0"}`)))]));
+    root.appendChild(el("section", { class: "card" }, [el("h2", {}, "Evidence summary"), el("p", {}, `Project activity: ${(evidence.project_activity || []).length}`), el("p", {}, `Candidate evidence: ${(evidence.candidate_evidence || []).length}`), el("p", {}, `Qualified learning evidence: ${(evidence.qualified_learning_evidence || []).length}`), el("p", {}, `Explain-back responses: ${(evidence.explain_back || []).length}`)]));
+    root.appendChild(el("p", { class: "hint" }, "Mentor assistance is bounded by the deterministic H0–H5 policy. It never grades or changes learner state directly."));
+  } catch (err) { error(root, err); }
+}

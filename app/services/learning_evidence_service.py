@@ -42,6 +42,9 @@ class LearningEvidenceService:
         on_demo_data: bool = False,
         ref_type: EvidenceRefType = EvidenceRefType.NONE,
         ref_id: Optional[str] = None,
+        assistance_level=None,
+        execution_verification=None,
+        milestone_attempt_id: Optional[str] = None,
         commit: bool = True,
     ) -> LearningEvidence:
         """Append one evidence row — the single canonical write path.
@@ -65,6 +68,9 @@ class LearningEvidenceService:
             on_demo_data=on_demo_data,
             ref_type=ref_type,
             ref_id=ref_id,
+            assistance_level=assistance_level,
+            execution_verification=execution_verification,
+            milestone_attempt_id=milestone_attempt_id,
             created_at=_utcnow(),
         )
         self.db.add(evidence)
