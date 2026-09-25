@@ -673,6 +673,115 @@ class ProjectKind(str, enum.Enum):
 # --- AIL.4B review & retention ------------------------------------------------
 
 
+# --- AIL.5B Build With Me + Project Mentor ------------------------------------
+
+
+class ProjectTemplateBuildMode(str, enum.Enum):
+    """How a learner builds the project."""
+
+    NO_CODE = "no_code"
+    WORKFLOW = "workflow"
+    EXPERIMENT = "experiment"
+    LOCAL_CODE = "local_code"
+    SANDBOX = "sandbox"
+
+
+class ProjectAudienceLevel(str, enum.Enum):
+    """Curriculum level / audience."""
+
+    BEGINNER = "beginner"
+    INTERMEDIATE = "intermediate"
+    ADVANCED = "advanced"
+
+
+class ProjectLadderLevel(str, enum.Enum):
+    """Project complexity / guidance level."""
+
+    L0 = "l0"  # Guided exercise
+    L1 = "l1"  # Micro build
+    L2 = "l2"  # Mini project
+    L3 = "l3"  # Guided project
+    L4 = "l4"  # Capstone
+
+
+class ProjectAttemptStatus(str, enum.Enum):
+    """Lifecycle of a learner's project attempt."""
+
+    PROPOSED = "proposed"
+    DECLINED = "declined"
+    ACTIVE = "active"
+    SUBMITTED = "submitted"
+    PASSED = "passed"
+    NEEDS_WORK = "needs_work"
+    ABANDONED = "abandoned"
+
+
+class MilestoneAttemptStatus(str, enum.Enum):
+    """Lifecycle of a milestone within a project attempt."""
+
+    NOT_STARTED = "not_started"
+    IN_PROGRESS = "in_progress"
+    CHECKING = "checking"
+    PASSED = "passed"
+    FAILED = "failed"
+    SKIPPED_STUDY_MODE = "skipped_study_mode"
+
+
+class MilestoneAttemptMode(str, enum.Enum):
+    """How the milestone is being attempted."""
+
+    NORMAL = "normal"
+    CHALLENGE = "challenge"
+    STUDY = "study"
+    VARIANT = "variant"
+
+
+class AssistanceLevel(str, enum.Enum):
+    """H0-H5 help levels; null for non-project evidence."""
+
+    H0 = "h0"  # Independent
+    H1 = "h1"  # Conceptual clue
+    H2 = "h2"  # Targeted pointer
+    H3 = "h3"  # Partial structure
+    H4 = "h4"  # Guided assistance
+    H5 = "h5"  # Solution
+
+
+class ExecutionVerification(str, enum.Enum):
+    """How project evidence was verified."""
+
+    PLATFORM_VERIFIED = "platform_verified"
+    SANDBOX_VERIFIED = "sandbox_verified"
+    SELF_REPORTED = "self_reported"
+    NOT_APPLICABLE = "not_applicable"
+
+
+class LearnerExperienceMode(str, enum.Enum):
+    """UI/UX presentation mode."""
+
+    BEGINNER = "beginner"
+    INTERMEDIATE = "intermediate"
+    ADVANCED = "advanced"
+
+
+class LearnerCodingComfort(str, enum.Enum):
+    """Self-reported coding experience."""
+
+    NONE = "none"
+    SOME = "some"
+    COMFORTABLE = "comfortable"
+
+
+class LearnerBuildPath(str, enum.Enum):
+    """Which track a learner follows."""
+
+    NO_CODE = "no_code"
+    CODE = "code"
+
+
+# --- AIL.4B review & retention ------------------------------------------------
+
+
 class ReviewAttemptStatus(str, enum.Enum):
     """Lifecycle of one review attempt. Deliberately only these three: there
     is no dismissed/snoozed state in AIL.4B, and STARTED is the only

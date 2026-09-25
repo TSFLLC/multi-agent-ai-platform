@@ -38,11 +38,16 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
 from app.db.enums import (
+    AssistanceLevel,
     ConceptLevel,
+    ExecutionVerification,
     EvidenceRefType,
     EvidenceType,
     GradingMode,
+    LearnerBuildPath,
+    LearnerCodingComfort,
     LearnerDepth,
+    LearnerExperienceMode,
     PlanItemOrigin,
     PlanItemState,
     QuestionOrigin,
@@ -65,6 +70,10 @@ class LearnerProfile(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     depth: Mapped[Optional[LearnerDepth]] = mapped_column(sa_enum(LearnerDepth), nullable=True)
     weekly_minutes: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+    experience_mode: Mapped[Optional[LearnerExperienceMode]] = mapped_column(sa_enum(LearnerExperienceMode), nullable=True)
+    coding_comfort: Mapped[Optional[LearnerCodingComfort]] = mapped_column(sa_enum(LearnerCodingComfort), nullable=True)
+    career_goal_term_id: Mapped[Optional[str]] = mapped_column(ForeignKey("taxonomy_terms.id"), nullable=True)
+    build_path: Mapped[Optional[LearnerBuildPath]] = mapped_column(sa_enum(LearnerBuildPath), nullable=True)
 
 
 class LearnerInterest(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
@@ -185,5 +194,8 @@ class LearningEvidence(UUIDPrimaryKeyMixin, Base):
     # create a self-referencing FK in a single CREATE TABLE statement.
     superseded_by_id: Mapped[Optional[str]] = mapped_column(ForeignKey("learning_evidence.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+    assistance_level: Mapped[Optional[AssistanceLevel]] = mapped_column(sa_enum(AssistanceLevel), nullable=True)
+    execution_verification: Mapped[Optional[ExecutionVerification]] = mapped_column(sa_enum(ExecutionVerification), nullable=True)
+    milestone_attempt_id: Mapped[Optional[str]] = mapped_column(ForeignKey("milestone_attempts.id"), nullable=True)
 
     learning_item: Mapped[Optional["LearningItem"]] = relationship()

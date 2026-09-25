@@ -31,12 +31,14 @@ class Artifact(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
 
     __tablename__ = "artifacts"
 
-    agent_run_id: Mapped[str] = mapped_column(ForeignKey("agent_runs.id", ondelete="CASCADE"), nullable=False)
+    agent_run_id: Mapped[Optional[str]] = mapped_column(ForeignKey("agent_runs.id", ondelete="CASCADE"), nullable=True)
     type: Mapped[ArtifactType] = mapped_column(sa_enum(ArtifactType), nullable=False)
     storage_ref: Mapped[str] = mapped_column(String(1000), nullable=False)
     content_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     size_bytes: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     mime_type: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    milestone_attempt_id: Mapped[Optional[str]] = mapped_column(ForeignKey("milestone_attempts.id"), nullable=True)
+    enrollment_id: Mapped[Optional[str]] = mapped_column(ForeignKey("enrollments.id"), nullable=True)
 
 
 class Evaluation(UUIDPrimaryKeyMixin, Base):

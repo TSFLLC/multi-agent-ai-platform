@@ -20,6 +20,7 @@ from app.api.routers import (
     academy,
     agents,
     approvals,
+    build_with_me,
     comparisons,
     evaluation_definitions,
     evaluation_runs,
@@ -176,6 +177,7 @@ register_exception_handlers(app)
 
 for router in (
     academy.router,
+    build_with_me.router,
     projects.router,
     agents.router,
     models.router,
