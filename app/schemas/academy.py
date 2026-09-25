@@ -123,3 +123,43 @@ class AcademyTodayRead(BaseModel):
     day: int
     items: List[AcademyProgramItemRead]
     progress: AcademyProgressRead
+
+
+class AcademyLessonItemRead(BaseModel):
+    id: str
+    item_type: str
+    title: str
+    body_md: Optional[str] = None
+    grading_mode: Optional[str] = None
+    reviewed: bool
+    version: int
+    est_minutes: Optional[int] = None
+
+
+class AcademyLessonReviewRead(BaseModel):
+    eligible: bool = False
+    due: bool = False
+    failed: bool = False
+    demonstrated: bool = False
+    due_reasons: List[str] = []
+
+
+class AcademyLessonRead(BaseModel):
+    concept_id: str
+    slug: str
+    name: str
+    level: str
+    kind: str
+    concept_version_id: str
+    concept_version: int
+    plain_definition: str
+    technical_explanation: Optional[str] = None
+    examples_md: Optional[str] = None
+    learning_items: List[AcademyLessonItemRead] = []
+    learner_state: str
+    review_overlays: List[str] = []
+    review: AcademyLessonReviewRead
+    prerequisite_eligible: bool
+    unmet_prerequisite_count: int = 0
+    evidence_count: int = 0
+    passed_evidence_count: int = 0

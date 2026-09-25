@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { academyEnrollmentHref, academyProgressText, groupAcademyItems, assistanceDescription, studyModeLabel, evidenceSummaryText, assessmentStatusText } from "../assets/js/pages/academy.js";
+import { academyEnrollmentHref, academyConceptHref, academyProgressText, groupAcademyItems, assistanceDescription, studyModeLabel, evidenceSummaryText, assessmentStatusText } from "../assets/js/pages/academy.js";
 
 test("Academy progress reports explicit evidence denominators", () => {
   assert.equal(
@@ -20,6 +20,10 @@ test("Program overview groups curriculum items by module deterministically", () 
 
 test("Academy routes encode enrollment identifiers", () => {
   assert.equal(academyEnrollmentHref("enrollment/1", "progress"), "#/academy/enrollments/enrollment%2F1/progress");
+});
+
+test("Academy concept-backed items navigate to the learner lesson route", () => {
+  assert.equal(academyConceptHref("concept/1"), "#/academy/concepts/concept%2F1");
 });
 
 test("Build With Me displays policy-owned assistance and recovery semantics", () => {

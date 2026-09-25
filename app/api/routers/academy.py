@@ -17,6 +17,9 @@ from app.schemas.academy import (
     AcademyEnrollmentCreate,
     AcademyEnrollmentDetailRead,
     AcademyEnrollmentRead,
+    AcademyLessonItemRead,
+    AcademyLessonRead,
+    AcademyLessonReviewRead,
     AcademyItemCreate,
     AcademyProgramItemRead,
     AcademyProgramRead,
@@ -27,6 +30,7 @@ from app.schemas.academy import (
     AcademyVersionCreate,
 )
 from app.services.academy_service import AcademyProgress, AcademyService
+from app.services.concept_graph_service import ConceptGraphService
 from app.services.learner_state_service import LearnerStateService
 from app.services.practical_ai_foundations_provisioning import provision_practical_ai_foundations
 
@@ -154,6 +158,72 @@ def seed_practical_ai_foundations_concept_graph(
 @router.get("/programs/{program_id}", response_model=AcademyProgramRead)
 def get_program(program_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     return _program_read(AcademyService(db)._program(program_id), db=db)
+
+
+@router.get("/concepts/{concept_id}/lesson", response_model=AcademyLessonRead)
+def get_concept_lesson(concept_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """Read the active authored lesson projection for one Concept.
+
+    This route deliberately has no write path: resolving content and learner
+    state must not create evidence, reviews, or progress transitions.
+    """
+    graph = ConceptGraphService(db)
+    concept = graph.get_concept(concept_id)
+    version = graph.get_current_version(concept_id)
+    if concept is None or version is None:
+        from app.errors import NotFoundError
+
+        raise NotFoundError(f"Concept {concept_id} not found")
+
+    state = LearnerStateService(db).state(user.id, concept.id)
+    prerequisite_ids = graph.get_prerequisites(concept.id)
+    prerequisite_states = LearnerStateService(db).states_for_concepts(user.id, prerequisite_ids)
+    unmet = [
+        prerequisite_id
+        for prerequisite_id in prerequisite_ids
+        if not prerequisite_states[prerequisite_id].is_at_least("understood")
+    ]
+    review = state.review
+    items = sorted(graph.list_learning_items(concept.id), key=lambda item: item.id)
+
+    return AcademyLessonRead(
+        concept_id=concept.id,
+        slug=concept.slug,
+        name=concept.name,
+        level=concept.level.value,
+        kind=concept.kind.value,
+        concept_version_id=version.id,
+        concept_version=version.version,
+        plain_definition=version.plain_definition,
+        technical_explanation=version.technical_explanation,
+        examples_md=version.examples_md,
+        learning_items=[
+            AcademyLessonItemRead(
+                id=item.id,
+                item_type=item.item_type.value,
+                title=item.title,
+                body_md=item.body_md,
+                grading_mode=item.grading_mode.value if item.grading_mode else None,
+                reviewed=item.reviewed,
+                version=item.version,
+                est_minutes=item.est_minutes,
+            )
+            for item in items
+        ],
+        learner_state=state.ladder,
+        review_overlays=sorted(state.overlays),
+        review=AcademyLessonReviewRead(
+            eligible=bool(review and review.eligible),
+            due=bool(review and review.due),
+            failed=bool(review and review.failed),
+            demonstrated=state.ladder == "demonstrated",
+            due_reasons=list(review.due_reasons) if review else [],
+        ),
+        prerequisite_eligible=not unmet,
+        unmet_prerequisite_count=len(unmet),
+        evidence_count=len(state.evidence),
+        passed_evidence_count=sum(1 for evidence in state.evidence if evidence.passed),
+    )
 
 
 @router.post("/programs/{program_id}/versions", response_model=AcademyProgramVersionRead, status_code=201)

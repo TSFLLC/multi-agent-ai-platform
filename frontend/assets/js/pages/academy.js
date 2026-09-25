@@ -24,6 +24,10 @@ export function academyEnrollmentHref(enrollmentId, view = "today") {
   return `#/academy/enrollments/${encodeURIComponent(enrollmentId)}/${view}`;
 }
 
+export function academyConceptHref(conceptId) {
+  return `#/academy/concepts/${encodeURIComponent(conceptId)}`;
+}
+
 function loading(root) {
   clear(root);
   root.appendChild(el("div", { class: "loading-state" }, "Loading Academy…"));
@@ -44,7 +48,10 @@ function progressCard(progress) {
 }
 
 function itemCard(item) {
-  return el("article", { class: "card academy-item" }, [
+  const lessonHref = item.concept_id ? academyConceptHref(item.concept_id) : null;
+  const state = String(item.state || "").toLowerCase();
+  const action = state === "not_started" || !state ? "Start lesson" : state === "demonstrated" ? "Review lesson" : "Continue lesson";
+  const content = [
     el("div", { class: "row between" }, [
       el("div", { class: "eyebrow" }, `Day ${item.day} · ${item.module_key}`),
       item.state ? el("span", { class: "badge badge-neutral" }, stateLabel(item.state)) : null,
@@ -53,7 +60,50 @@ function itemCard(item) {
     item.purpose_text ? el("p", {}, item.purpose_text) : null,
     item.estimated_minutes ? el("p", { class: "hint" }, `${item.estimated_minutes} minutes`) : null,
     item.overlays && item.overlays.length ? el("p", { class: "hint" }, item.overlays.join(" · ")) : null,
-  ]);
+    lessonHref ? el("a", { class: "button-link", href: lessonHref }, action) : null,
+  ];
+  return el("article", { class: "card academy-item" }, content);
+}
+
+function lessonSection(title, content, className = "card") {
+  return el("section", { class: className }, [el("h2", {}, title), content]);
+}
+
+function learnerLessonAction(lesson) {
+  if (lesson.review?.due || lesson.review?.failed) return "Review lesson";
+  if (lesson.learner_state === "not_started") return "Start lesson";
+  if (lesson.learner_state) return "Continue lesson";
+  return "Open lesson";
+}
+
+export async function renderAcademyLesson(root, params) {
+  loading(root);
+  try {
+    const lesson = await api.get(`/academy/concepts/${encodeURIComponent(params.id)}/lesson`);
+    clear(root);
+    root.appendChild(el("div", { class: "page-header" }, [
+      el("div", { class: "eyebrow" }, `${lesson.level} · ${lesson.kind}`),
+      el("h1", {}, lesson.name),
+      el("p", { class: "subtitle" }, `${learnerLessonAction(lesson)} · Concept Version ${lesson.concept_version}`),
+      el("p", { class: "hint" }, `Learning state: ${stateLabel(lesson.learner_state)}${lesson.review_overlays.length ? ` · ${lesson.review_overlays.join(" · ")}` : ""}`),
+      el("a", { class: "button-link", href: "#/academy" }, "Back to Academy"),
+    ]));
+    root.appendChild(lessonSection("Plain definition", el("p", {}, lesson.plain_definition)));
+    lesson.technical_explanation ? root.appendChild(lessonSection("Technical explanation", el("p", {}, lesson.technical_explanation))) : null;
+    lesson.examples_md ? root.appendChild(lessonSection("Examples", el("pre", { class: "academy-lesson-examples" }, lesson.examples_md))) : null;
+    root.appendChild(lessonSection("Learning Items", lesson.learning_items.length
+      ? el("div", { class: "stack" }, lesson.learning_items.map((item) => el("article", { class: "card academy-learning-item" }, [
+        el("div", { class: "row between" }, [el("h3", {}, item.title), el("span", { class: "badge badge-neutral" }, item.item_type.replaceAll("_", " "))]),
+        item.body_md ? el("p", {}, item.body_md) : null,
+        item.est_minutes ? el("p", { class: "hint" }, `${item.est_minutes} minutes`) : null,
+      ])))
+      : el("p", { class: "hint" }, "No additional Learning Items are attached to this concept.")));
+    root.appendChild(lessonSection("Progress", el("div", {}, [
+      el("p", {}, `${lesson.evidence_count} evidence record(s) · ${lesson.passed_evidence_count} passed`),
+      el("p", { class: "hint" }, lesson.prerequisite_eligible ? "Prerequisites are eligible." : `${lesson.unmet_prerequisite_count} prerequisite(s) remain below UNDERSTOOD.`),
+      lesson.review.due_reasons.length ? el("p", { class: "hint" }, lesson.review.due_reasons.join(" · ")) : null,
+    ])));
+  } catch (err) { error(root, err); }
 }
 
 function navLinks(enrollmentId) {
