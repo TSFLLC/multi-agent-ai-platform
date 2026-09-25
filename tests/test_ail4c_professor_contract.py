@@ -94,6 +94,37 @@ def test_all_six_experiences_use_one_fixed_intent_contract():
     ]
 
 
+@pytest.mark.parametrize("intent", list(ProfessorIntent))
+def test_each_professor_intent_uses_the_canonical_response_shape(intent):
+    response = ProfessorResponse.model_validate(
+        {
+            "intent": intent.value,
+            "direct_answer": "A bounded answer.",
+            "explanation": None,
+            "evidence": [],
+            "grounded_assertions": [],
+            "uncertainties": [],
+            "suggested_next_actions": [
+                {"type": "continue", "target_id": None, "reason": "Continue investigating.", "advisory": True}
+            ],
+            "attachment_references": [],
+        }
+    )
+    assert response.intent == intent
+    assert response.suggested_next_actions[0].type.value == "continue"
+
+
+def test_professor_response_rejects_alternate_top_level_contract_fields():
+    with pytest.raises(ValueError):
+        ProfessorResponse.model_validate(
+            {
+                "intent": ProfessorIntent.EXPLAIN_THIS.value,
+                "direct_answer": "A bounded answer.",
+                "status": "complete",
+            }
+        )
+
+
 def test_response_requires_context_membership_and_preserves_provenance():
     context = _context(records=[_record("claim", "claim-1")])
     valid = ProfessorResponse(

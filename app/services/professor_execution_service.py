@@ -338,7 +338,15 @@ class ProfessorExecutionService:
 
     @staticmethod
     def _professor_prompt() -> str:
-        return """You are AI Professor. Use only the supplied AIL context. Return only the bounded JSON Professor response contract. Never invent evidence or IDs. Preserve conflict groups and the learner's conclusion. AI explanations are not canonical evidence. All actions are advisory. Never claim mastery or change learning, review, experiment, Radar, or plan state. Do not reveal hidden reasoning."""
+        schema = json.dumps(ProfessorResponse.model_json_schema(), sort_keys=True, separators=(",", ":"))
+        return f"""You are AI Professor. Use only the supplied AIL context.
+
+Return exactly one JSON object matching the canonical ProfessorResponse JSON Schema below. Return ONLY that object: no Markdown fences, prose, alternate intent-specific schema, status field, topic field, question field, evidence_used field, learner_conclusion field, state_changes field, or other extra field. Every required field must be present. `suggested_next_actions` must contain objects with exactly the schema-defined fields, never strings. Use null for nullable fields and empty arrays when there are no items.
+
+Never invent evidence or IDs. Preserve conflict groups and the learner's conclusion through the canonical evidence, grounded_assertions, uncertainties, and attachment_references fields. AI explanations are not canonical evidence. All actions are advisory. Never claim mastery or change learning, review, experiment, Radar, or plan state. Do not reveal hidden reasoning.
+
+CANONICAL_PROFESSOR_RESPONSE_JSON_SCHEMA:
+{schema}"""
 
     @staticmethod
     def _professor_model_policy(agent_version: AgentVersion) -> dict:
@@ -397,8 +405,12 @@ class ProfessorExecutionService:
             try:
                 response = self._validate_artifact(artifact, task.requirements or {})
             except (ValueError, ProfessorResponseValidationError) as exc:
-                error_kind, error_message = "validation_error", str(exc)
-                self._mark_invalid(agent_run, task_run, str(exc))
+                error_kind = "validation_error"
+                error_message = (
+                    "The Professor returned a response that could not be safely validated. "
+                    "Please try again."
+                )
+                self._mark_invalid(agent_run, task_run, self._validation_diagnostic(exc))
         elif task_run.status == TaskRunStatus.FAILED:
             attempt = agent_run.attempts[-1] if agent_run is not None and agent_run.attempts else None
             error_kind = error_kind or ((attempt.error or {}).get("category") if attempt else "execution_error")
@@ -459,7 +471,20 @@ class ProfessorExecutionService:
             select(Artifact).where(Artifact.agent_run_id == agent_run.id).order_by(Artifact.created_at.desc())
         ).scalars().first()
 
-    def _mark_invalid(self, agent_run: Optional[AgentRun], task_run: TaskRun, message: str) -> None:
+    @staticmethod
+    def _validation_diagnostic(exc: Exception) -> dict:
+        errors = getattr(exc, "errors", None)
+        try:
+            count = len(errors()) if callable(errors) else 1
+        except Exception:  # noqa: BLE001 - diagnostics must never affect learner response handling
+            count = 1
+        return {
+            "category": "validation_error",
+            "error_type": type(exc).__name__,
+            "error_count": count,
+        }
+
+    def _mark_invalid(self, agent_run: Optional[AgentRun], task_run: TaskRun, diagnostic: dict) -> None:
         if agent_run is not None and agent_run.status == AgentRunStatus.COMPLETED:
             agent_run.status = AgentRunStatus.FAILED
         if task_run.status == TaskRunStatus.COMPLETED:
@@ -471,7 +496,7 @@ class ProfessorExecutionService:
             agent_run_id=agent_run.id if agent_run else None,
             event_type="professor.response_rejected",
             decision_summary="Structured Professor output failed deterministic validation.",
-            error={"category": "validation_error", "message": message},
+            error=diagnostic,
         )
 
     def _authorized_budget(self, user: User, project: Project, budget_id: Optional[str]) -> Optional[str]:

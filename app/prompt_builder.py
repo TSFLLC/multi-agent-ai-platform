@@ -65,6 +65,7 @@ def build_prompt(
     task: Task,
     task_snapshot: Optional[Mapping[str, Any]] = None,
     extra_context: Optional[str] = None,
+    system_prompt_override: Optional[str] = None,
 ) -> PromptAssembly:
     """``extra_context`` (MA4) is an opaque, already-rendered text block
     appended after the Task-derived user prompt — e.g. a candidate
@@ -73,7 +74,7 @@ def build_prompt(
     (see ``app.review_contract``). Defaults to ``None`` so a plain
     SINGLE_AGENT run's prompt/``content_hash`` is byte-for-byte identical
     to MA3's, unchanged."""
-    system_prompt = prompt_version.content if prompt_version else None
+    system_prompt = system_prompt_override if system_prompt_override is not None else (prompt_version.content if prompt_version else None)
 
     task_data = task_snapshot or {"title": task.title, "description": task.description, "requirements": task.requirements}
     user_parts = [task_data.get("title") or task.title]

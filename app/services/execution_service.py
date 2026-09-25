@@ -576,12 +576,23 @@ class AgentExecutionService:
             self._finalize_failed(ctx, category="workflow_context_error", message=str(exc), attempt=attempt)
             raise ExecutionAborted(str(exc)) from exc
 
+        system_prompt_override = None
+        if ctx.agent_version.role == "professor":
+            # Professor's response contract is generated from its canonical
+            # Pydantic schema.  This runtime override also updates existing
+            # published Professor versions without mutating immutable prompt
+            # or agent-version records.
+            from app.services.professor_execution_service import ProfessorExecutionService
+
+            system_prompt_override = ProfessorExecutionService._professor_prompt()
+
         assembly = build_prompt(
             agent_version=ctx.agent_version,
             prompt_version=ctx.prompt_version,
             task=ctx.task,
             task_snapshot=ctx.frozen_task_snapshot,
             extra_context=extra_context,
+            system_prompt_override=system_prompt_override,
         )
         self._event(
             ctx,

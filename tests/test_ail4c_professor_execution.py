@@ -9,7 +9,7 @@ from app.config import settings
 from app.errors import NotFoundError
 from app.models.observability import ExecutionEvent
 from app.providers.base import InvokeResponse, ProviderConnectionError
-from app.schemas.professor import ProfessorContextRequest, ProfessorIntent
+from app.schemas.professor import ProfessorContextRequest, ProfessorIntent, ProfessorResponse
 from app.services.professor_execution_service import ProfessorExecutionService
 from tests.conftest import make_model, make_provider, make_provider_model
 
@@ -69,6 +69,20 @@ def test_professor_staging_pin_uses_registry_provider_model_id_only(monkeypatch)
     )
 
     assert policy == {"mode": "manual", "manual_provider_model_id": "registry-provider-model-id"}
+
+
+def test_professor_prompt_embeds_canonical_response_schema():
+    prompt = ProfessorExecutionService._professor_prompt()
+    schema = json.dumps(
+        ProfessorResponse.model_json_schema(),
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+    assert schema in prompt
+    assert "Return ONLY that object" in prompt
+    assert "suggested_next_actions` must contain objects" in prompt
+    assert "learner_conclusion field" in prompt
 
 
 def test_professor_pin_is_inactive_without_staging_configuration(monkeypatch):
@@ -170,6 +184,36 @@ def test_professor_rate_limit_is_sanitized_but_classified(db, bootstrap):
     assert metadata["provider_http_status"] == 429
     assert metadata["response_format_json_object_sent"] is True
     assert "safe question" not in task_event.decision_summary
+
+
+def test_professor_validation_errors_are_sanitized_but_structurally_diagnosed(db, bootstrap):
+    model = make_model(db, canonical_model_id="fixed/professor", structured_output_support=True)
+    provider = make_provider(db)
+    make_provider_model(db, model=model, provider=provider, cost_input_per_mtok=Decimal(0), cost_output_per_mtok=Decimal(0))
+    db.commit()
+
+    result = ProfessorExecutionService(
+        db, adapter_factory=lambda _db, _provider: FakeProfessorAdapter('{"status":"complete"}')
+    ).create_and_execute(
+        bootstrap.user,
+        ProfessorContextRequest(intent=ProfessorIntent.ASK_PROFESSOR, question="safe question"),
+    )
+
+    assert result.status == "validation_error"
+    assert result.error_message == (
+        "The Professor returned a response that could not be safely validated. Please try again."
+    )
+    assert "pydantic.dev" not in result.error_message
+    assert "direct_answer" not in result.error_message
+    event = (
+        db.query(ExecutionEvent)
+        .filter_by(task_run_id=result.task_run_id, event_type="professor.response_rejected")
+        .one()
+    )
+    assert event.error["category"] == "validation_error"
+    assert event.error["error_type"] in {"ValidationError", "ProfessorResponseValidationError"}
+    assert "direct_answer" not in json.dumps(event.error)
+    assert "status" not in json.dumps(event.error)
 
 
 def test_professor_continuation_uses_only_explicit_previous_interaction(db, bootstrap):
