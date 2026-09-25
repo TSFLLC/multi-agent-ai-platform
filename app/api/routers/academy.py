@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_db
 from app.auth import get_current_user
 from app.authz import require_platform_admin
-from app.db.enums import AcademyEnrollmentStatus, ConceptRelationType
+from app.db.enums import AcademyEnrollmentStatus, ConceptRelationType, VersionStatus
 from app.models.academy import AcademyEnrollment, AcademyProgram, AcademyProgramItem, AcademyProgramVersion
 from app.models.identity import User
 from app.models.concepts import Concept, ConceptRelation, LearningItem
@@ -170,7 +170,7 @@ def get_concept_lesson(concept_id: str, db: Session = Depends(get_db), user: Use
     graph = ConceptGraphService(db)
     concept = graph.get_concept(concept_id)
     version = graph.get_current_version(concept_id)
-    if concept is None or version is None:
+    if concept is None or version is None or version.status != VersionStatus.ACTIVE:
         from app.errors import NotFoundError
 
         raise NotFoundError(f"Concept {concept_id} not found")

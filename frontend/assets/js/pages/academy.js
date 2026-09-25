@@ -87,6 +87,7 @@ export async function renderAcademyLesson(root, params) {
       el("p", { class: "subtitle" }, `${learnerLessonAction(lesson)} · Concept Version ${lesson.concept_version}`),
       el("p", { class: "hint" }, `Learning state: ${stateLabel(lesson.learner_state)}${lesson.review_overlays.length ? ` · ${lesson.review_overlays.join(" · ")}` : ""}`),
       el("a", { class: "button-link", href: "#/academy" }, "Back to Academy"),
+      el("a", { class: "button-link", href: `#/professor?intent=EXPLAIN_THIS&target_type=concept&target_id=${encodeURIComponent(lesson.concept_id)}` }, "Ask Professor about this concept"),
     ]));
     root.appendChild(lessonSection("Plain definition", el("p", {}, lesson.plain_definition)));
     lesson.technical_explanation ? root.appendChild(lessonSection("Technical explanation", el("p", {}, lesson.technical_explanation))) : null;
