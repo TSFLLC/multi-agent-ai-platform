@@ -141,6 +141,18 @@ test("Instructions show what is assessed, allowed resources, the Mentor lock, ti
   assert.ok(calls[0].path.includes("project_attempt_id=pa-1"));
 });
 
+test("Ready for assessment shows the submitted 5B project, its counts and that nothing is graded yet", async () => {
+  reset({ "GET /academy/assessments/definitions/kc-x/readiness": READY({ submission: {
+    template_title: "Structured Extractor", template_version: 1, status: "ready", milestones: 4, candidate_evidence: 3, learning_evidence: 2, explain_back_formative: 2, grader_invoked: false } }) });
+  const r = root();
+  await renderAssessmentDefinition(r, { key: "kc-x" });
+  const card = byClass(r, "submission-card")[0];
+  assert.match(card.textContent, /Your submitted project/);
+  assert.match(card.textContent, /Structured Extractor \(template v1\) · 4 milestone\(s\) · 3 candidate evidence · 2 qualified learning evidence/);
+  assert.match(card.textContent, /2 earlier explain-back response\(s\).*never graded/);
+  assert.match(card.textContent, /Nothing has been graded yet/);
+});
+
 test("Begin is disabled until ready, and starting navigates to the workspace with an idempotency key", async () => {
   reset({ "GET /academy/assessments/definitions/kc-x/readiness": READY({ ready: false, checks: [{ key: "cooldown", label: "You have waited long enough", met: false, detail: "Try again later." }] }) });
   let r = root();

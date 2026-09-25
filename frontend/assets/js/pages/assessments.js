@@ -96,6 +96,14 @@ export async function renderAssessmentDefinition(root, params) {
       sourceWorkText(model.sourceWork) ? el("p", {}, sourceWorkText(model.sourceWork)) : null,
       model.fresh.required ? el("p", { class: "callout" }, model.fresh.why) : null,
     ]));
+    if (readiness.submission) {
+      const sub = readiness.submission;
+      root.appendChild(el("section", { class: "card submission-card" }, [
+        el("h2", {}, "Your submitted project"),
+        el("p", {}, `${sub.template_title || "Your project"} (template v${sub.template_version || "?"}) · ${sub.milestones} milestone(s) · ${sub.candidate_evidence} candidate evidence · ${sub.learning_evidence} qualified learning evidence`),
+        el("p", { class: "hint" }, `${sub.explain_back_formative} earlier explain-back response(s) are shown as your own formative words and are never graded. Nothing has been graded yet.`),
+      ]));
+    }
     if (!def) return;
     root.appendChild(el("section", { class: "card" }, [
       el("h2", {}, "What will be assessed"),

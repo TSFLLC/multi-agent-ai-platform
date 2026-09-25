@@ -633,3 +633,20 @@ def test_no_ma9_runtime_or_sandbox_is_imported_by_assessment_code():
             )
             offenders += [f"{path.name}:{m}" for m in mods if any(b in m.lower() for b in banned)]
     assert not offenders, offenders
+
+
+def test_readiness_summarises_the_5b_submission_without_exposing_content(db, bootstrap):
+    user, _concept, _template_row, pa, defn = _project(db, bootstrap, levels=(H.H1,))
+    report = AssessmentService(db).readiness(user, defn.definition_key, project_attempt_id=pa.id)
+    summary = report["submission"]
+    assert (
+        summary["template_title"] == "API Journey"
+        and summary["status"] == "ready"
+        and summary["grader_invoked"] is False
+    )
+    assert summary["milestones"] == 1 and {
+        "candidate_evidence",
+        "learning_evidence",
+        "explain_back_formative",
+    } <= set(summary)
+    assert all(not isinstance(v, (list, dict)) for v in summary.values()), "counts only, never content"

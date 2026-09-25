@@ -368,3 +368,31 @@ def test_choice_match_only_scores_questions_that_carry_an_answer_key(db, bootstr
     assert outcome.finding.value == "met" and outcome.facts["total"] == len(
         attempt.challenge_instance["items"]
     )
+
+
+def test_learner_requested_reviews_are_recorded_under_the_situation_that_makes_them_exceptional(
+    db, bootstrap
+):
+    from app.db.enums import AssessmentReviewTrigger
+    from tests.ail5c_factories import default_findings
+
+    setup_free_models(db, count=2)
+    learner = second_user(db, bootstrap.organization)
+    concept, _v = make_ail_concept(db, requirements=REQ_KC_EB)
+    defn = explain_definition(db, bootstrap.user, concept)
+    unsure = ScriptedGrader(lambda n, keys, quote: default_findings(keys, quote, confidence="low"))
+    svc = AssessmentService(db, adapter_factory=lambda _d, _p: unsure)
+    attempt = svc.start(learner, defn.definition_key)
+    svc.save_draft(learner.id, attempt.id, {"fields": {"explanation": WORDS}})
+    svc.submit(learner, attempt.id, {"declaration": "no_external_help"})
+    review = AssessmentReviewService(db).request(
+        learner, attempt.id, reason="Please look at this again.", consent=True
+    )
+    assert review.trigger == AssessmentReviewTrigger.LOW_CONFIDENCE
+
+    # an ordinary failed check stays a plain learner dispute
+    plain_user = second_user(db, bootstrap.organization, "plain@example.com")
+    _user, _c, _svc, failed = _passed_kc(db, bootstrap, key="kc-plain", user=plain_user)
+    plain_reason = "I think the question was ambiguous."
+    plain = AssessmentReviewService(db).request(_user, failed.id, reason=plain_reason, consent=True)
+    assert plain.trigger == AssessmentReviewTrigger.LEARNER_DISPUTE

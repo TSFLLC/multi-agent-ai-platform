@@ -307,6 +307,26 @@ class AssessmentService:
             "fresh_reason": reason,
             "source_work": {"levels": source["levels"], "study_mode_used": source["study_mode_used"]},
             "project_attempt_id": pa.id if pa else None,
+            "submission": self._submission_summary(pa, submission),
+        }
+
+    def _submission_summary(self, pa, submission) -> Optional[Dict[str, Any]]:
+        """What the learner handed over from Build With Me: counts and provenance only
+        (never their content). 5B explain-back responses are formative and never graded."""
+        if pa is None or submission is None:
+            return None
+        template = self.db.get(ProjectTemplate, pa.project_template_id)
+        snapshot = submission.snapshot or {}
+        return {
+            "template_title": template.title if template else None,
+            "template_version": template.version if template else None,
+            "status": submission.status,
+            "submitted_at": submission.created_at,
+            "milestones": len(snapshot.get("milestone_attempt_ids") or []),
+            "candidate_evidence": len(snapshot.get("candidate_evidence_ids") or []),
+            "learning_evidence": len(snapshot.get("learning_evidence_ids") or []),
+            "explain_back_formative": len(snapshot.get("explain_back_ids") or []),
+            "grader_invoked": False,
         }
 
     def _cooldown_ends(self, user_id: str, definition_key: str, hours: int) -> Optional[datetime]:

@@ -31,6 +31,7 @@ from app.assessment_contract import review_fingerprint
 from app.assessment_outcome import _effect
 from app.db.enums import (
     AssessmentAttemptStatus,
+    AssessmentKind,
     AssessmentOrigin,
     AssessmentOutcome,
     AssessmentResultKind,
@@ -155,6 +156,14 @@ class AssessmentReviewService:
             raise ConflictError(
                 "A review of this attempt is already open.", detail={"review_id": existing.id}
             )
+        # A learner-requested review is recorded under the situation that makes it
+        # exceptional: an undecided (low-confidence) result, or a capstone.
+        if trigger == AssessmentReviewTrigger.LEARNER_DISPUTE:
+            definition = self.db.get(AssessmentDefinition, attempt.definition_id)
+            if result.outcome == AssessmentOutcome.PROVISIONAL:
+                trigger = AssessmentReviewTrigger.LOW_CONFIDENCE
+            elif definition is not None and definition.assessment_kind == AssessmentKind.CAPSTONE:
+                trigger = AssessmentReviewTrigger.CAPSTONE_EXCEPTION
         review = AssessmentReview(
             attempt_id=attempt.id,
             result_id=result.id,
