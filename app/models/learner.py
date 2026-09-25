@@ -161,6 +161,17 @@ class LearningEvidence(UUIDPrimaryKeyMixin, Base):
             sqlite_where=text("ref_type = 'experiment'"),
             postgresql_where=text("ref_type = 'experiment'"),
         ),
+        # AIL.5C: assessment-derived evidence is idempotent per
+        # (learner, assessment result, concept); replays create nothing new.
+        Index(
+            "uq_learning_evidence_assessment_ref",
+            "user_id",
+            "ref_id",
+            "concept_id",
+            unique=True,
+            sqlite_where=text("ref_type = 'assessment_result'"),
+            postgresql_where=text("ref_type = 'assessment_result'"),
+        ),
     )
 
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)

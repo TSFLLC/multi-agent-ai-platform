@@ -28,6 +28,7 @@ from sqlalchemy.orm import Session
 from app.db.enums import ConceptRelationType, ContentOrigin, VersionStatus
 from app.errors import ConflictError, NotFoundError
 from app.models.concepts import Concept, ConceptRelation, ConceptTerm, ConceptVersion, LearningItem
+from app.services.independence_policy import validate_evidence_requirements
 
 
 def _utcnow() -> datetime:
@@ -117,6 +118,13 @@ class ConceptGraphService:
             raise NotFoundError(f"ConceptVersion {version_id} not found")
         if version.status != VersionStatus.DRAFT:
             raise ConflictError(f"ConceptVersion {version_id} is {version.status.value}, not draft")
+        # AIL.5C: a published version's requirement set is immutable and is what
+        # DEMONSTRATED is later judged against, so it must be well-formed and
+        # must never rest on AI judgment alone.
+        try:
+            validate_evidence_requirements(version.evidence_requirements)
+        except ValueError as exc:
+            raise ConflictError(str(exc))
 
         # Immutability discipline: only status/published_at ever change on
         # a version row, here or anywhere else in this service.

@@ -46,12 +46,17 @@ class DecisionRequest(BaseModel):
 
 
 class EvidenceRequest(BaseModel):
+    """``passed`` is only a *claim*, honoured solely for a self-reported item.
+    When ``source_type``/``source_id`` cite a platform record the server derives
+    pass/fail and the verification level itself. ``execution_verification`` is
+    accepted for backward compatibility and always ignored (AIL.5C P0-2)."""
+
     concept_id: Optional[str] = None
     passed: bool
     source_type: str = Field(min_length=1, max_length=50)
     source_id: Optional[str] = None
     assistance_level: Optional[AssistanceLevel] = None
-    execution_verification: ExecutionVerification = ExecutionVerification.NOT_APPLICABLE
+    execution_verification: Optional[ExecutionVerification] = None
 
 
 class CountLearningRequest(BaseModel):
@@ -214,6 +219,17 @@ def start_milestone(attempt_id: str, milestone_id: str, db: Session = Depends(ge
     return {"milestone_attempt_id": row.id, "status": row.status, "mode": row.mode}
 
 
+def _assert_not_in_assessment_mode(db, user, attempt_id: str) -> None:
+    """AIL.5C: hints and worked examples are Mentor assistance — locked while a
+    live assessment attempt covers this project (or its Concepts)."""
+    from app.models.academy import ProjectTemplateConceptLink
+    from app.services.assessment_mode_guard import AssessmentModeGuard
+
+    attempt = ProjectAttemptService.own_attempt(db, attempt_id, user.id)
+    concept_ids = [r[0] for r in db.query(ProjectTemplateConceptLink.concept_id).filter_by(project_template_id=attempt.project_template_id).all()]
+    AssessmentModeGuard(db).assert_mentor_available(user.id, project_attempt_id=attempt.id, concept_ids=concept_ids)
+
+
 @router.post("/attempts/{attempt_id}/milestones/{milestone_id}/hint")
 def request_hint(attempt_id: str, milestone_id: str, hint_level: Optional[str] = None, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     """Request help at the next available hint level (deterministic policy)."""
@@ -221,6 +237,7 @@ def request_hint(attempt_id: str, milestone_id: str, hint_level: Optional[str] =
     from app.services.build_with_me_service import HintPolicyEngine
 
     ProjectAttemptService.own_attempt(db, attempt_id, user.id)
+    _assert_not_in_assessment_mode(db, user, attempt_id)
     milestone_attempt = (
         db.query(MilestoneAttempt)
         .filter(MilestoneAttempt.project_attempt_id == attempt_id, MilestoneAttempt.project_milestone_id == milestone_id)
@@ -273,7 +290,12 @@ def record_evidence(attempt_id: str, milestone_id: str, body: EvidenceRequest, d
     ProjectAttemptService.own_attempt(db, attempt_id, user.id)
     milestone_attempt = db.query(MilestoneAttempt).filter_by(project_attempt_id=attempt_id, project_milestone_id=milestone_id).order_by(MilestoneAttempt.created_at.desc()).first()
     if milestone_attempt is None: raise HTTPException(status_code=404, detail="Milestone attempt not found")
-    row = CandidateEvidence(id=__import__("uuid").uuid4().hex, user_id=user.id, project_attempt_id=attempt_id, milestone_attempt_id=milestone_attempt.id, concept_id=body.concept_id, source_type=body.source_type, source_id=body.source_id, evidence_type="lab", passed=body.passed, assistance_level=body.assistance_level or milestone_attempt.max_assistance_level, execution_verification=body.execution_verification)
+    from app.services.project_evidence_verification import derive_candidate_facts
+    try:
+        facts = derive_candidate_facts(db, user.id, body.source_type, body.source_id, claimed_passed=body.passed)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Evidence source not found")
+    row = CandidateEvidence(id=__import__("uuid").uuid4().hex, user_id=user.id, project_attempt_id=attempt_id, milestone_attempt_id=milestone_attempt.id, concept_id=body.concept_id, source_type=body.source_type, source_id=body.source_id, evidence_type="lab", passed=facts.passed, assistance_level=body.assistance_level or milestone_attempt.max_assistance_level, execution_verification=facts.execution_verification)
     db.add(row); db.flush()
     learning = None
     if row.concept_id:
@@ -284,7 +306,7 @@ def record_evidence(attempt_id: str, milestone_id: str, body: EvidenceRequest, d
     if learning:
         from app.services.learner_state_service import LearnerStateService
         learner_state = LearnerStateService(db).state(user.id, learning.concept_id)
-    return {"candidate_evidence_id": row.id, "qualified": row.qualified, "learning_evidence_id": learning.id if learning else None, "learner_state_recomputed": learner_state is not None, "learner_state": {"ladder": learner_state.ladder, "overlays": sorted(learner_state.overlays)} if learner_state else None}
+    return {"candidate_evidence_id": row.id, "passed": row.passed, "execution_verification": row.execution_verification, "verification_basis": facts.basis, "qualified": row.qualified, "learning_evidence_id": learning.id if learning else None, "learner_state_recomputed": learner_state is not None, "learner_state": {"ladder": learner_state.ladder, "overlays": sorted(learner_state.overlays)} if learner_state else None}
 
 
 @router.get("/attempts/{attempt_id}/evidence")
@@ -306,6 +328,7 @@ def get_attempt_evidence(attempt_id: str, db: Session = Depends(get_db), user: U
 @router.post("/attempts/{attempt_id}/milestones/{milestone_id}/study-mode")
 def start_study_mode(attempt_id: str, milestone_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     ProjectAttemptService.own_attempt(db, attempt_id, user.id)
+    _assert_not_in_assessment_mode(db, user, attempt_id)
     from app.models.academy import ProjectMilestone
     milestone = db.get(ProjectMilestone, milestone_id)
     if milestone is None or not milestone.reference_solution_ref:
@@ -405,6 +428,9 @@ def submit_for_assessment(attempt_id: str, db: Session = Depends(get_db), user: 
     explain = db.query(ExplainBackResponse).filter_by(project_attempt_id=attempt_id, user_id=user.id).all()
     snapshot = {"program_version_id": attempt.enrollment.program_version_id if attempt.enrollment else None, "project_template_id": template.id, "project_template_version": template.version, "project_attempt_id": attempt.id, "milestone_attempt_ids": [m.id for m in milestone_attempts], "candidate_evidence_ids": [e.id for e in evidence], "learning_evidence_ids": [e.learning_evidence_id for e in evidence if e.learning_evidence_id], "explain_back_ids": [e.id for e in explain], "grader_invoked": False}
     row = db.query(AssessmentReadySubmission).filter_by(project_attempt_id=attempt_id).first()
+    if row is not None and row.finalized_at is not None:
+        # AIL.5C: once an assessment has finalized this submission it is history.
+        raise HTTPException(status_code=409, detail="This submission has been finalized by an assessment and cannot be changed")
     if row is None: row = AssessmentReadySubmission(id=__import__("uuid").uuid4().hex, user_id=user.id, project_attempt_id=attempt_id, snapshot=snapshot); db.add(row)
     else: row.snapshot = snapshot
     attempt.status = "submitted"; attempt.submitted_at = datetime.utcnow(); db.commit()

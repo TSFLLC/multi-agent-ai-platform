@@ -406,7 +406,8 @@ def test_a_material_change_two_hops_back_is_still_found(db, bootstrap):
     _publish(db, concept, at=ago(3), severity=ChangeSeverity.MINOR)
     review = _review(db, bootstrap.user, concept)
     assert review.due and [c["version"] for c in review.material_changes] == [2]
-    assert CHANGED not in _state(db, bootstrap.user, concept).overlays  # the single-hop overlay misses it; review does not
+    # AIL.5C P0-1: the overlay now walks the whole version history, so it agrees with the review.
+    assert CHANGED in _state(db, bootstrap.user, concept).overlays
 
 
 def test_a_change_only_matters_for_an_eligible_concept(db, bootstrap):

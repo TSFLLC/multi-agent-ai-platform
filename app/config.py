@@ -181,6 +181,16 @@ class Settings(BaseSettings):
     # unset preserves the normal Professor AUTO/MA8 policy.
     professor_staging_provider_model_id: Optional[str] = None
 
+    # AIL.5C Academy Grader bounds. The packet is a small, allowlisted slice of
+    # ONE attempt, so these are far tighter than the Professor's.
+    grader_max_packet_chars: int = 40_000
+    grader_max_output_tokens: int = 1_600
+    # Optional manual pins (Model Registry ``provider_models.id``). Unset keeps
+    # the Grader Agent Version's own policy; the cross-check pin is only used
+    # when set, otherwise a DIFFERENT eligible model is chosen from the router.
+    grader_provider_model_id: Optional[str] = None
+    grader_crosscheck_provider_model_id: Optional[str] = None
+
     @field_validator("log_level")
     @classmethod
     def _validate_log_level(cls, v: str) -> str:

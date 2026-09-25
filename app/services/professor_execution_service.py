@@ -31,6 +31,7 @@ from app.schemas.professor import (
     ProfessorTargetOptionsRead,
     ProfessorTargetType,
 )
+from app.services.assessment_mode_guard import AssessmentModeGuard
 from app.services.flight_recorder import FlightRecorderService
 from app.services.professor_context_service import ProfessorContextAssembler
 from app.services.professor_contract import ProfessorResponseValidationError, validate_professor_response
@@ -135,7 +136,34 @@ class ProfessorExecutionService:
             )
         return ProfessorTargetOptionsRead(intent=intent, options=options[:40])
 
-    def create_and_execute(self, user: User, request: ProfessorContextRequest) -> ProfessorInteractionRead:
+    def _assert_not_in_assessment_mode(self, user: User, request: ProfessorContextRequest) -> None:
+        """AIL.5C: the Professor is paused for a Concept the learner is being
+        assessed on, and for untargeted questions (which cannot be matched to a
+        Concept and would otherwise sidestep the lock). It may coach AFTER."""
+        concept_ids = []
+        target = request.target
+        if target is not None:
+            if target.type == ProfessorTargetType.CONCEPT:
+                concept_ids.append(target.id)
+            elif target.type == ProfessorTargetType.EXPERIMENT:
+                experiment = self.db.get(Experiment, target.id)
+                if experiment is not None and experiment.user_id == user.id and experiment.concept_id:
+                    concept_ids.append(experiment.concept_id)
+            elif target.type == ProfessorTargetType.REVIEW_ATTEMPT:
+                attempt = self.db.get(ReviewAttempt, target.id)
+                if attempt is not None and attempt.user_id == user.id:
+                    concept_ids.append(attempt.concept_id)
+        AssessmentModeGuard(self.db).assert_professor_available(
+            user.id, concept_ids=concept_ids, untargeted=target is None
+        )
+
+    def create_and_execute(
+        self, user: User, request: ProfessorContextRequest, *, mentor_lock_checked: bool = False
+    ) -> ProfessorInteractionRead:
+        # ``mentor_lock_checked`` is set only by ProjectMentorService, which has
+        # already applied the project-scoped Assessment Mode lock.
+        if not mentor_lock_checked:
+            self._assert_not_in_assessment_mode(user, request)
         project = ensure_ail_system_project(self.db, user)
         context = ProfessorContextAssembler(self.db).assemble(user.id, request)
         context, truncated = self._bound_context(context)
@@ -195,6 +223,7 @@ class ProfessorExecutionService:
         self, user: User, interaction_id: str, request: ProfessorContextRequest
     ) -> ProfessorInteractionRead:
         prior = self._get_owned_task_run(user, interaction_id)
+        self._assert_not_in_assessment_mode(user, request)
         task = self.db.get(Task, prior.task_id)
         requirements = task.requirements if task is not None else {}
         if requirements.get("professor_user_id") != user.id:

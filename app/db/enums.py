@@ -342,6 +342,9 @@ class AgentRunRole(str, enum.Enum):
     REPAIR = "repair"
     EVALUATOR = "evaluator"
     PROFESSOR = "professor"
+    # AIL.5C: the Academy Grader. A grading run is never a Professor or an
+    # Evaluator run — role-level provenance says which agent judged.
+    GRADER = "grader"
 
 
 class ReviewDecision(str, enum.Enum):
@@ -537,6 +540,13 @@ class EvidenceType(str, enum.Enum):
     LAB = "lab"
     INTERPRETATION = "interpretation"
     SELF_REPORT = "self_report"
+    # AIL.5C assessment-derived evidence. Only AssessmentEvidenceWriter
+    # appends these, from a FINAL passing assessment result.
+    EXPLAIN_BACK = "explain_back"
+    MODIFICATION = "modification"
+    REPRODUCTION = "reproduction"
+    DEBUGGING = "debugging"
+    PROJECT_ASSESSMENT = "project_assessment"
 
 
 class QuestionOrigin(str, enum.Enum):
@@ -559,6 +569,8 @@ class EvidenceRefType(str, enum.Enum):
     WORKFLOW_RUN = "workflow_run"
     EXPERIMENT = "experiment"
     HUMAN = "human"
+    # AIL.5C: the assessment result that produced this evidence row.
+    ASSESSMENT_RESULT = "assessment_result"
     NONE = "none"
 
 
@@ -790,3 +802,101 @@ class ReviewAttemptStatus(str, enum.Enum):
     STARTED = "started"
     PASSED = "passed"
     FAILED = "failed"
+
+
+# --- AIL.5C Assessment + Demonstration ----------------------------------------
+
+
+class AssessmentKind(str, enum.Enum):
+    """What an Assessment Definition verifies. No Concept needs every kind."""
+
+    KNOWLEDGE_CHECK = "knowledge_check"
+    EXPLAIN_BACK = "explain_back"
+    MODIFICATION = "modification"
+    REPRODUCTION = "reproduction"
+    DEBUGGING = "debugging"
+    EXPERIMENT_INTERPRETATION = "experiment_interpretation"
+    PROJECT = "project"
+    CAPSTONE = "capstone"
+
+
+class AssessmentDefinitionStatus(str, enum.Enum):
+    """Row-per-version; a PUBLISHED definition is immutable."""
+
+    DRAFT = "draft"
+    PUBLISHED = "published"
+    RETIRED = "retired"
+
+
+class AssessmentOrigin(str, enum.Enum):
+    LEARNER_STARTED = "learner_started"
+    PROJECT_SUBMISSION = "project_submission"
+    CHANGED_KNOWLEDGE = "changed_knowledge"
+    RETRY = "retry"
+    HUMAN_REQUESTED = "human_requested"
+
+
+class AssessmentAttemptStatus(str, enum.Enum):
+    """Code owns every transition — the Grader never moves an attempt."""
+
+    DRAFT = "draft"
+    SUBMITTED = "submitted"
+    CHECKING = "checking"
+    AWAITING_GRADING = "awaiting_grading"
+    GRADING = "grading"
+    FINALIZED = "finalized"
+    ABANDONED = "abandoned"
+
+
+class AssessmentResultKind(str, enum.Enum):
+    DETERMINISTIC = "deterministic"
+    GRADER = "grader"
+    FINAL = "final"
+    HUMAN = "human"
+
+
+class AssessmentOutcome(str, enum.Enum):
+    PASSED = "passed"
+    NEEDS_WORK = "needs_work"
+    PROVISIONAL = "provisional"
+    HUMAN_REVIEW_REQUIRED = "human_review_required"
+    UNABLE_TO_ASSESS = "unable_to_assess"
+
+
+class DemonstrationEffect(str, enum.Enum):
+    """Kept apart from the outcome so "PASSED" stays honest for assisted
+    work: a pass can still be formative-only."""
+
+    COUNTS_TOWARD_DEMONSTRATED = "counts_toward_demonstrated"
+    COUNTS_TOWARD_PRACTICED_ONLY = "counts_toward_practiced_only"
+    FORMATIVE_ONLY = "formative_only"
+    NONE = "none"
+
+
+class GraderConfidence(str, enum.Enum):
+    """Categorical only — the model never emits a probability."""
+
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+
+
+class AssessmentReviewTrigger(str, enum.Enum):
+    LEARNER_DISPUTE = "learner_dispute"
+    LOW_CONFIDENCE = "low_confidence"
+    MODEL_DISAGREEMENT = "model_disagreement"
+    CAPSTONE_EXCEPTION = "capstone_exception"
+    MANUAL_CORRECTION = "manual_correction"
+
+
+class AssessmentReviewStatus(str, enum.Enum):
+    OPEN = "open"
+    RESOLVED = "resolved"
+    WITHDRAWN = "withdrawn"
+
+
+class AssessmentReviewDecision(str, enum.Enum):
+    CONFIRM = "confirm"
+    OVERRIDE_PASS = "override_pass"
+    OVERRIDE_NEEDS_WORK = "override_needs_work"
+    NEW_ASSESSMENT = "new_assessment"

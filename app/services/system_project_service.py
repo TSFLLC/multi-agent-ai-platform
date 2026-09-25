@@ -1,11 +1,13 @@
 """Centralized lookup for the user's organization-scoped AIL system project."""
 
+from typing import Optional
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.authz import ProjectAction, check_project_access
 from app.db.enums import ProjectKind, ProjectRole
-from app.errors import ForbiddenError
+from app.errors import ForbiddenError, NotFoundError
 from app.models.identity import Project, ProjectMembership, User
 
 AIL_SYSTEM_PROJECT_NAME = "AIL Personal Lab"
@@ -62,3 +64,14 @@ def require_ail_system_access(db: Session, user: User, project_id: str) -> Proje
         raise ForbiddenError("Professor interaction is not an AIL system record.")
     check_project_access(db, user=user, project_id=project.id, action=ProjectAction.READ)
     return project
+
+
+def guard_ail_record_owner(db: Session, user: User, *, project_id: str, created_by: Optional[str]) -> None:
+    """AIL.5C P0-3. Every learner is OWNER of the shared per-organisation AIL
+    project, so project RBAC cannot separate one learner's records from
+    another's. Tasks/runs/artifacts that live in a SYSTEM_AIL project are
+    therefore private to the learner who created them. Answered as "not
+    found" so existence is never confirmed to another learner."""
+    project = db.get(Project, project_id)
+    if project is not None and project.kind == ProjectKind.SYSTEM_AIL and created_by != user.id:
+        raise NotFoundError("Record not found.")

@@ -35,16 +35,28 @@ requirement with ``allow_generated=false`` (the default) only counts
 evidence rows whose ``question_origin`` is ``reviewed`` or unset (spec Sec
 18.4 rule 2 — generated/unreviewed questions establish UNDERSTOOD only,
 never DEMONSTRATED).
+
+AIL.5C corrections (the platform floor lives in
+``app.services.independence_policy``, the single authoritative policy):
+
+* superseded evidence (``superseded_by_id``) never counts toward any rung;
+* a DEMONSTRATED leg must clear the platform floor — no demo data, no
+  self-reported work, no assistance above H2, and execution evidence must be
+  platform-/sandbox-verified — plus any per-requirement ``max_assistance`` /
+  ``min_verification`` / ``grader_in`` tightening (evidence_requirements v2);
+* CHANGED walks the whole published version history: a material change in ANY
+  version newer than the newest version the learner's evidence cites counts.
 """
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, List, Optional, Set, Tuple
 
-from app.db.enums import ConceptKind, EvidenceType, GradingMode, QuestionOrigin
+from app.db.enums import ConceptKind, EvidenceType, GradingMode, QuestionOrigin, VersionStatus
 from app.models.concepts import ConceptVersion
 from app.models.learner import LearningEvidence
 from app.services.concept_graph_service import ConceptGraphService
+from app.services.independence_policy import counts_toward_demonstrated, counts_toward_practiced
 from app.services.learning_evidence_service import LearningEvidenceService
 from app.services.review_retention_service import REVIEW_DUE, REVIEW_FAILED, ReviewAssessor
 
@@ -53,6 +65,18 @@ EXPOSED = "exposed"
 UNDERSTOOD = "understood"
 PRACTICED = "practiced"
 DEMONSTRATED = "demonstrated"
+
+# Hands-on evidence: what a learner did (observed, ran an experiment, modified,
+# reproduced, debugged or completed a project). H5 and superseded rows are
+# excluded by ``counts_toward_practiced``.
+_PRACTICE_EVIDENCE_TYPES = (
+    EvidenceType.OBSERVATION,
+    EvidenceType.LAB,
+    EvidenceType.MODIFICATION,
+    EvidenceType.REPRODUCTION,
+    EvidenceType.DEBUGGING,
+    EvidenceType.PROJECT_ASSESSMENT,
+)
 
 _LADDER_ORDER = [NOT_STARTED, EXPOSED, UNDERSTOOD, PRACTICED, DEMONSTRATED]
 
@@ -112,7 +136,10 @@ class LearnerStateService:
 
     def state(self, user_id: str, concept_id: str, *, now: Optional[datetime] = None) -> LearnerConceptState:
         evidence = self._evidence.list_evidence(user_id, concept_id=concept_id)
-        graded = [e for e in evidence if e.evidence_type != EvidenceType.SELF_REPORT]
+        # A superseded row has been replaced by a correction: it stays visible
+        # in ``evidence`` (history is never erased) but counts toward nothing.
+        live = [e for e in evidence if e.superseded_by_id is None]
+        graded = [e for e in live if e.evidence_type != EvidenceType.SELF_REPORT]
 
         ladder = NOT_STARTED
         if self._exposed_ok(graded):
@@ -127,9 +154,9 @@ class LearnerStateService:
             ladder = DEMONSTRATED
 
         overlays: Set[str] = set()
-        if any(e.evidence_type == EvidenceType.SELF_REPORT for e in evidence):
+        if any(e.evidence_type == EvidenceType.SELF_REPORT for e in live):
             overlays.add(SELF_REPORTED)
-        if ladder == DEMONSTRATED and self._changed_since(evidence, version):
+        if ladder == DEMONSTRATED and self._changed_since(live, self._concepts.list_versions(concept_id)):
             overlays.add(CHANGED)
 
         # AIL.4B overlays: derived, never persisted, never touching the ladder.
@@ -166,7 +193,8 @@ class LearnerStateService:
     @staticmethod
     def _practiced_ok(evidence: List[LearningEvidence]) -> bool:
         return any(
-            e.evidence_type in (EvidenceType.OBSERVATION, EvidenceType.LAB) and e.passed for e in evidence
+            e.evidence_type in _PRACTICE_EVIDENCE_TYPES and e.passed and counts_toward_practiced(e)
+            for e in evidence
         )
 
     def _demonstrated_ok(self, evidence: List[LearningEvidence], version: ConceptVersion) -> bool:
@@ -186,7 +214,12 @@ class LearnerStateService:
     @staticmethod
     def _requirement_evidence(evidence: List[LearningEvidence], requirement: dict) -> List[LearningEvidence]:
         evidence_type = EvidenceType(requirement["evidence_type"])
-        matches = [e for e in evidence if e.evidence_type == evidence_type and e.passed]
+        # Platform floor + per-requirement v2 constraints (one policy).
+        matches = [
+            e
+            for e in evidence
+            if e.evidence_type == evidence_type and e.passed and counts_toward_demonstrated(e, requirement)
+        ]
         if evidence_type == EvidenceType.KNOWLEDGE_CHECK and not requirement.get("allow_generated", False):
             matches = [e for e in matches if e.question_origin != QuestionOrigin.GENERATED]
         return matches
@@ -217,20 +250,22 @@ class LearnerStateService:
         return True, has_deterministic_leg
 
     @staticmethod
-    def _changed_since(evidence: List[LearningEvidence], current_version: Optional[ConceptVersion]) -> bool:
-        """Single-hop check: true when the current version differs from
-        whatever version the evidence cites AND the current version's own
-        ``change_severity`` (relative to its immediate predecessor) is
-        material. A learner who skips more than one published version
-        between demonstrating and re-checking, where an intermediate hop
-        was material but the latest hop was not, is a known gap — no
-        version-history walk is implemented in this slice."""
-        if current_version is None:
+    def _changed_since(evidence: List[LearningEvidence], versions: List[ConceptVersion]) -> bool:
+        """Multi-hop: true when any version newer than the newest version the
+        learner's evidence cites carries a ``material`` change. A minor latest
+        version can no longer hide an earlier material hop. Evidence earned
+        against the newest version clears the overlay, exactly as before."""
+        if not versions or not evidence:
             return False
-        demonstrating_versions = {e.concept_version_id for e in evidence}
-        if current_version.id in demonstrating_versions:
+        by_id = {v.id: v for v in versions}
+        cited = [by_id[e.concept_version_id].version for e in evidence if e.concept_version_id in by_id]
+        if not cited:
             return False
-        return (
-            current_version.change_severity is not None
-            and current_version.change_severity.value == "material"
+        newest_cited = max(cited)
+        return any(
+            v.version > newest_cited
+            and v.change_severity is not None
+            and v.change_severity.value == "material"
+            and v.status != VersionStatus.DRAFT
+            for v in versions
         )

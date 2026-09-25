@@ -227,11 +227,15 @@ class AssistanceProvenance:
 class EvidenceQualification:
     """Pipeline: Project Activity → Candidate Evidence → Qualification → Learning Evidence.
 
+    Assistance semantics are NOT defined here: every rule below delegates to
+    ``app.services.independence_policy`` (AIL.5C — one authoritative policy).
+
     Frozen rules:
     - H5 alone cannot qualify PRACTICED
     - H5 alone cannot qualify DEMONSTRATED
-    - Study Mode variant at ≤H2 after H5 shown can qualify
-    - Modification/Reproduction at ≤H2 shows independence after help
+    - Independence after help is shown by a fresh AIL.5C assessment, which
+      writes its own verified evidence; an assisted source row is never
+      upgraded in place.
     """
 
     @staticmethod
@@ -241,16 +245,8 @@ class EvidenceQualification:
 
     @staticmethod
     def can_qualify_practiced(assistance_level: Optional[AssistanceLevel]) -> bool:
-        """PRACTICED requires assistance ≤ H4."""
-        if assistance_level is None:
-            return True
-        return assistance_level in (
-            AssistanceLevel.H0,
-            AssistanceLevel.H1,
-            AssistanceLevel.H2,
-            AssistanceLevel.H3,
-            AssistanceLevel.H4,
-        )
+        """PRACTICED requires assistance ≤ H4 (never H5)."""
+        return assistance_level != AssistanceLevel.H5
 
     @staticmethod
     def can_qualify_demonstrated(
@@ -258,27 +254,34 @@ class EvidenceQualification:
         is_platform_verified: bool,
         is_modification_at_h2_or_less: bool = False,
     ) -> bool:
-        """DEMONSTRATED requires:
-        - platform-verified work at ≤H2, OR
-        - modification/reproduction at ≤H2 after help
-        """
-        if not is_platform_verified:
-            return is_modification_at_h2_or_less
+        """A DEMONSTRATED leg needs verified work at full independence (≤H2).
 
-        if assistance_level is None:
-            return True
-        return assistance_level in (AssistanceLevel.H0, AssistanceLevel.H1, AssistanceLevel.H2)
+        ``is_modification_at_h2_or_less`` is retained for signature
+        compatibility only: it no longer bypasses verification or assistance.
+        """
+        from app.services.independence_policy import FULL, classify_assistance
+
+        if not is_platform_verified:
+            return False
+        return classify_assistance(assistance_level) == FULL
 
     @staticmethod
     def qualify_candidate(db: Session, candidate, *, concept_version_id: str):
-        """Move candidate evidence through the existing append-only evidence service."""
+        """Move candidate evidence through the existing append-only evidence service.
+
+        The evidence is graded ``deterministic`` only when the platform (or a
+        sandbox) actually verified it; anything else is a self-reported claim
+        (``grader=self``): it can reach PRACTICED but never DEMONSTRATED, and
+        never resets the retention clock."""
         from app.db.enums import EvidenceRefType, EvidenceType, GradingMode
+        from app.services.independence_policy import is_verified
         from app.services.learning_evidence_service import LearningEvidenceService
         if not candidate.passed or candidate.concept_id is None:
             return None
         if not EvidenceQualification.can_qualify_practiced(candidate.assistance_level):
             return None
-        evidence = LearningEvidenceService(db).record_evidence(user_id=candidate.user_id, concept_id=candidate.concept_id, concept_version_id=concept_version_id, evidence_type=EvidenceType.LAB, grader=GradingMode.DETERMINISTIC, passed=True, ref_type=EvidenceRefType.NONE, ref_id=candidate.id, assistance_level=candidate.assistance_level, execution_verification=candidate.execution_verification, milestone_attempt_id=candidate.milestone_attempt_id, commit=False)
+        grader = GradingMode.DETERMINISTIC if is_verified(candidate.execution_verification) else GradingMode.SELF
+        evidence = LearningEvidenceService(db).record_evidence(user_id=candidate.user_id, concept_id=candidate.concept_id, concept_version_id=concept_version_id, evidence_type=EvidenceType.LAB, grader=grader, passed=True, ref_type=EvidenceRefType.NONE, ref_id=candidate.id, assistance_level=candidate.assistance_level, execution_verification=candidate.execution_verification, milestone_attempt_id=candidate.milestone_attempt_id, commit=False)
         candidate.qualified = True
         candidate.learning_evidence_id = evidence.id
         db.commit()

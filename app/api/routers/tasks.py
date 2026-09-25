@@ -17,11 +17,11 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_db, get_session_factory, not_implemented
 from app.auth import get_current_user
 from app.authz import ProjectAction, check_project_access, require_project_access
-from app.db.enums import IdempotencyScope
+from app.db.enums import IdempotencyScope, ProjectKind
 from app.errors import NotFoundError
 from app.models.artifacts_eval import Artifact
 from app.models.execution import ModelCall
-from app.models.identity import User
+from app.models.identity import Project, User
 from app.models.tasks import AgentRun, AgentRunAttempt, Task, TaskRun
 from app.schemas.artifacts import ArtifactRead
 from app.schemas.events import ExecutionEventRead
@@ -43,6 +43,7 @@ from app.schemas.usage import ModelCallRead
 from app.services.flight_recorder import FlightRecorderService
 from app.services.idempotency_service import BeginOutcome, IdempotencyService
 from app.services.review_orchestration_service import get_review_summary
+from app.services.system_project_service import guard_ail_record_owner
 from app.services.task_service import TaskService
 from app.sse import stream_task_run_events as _sse_stream
 
@@ -85,6 +86,21 @@ def _project_id_for_agent_run(db: Session, agent_run: AgentRun) -> str:
 
 def _require_task_access(db: Session, user: User, task: Task, action: ProjectAction) -> None:
     check_project_access(db, user=user, project_id=task.project_id, action=action)
+    guard_ail_record_owner(db, user, project_id=task.project_id, created_by=task.created_by)
+
+
+def _require_agent_run_read(db: Session, user: User, agent_run: AgentRun) -> None:
+    """READ access to an Agent Run and everything hanging off it. Records in
+    the shared AIL system project are private to the learner who created them
+    (AIL.5C P0-3)."""
+    task_run = db.get(TaskRun, agent_run.task_run_id)
+    if task_run is None:
+        raise NotFoundError(f"Task Run {agent_run.task_run_id} not found.")
+    task = db.get(Task, task_run.task_id)
+    if task is None:
+        raise NotFoundError(f"Task {task_run.task_id} not found.")
+    check_project_access(db, user=user, project_id=task.project_id, action=ProjectAction.READ)
+    guard_ail_record_owner(db, user, project_id=task.project_id, created_by=task.created_by)
 
 
 # -- Tasks -------------------------------------------------------------------
@@ -129,7 +145,11 @@ def list_tasks(
     db: Session = Depends(get_db),
     membership=Depends(require_project_access(ProjectAction.READ)),
 ):
-    return TaskService(db).list_tasks(project_id=membership.project_id)
+    tasks = TaskService(db).list_tasks(project_id=membership.project_id)
+    project = db.get(Project, membership.project_id)
+    if project is not None and project.kind == ProjectKind.SYSTEM_AIL:
+        tasks = [t for t in tasks if t.created_by == membership.user_id]
+    return tasks
 
 
 @router.get("/tasks/{task_id}", response_model=TaskRead)
@@ -330,9 +350,7 @@ def stream_task_run_events(
 def get_agent_run(agent_run_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     """Includes provider_model_snapshot_id inline (Section 25.5)."""
     agent_run = _get_agent_run_or_404(db, agent_run_id)
-    check_project_access(
-        db, user=user, project_id=_project_id_for_agent_run(db, agent_run), action=ProjectAction.READ
-    )
+    _require_agent_run_read(db, user, agent_run)
     return agent_run
 
 
@@ -356,9 +374,7 @@ def get_agent_run_events(
     agent_run_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)
 ):
     agent_run = _get_agent_run_or_404(db, agent_run_id)
-    check_project_access(
-        db, user=user, project_id=_project_id_for_agent_run(db, agent_run), action=ProjectAction.READ
-    )
+    _require_agent_run_read(db, user, agent_run)
     recorder = FlightRecorderService(db)
     events = recorder.list_for_task_run(task_run_id=agent_run.task_run_id)
     return [e for e in events if e.agent_run_id == agent_run_id]
@@ -369,9 +385,7 @@ def get_agent_run_artifacts(
     agent_run_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)
 ):
     agent_run = _get_agent_run_or_404(db, agent_run_id)
-    check_project_access(
-        db, user=user, project_id=_project_id_for_agent_run(db, agent_run), action=ProjectAction.READ
-    )
+    _require_agent_run_read(db, user, agent_run)
     stmt = select(Artifact).where(Artifact.agent_run_id == agent_run_id).order_by(Artifact.created_at)
     return list(db.execute(stmt).scalars().all())
 
@@ -381,9 +395,7 @@ def get_agent_run_attempts(
     agent_run_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)
 ):
     agent_run = _get_agent_run_or_404(db, agent_run_id)
-    check_project_access(
-        db, user=user, project_id=_project_id_for_agent_run(db, agent_run), action=ProjectAction.READ
-    )
+    _require_agent_run_read(db, user, agent_run)
     stmt = (
         select(AgentRunAttempt)
         .where(AgentRunAttempt.agent_run_id == agent_run_id)
@@ -399,9 +411,7 @@ def get_agent_run_usage(
     """Usage/cost accounting view (Section 24.4 #13 / 19) — one row per
     Model Call actually made for this Agent Run."""
     agent_run = _get_agent_run_or_404(db, agent_run_id)
-    check_project_access(
-        db, user=user, project_id=_project_id_for_agent_run(db, agent_run), action=ProjectAction.READ
-    )
+    _require_agent_run_read(db, user, agent_run)
     stmt = select(ModelCall).where(ModelCall.agent_run_id == agent_run_id).order_by(ModelCall.started_at)
     return list(db.execute(stmt).scalars().all())
 
@@ -420,9 +430,7 @@ def get_artifact_content(
     if artifact is None:
         raise NotFoundError(f"Artifact {artifact_id} not found.")
     agent_run = _get_agent_run_or_404(db, artifact.agent_run_id)
-    check_project_access(
-        db, user=user, project_id=_project_id_for_agent_run(db, agent_run), action=ProjectAction.READ
-    )
+    _require_agent_run_read(db, user, agent_run)
     with open(artifact.storage_ref, "r", encoding="utf-8") as f:
         content = f.read()
     return PlainTextResponse(content=content, media_type=artifact.mime_type or "text/plain")

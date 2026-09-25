@@ -575,6 +575,10 @@ class AgentExecutionService:
             self.governor.release(reservation)
             self._finalize_failed(ctx, category="workflow_context_error", message=str(exc), attempt=attempt)
             raise ExecutionAborted(str(exc)) from exc
+        except _MissingGradingContext as exc:
+            self.governor.release(reservation)
+            self._finalize_failed(ctx, category="grading_context_error", message=str(exc), attempt=attempt)
+            raise ExecutionAborted(str(exc)) from exc
 
         system_prompt_override = None
         if ctx.agent_version.role == "professor":
@@ -645,12 +649,15 @@ class AgentExecutionService:
             system_prompt=assembly.system_prompt,
             user_prompt=assembly.user_prompt,
             timeout_seconds=float(agent_run.timeout_seconds),
-            max_tokens=(ctx.task.requirements or {}).get("_professor_max_output_tokens")
-            if ctx.agent_version.role == "professor"
-            else None,
+            max_tokens=(
+                (ctx.task.requirements or {}).get("_professor_max_output_tokens")
+                if ctx.agent_version.role == "professor"
+                else (settings.grader_max_output_tokens if ctx.agent_version.role == "grader" else None)
+            ),
             response_format=(
                 {"type": "json_object"}
-                if ctx.agent_version.role == "professor" and resolved.model.structured_output_support is True
+                if ctx.agent_version.role in ("professor", "grader")
+                and resolved.model.structured_output_support is True
                 else None
             ),
         )
@@ -865,7 +872,28 @@ class AgentExecutionService:
         if kind == "workflow_upstream":
             return self._build_workflow_upstream_context(input_context, resolved)
 
+        if kind == "assessment_grading_request":
+            return self._build_grading_extra_context(input_context)
+
         return None
+
+    def _build_grading_extra_context(self, input_context: dict) -> str:
+        """AIL.5C: rebuild the Academy Grader's blind, ALLOWLISTED packet from
+        frozen, learner-scoped attempt rows. ``input_context_json`` holds
+        pointers only (attempt id, round, slot, packet hash), so a worker that
+        reclaims this run after a crash reconstructs the identical prompt. A
+        packet that is missing, oversized or no longer matches the requested
+        hash fails the run categorically BEFORE any provider call or spend."""
+        from app.services.assessment_grading_packet import GradingPacketBuilder, GradingPacketError
+
+        try:
+            packet = GradingPacketBuilder(self.db).build(
+                input_context.get("assessment_attempt_id") or "",
+                expected_hash=input_context.get("packet_hash"),
+            )
+        except GradingPacketError as exc:
+            raise _MissingGradingContext(str(exc)) from exc
+        return packet.text
 
     def _build_workflow_upstream_context(
         self, input_context: dict, resolved: Optional[ResolvedModel] = None
@@ -1323,6 +1351,12 @@ class _WorkflowContextTooLarge(Exception):
     """MA7.4c: the complete required upstream evidence exceeds the configured
     limit -- a categorized failure (``workflow_context_too_large``) raised
     before any provider call/budget spend; the evidence is never cut down."""
+
+
+class _MissingGradingContext(Exception):
+    """AIL.5C: the Academy Grader's frozen attempt/packet is missing, oversized
+    or no longer matches the requested packet hash -- a categorized failure
+    (``grading_context_error``) raised before any provider call/budget spend."""
 
 
 class _MissingWorkflowContext(Exception):
