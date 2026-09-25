@@ -3,6 +3,11 @@ import { clear, el } from "../dom.js";
 
 const stateLabel = (state) => state ? state.replaceAll("_", " ") : "not started";
 
+export const assistanceDescription = (level) => ({ h0: "Independent", h1: "Socratic clue", h2: "Targeted pointer", h3: "Partial structure", h4: "Guided steps", h5: "Worked solution assistance" }[String(level || "h0").toLowerCase()] || "Assistance");
+export const studyModeLabel = (eligible) => eligible ? "Study Mode available: worked example plus a different variant retry" : "Study Mode unlocks after the deterministic assistance path";
+export const evidenceSummaryText = (summary) => `Project activity ${summary.project_activity || 0} · Candidate evidence ${summary.candidate_evidence || 0} · Qualified learning evidence ${summary.qualified_learning_evidence || 0} · Learner State is recomputed from qualified evidence.`;
+export const assessmentStatusText = (submission) => submission ? `READY FOR ASSESSMENT · Grader invoked: ${submission.grader_invoked ? "yes" : "no"}` : "Not submitted; no grade or pass/fail is issued in AIL.5B.";
+
 export function academyProgressText(progress) {
   return `${progress.completed_items} of ${progress.required_items} required items complete; ${progress.demonstrated_concepts} of ${progress.required_concepts} required concepts demonstrated.`;
 }
@@ -145,14 +150,90 @@ export async function renderProjectOverview(root, params) {
 }
 
 export async function renderBuildWorkspace(root, params) {
-  loading(root);
-  try {
-    const attempt = await api.get(`/academy/build-with-me/attempts/${encodeURIComponent(params.id)}`);
-    const evidence = await api.get(`/academy/build-with-me/attempts/${encodeURIComponent(params.id)}/evidence`);
-    clear(root);
-    root.appendChild(el("div", { class: "page-header" }, [el("h1", {}, "Build With Me workspace"), el("p", { class: "subtitle" }, "Understand · plan · build · test · debug · explain · reflect") ]));
-    root.appendChild(el("section", { class: "card" }, [el("h2", {}, "Milestone progress"), el("div", { class: "stack" }, (attempt.milestones || []).map((m) => el("p", {}, `${m.status} · ${m.attempts_count} tries · assistance ${m.max_assistance_level || "h0"}`)))]));
-    root.appendChild(el("section", { class: "card" }, [el("h2", {}, "Evidence summary"), el("p", {}, `Project activity: ${(evidence.project_activity || []).length}`), el("p", {}, `Candidate evidence: ${(evidence.candidate_evidence || []).length}`), el("p", {}, `Qualified learning evidence: ${(evidence.qualified_learning_evidence || []).length}`), el("p", {}, `Explain-back responses: ${(evidence.explain_back || []).length}`)]));
-    root.appendChild(el("p", { class: "hint" }, "Mentor assistance is bounded by the deterministic H0–H5 policy. It never grades or changes learner state directly."));
-  } catch (err) { error(root, err); }
+  const id = encodeURIComponent(params.id);
+  const assistanceHelp = { h0: "Independent", h1: "Socratic clue", h2: "Targeted pointer", h3: "Partial structure", h4: "Guided steps", h5: "Worked solution assistance" };
+  async function reload() {
+    loading(root);
+    try {
+      const attempt = await api.get(`/academy/build-with-me/attempts/${id}`);
+      const evidence = await api.get(`/academy/build-with-me/attempts/${id}/evidence`);
+      const experiments = await api.get(`/academy/build-with-me/attempts/${id}/experiments/eligible`).catch(() => []);
+      const submission = await api.get(`/academy/build-with-me/attempts/${id}/submission`).catch(() => null);
+      clear(root);
+      root.appendChild(el("div", { class: "page-header" }, [el("h1", {}, "Build With Me workspace"), el("p", { class: "subtitle" }, "Understand · plan · build · test · debug · improve · explain · reflect") ]));
+      const milestoneRows = attempt.milestones || [];
+      const progress = el("section", { class: "card" }, [el("h2", {}, "Milestone progress")]);
+      const list = el("div", { class: "stack" });
+      progress.appendChild(list);
+      for (const m of milestoneRows) {
+        const row = el("article", { class: "card milestone-row" }, [el("div", { class: "row between" }, [el("strong", {}, `${m.status}`), el("span", { class: "badge badge-neutral" }, `${m.attempts_count} tries`)]), el("p", {}, `Assistance used: ${m.max_assistance_level || "h0"}`), el("p", { class: "hint" }, `Maximum currently unlocked: ${(m.maximum_unlocked_level || "h0").toUpperCase()} · ${assistanceDescription(m.maximum_unlocked_level)}`)]);
+        const start = el("button", { class: "button", type: "button" }, "Start / resume");
+        start.addEventListener("click", async () => { await api.post(`/academy/build-with-me/attempts/${id}/milestones/${encodeURIComponent(m.milestone_id)}/start`); await reload(); });
+        const test = el("button", { class: "button-secondary", type: "button" }, "Test result");
+        test.addEventListener("click", async () => { const result = await api.post(`/academy/build-with-me/attempts/${id}/milestones/${encodeURIComponent(m.milestone_id)}/test`); row.appendChild(el("p", { class: "hint" }, result.message || "Test result recorded.")); await reload(); });
+        const mentor = el("button", { class: "button-secondary", type: "button" }, "Ask Mentor");
+        mentor.addEventListener("click", () => showMentor(row, m, id, reload));
+        row.appendChild(el("div", { class: "row" }, [start, test, mentor]));
+        row.appendChild(el("p", { class: "hint" }, `Current: ${m.max_assistance_level || "h0"}. The server determines the maximum unlocked level.`));
+        list.appendChild(row);
+      }
+      root.appendChild(progress);
+      root.appendChild(evidenceCard(evidence, assistanceHelp));
+      root.appendChild(debugCard(milestoneRows));
+      root.appendChild(studyCard(id, milestoneRows, reload));
+      root.appendChild(countLearningCard(id, experiments, reload));
+      root.appendChild(submissionCard(id, submission, reload));
+    } catch (err) { error(root, err); }
+  }
+  await reload();
+}
+
+function showMentor(root, milestone, attemptId, reload) {
+  const levels = ["h1", "h2", "h3", "h4", "h5"];
+  const select = el("select", {}); levels.forEach((level) => select.appendChild(el("option", { value: level }, level.toUpperCase())));
+  const question = el("textarea", { rows: "3", placeholder: "What are you stuck on?" });
+  const response = el("div", { class: "mentor-response" });
+  const explain = el("textarea", { rows: "3", placeholder: "Explain back what you think is happening (optional)." });
+  const saveExplain = el("button", { class: "button-secondary", type: "button" }, "Save explain-back");
+  saveExplain.addEventListener("click", async () => { await api.post(`/academy/build-with-me/attempts/${attemptId}/milestones/${encodeURIComponent(milestone.milestone_id)}/explain-back`, { question: "What is your current explanation?", response: explain.value }); saveExplain.textContent = "Explain-back saved"; });
+  const close = el("button", { class: "button-secondary", type: "button" }, "Close");
+  const send = el("button", { class: "button", type: "button" }, "Request help");
+  send.addEventListener("click", async () => { const result = await api.post(`/academy/build-with-me/attempts/${attemptId}/milestones/${encodeURIComponent(milestone.milestone_id)}/mentor`, { question: question.value, assistance_level: select.value }); response.appendChild(el("p", {}, result.response?.direct_answer || "Mentor response recorded.")); response.appendChild(el("p", { class: "hint" }, `Authorized assistance: ${result.assistance_level}. AgentRun provenance recorded: ${Boolean(result.provenance?.agent_run_id)}.`)); });
+  const panel = el("div", { class: "card mentor-panel" }, [el("h3", {}, "Mentor"), el("p", { class: "hint" }, "The deterministic policy controls eligibility; the Mentor cannot choose a higher level."), select, question, el("div", { class: "row" }, [send]), response, el("h4", {}, "Explain-back"), explain, saveExplain, close ]);
+  close.addEventListener("click", () => panel.remove());
+  root.appendChild(panel);
+}
+
+function evidenceCard(evidence, assistanceHelp) {
+  const rows = evidence.candidate_evidence || [];
+  return el("section", { class: "card evidence-summary" }, [el("h2", {}, "Evidence summary"), el("p", {}, `Project activity: ${(evidence.project_activity || []).length}`), el("p", {}, `Candidate evidence: ${rows.length}`), el("p", {}, `Qualified learning evidence: ${(evidence.qualified_learning_evidence || []).length}`), el("p", {}, `Learner State is recomputed only from qualified evidence.`), rows.length ? el("div", { class: "stack" }, rows.map((row) => el("p", { class: "hint" }, `${row.id}: ${row.qualified ? "qualified" : "candidate only"} · ${assistanceHelp[row.assistance_level] || row.assistance_level || "independent"}`))) : el("p", { class: "hint" }, "No candidate evidence yet."), el("p", { class: "hint" }, `${(evidence.explain_back || []).length} explain-back/reflection response(s) captured; not formally graded.`)]);
+}
+
+function debugCard(milestones) {
+  return el("section", { class: "card" }, [el("h2", {}, "Debug With Me history"), milestones.length ? el("div", { class: "stack" }, milestones.map((m) => el("p", {}, `${m.status}: ${m.attempts_count} attempt(s); prior attempts remain preserved.`))) : el("p", { class: "hint" }, "No debugging attempts recorded yet."), el("p", { class: "hint" }, "Actual execution evidence is shown only when the platform provides it. MA9-dependent execution remains capability-gated.")]);
+}
+
+function studyCard(attemptId, milestones, reload) {
+  const eligible = milestones.find((m) => m.max_assistance_level === "h5");
+  const card = el("section", { class: "card" }, [el("h2", {}, "Study Mode"), el("p", { class: "hint" }, `${studyModeLabel(Boolean(eligible))}. A variant does not grant Demonstrated.`)]);
+  if (eligible) {
+    const button = el("button", { class: "button", type: "button" }, "Enter Study Mode");
+    button.addEventListener("click", async () => { const result = await api.post(`/academy/build-with-me/attempts/${attemptId}/milestones/${encodeURIComponent(eligible.milestone_id)}/study-mode`); card.appendChild(el("div", { class: "study-example" }, [el("h3", {}, "Worked example"), el("p", {}, result.worked_example_ref), el("p", {}, "Variant retry created. Perform your own work, then record the actual result/evidence."), el("p", { class: "hint" }, `Variant attempt: ${result.variant_attempt_id}; state outcome comes from evidence qualification.`)])); button.disabled = true; });
+    card.appendChild(button);
+  }
+  return card;
+}
+
+function countLearningCard(attemptId, experiments, reload) {
+  const card = el("section", { class: "card" }, [el("h2", {}, "Count This Toward My Learning"), el("p", { class: "hint" }, "This is always explicit. Select eligible Personal Lab work, confirm, and the existing qualification service decides whether evidence is created.")]);
+  if (!experiments.length) { card.appendChild(el("p", { class: "hint" }, "No eligible Personal Lab experiments are available.")); return card; }
+  experiments.forEach((experiment) => { const button = el("button", { class: "button-secondary", type: "button" }, `Count ${experiment.hypothesis || "experiment"}`); button.disabled = !experiment.qualification?.ready; button.title = experiment.qualification?.message || "Not eligible"; button.addEventListener("click", async () => { if (!window.confirm("Count this selected experiment toward your learning?")) return; await api.post(`/academy/build-with-me/attempts/${attemptId}/experiments/${encodeURIComponent(experiment.id)}/count-toward-learning`, { confirmed: true }); await reload(); }); card.appendChild(button); });
+  return card;
+}
+
+function submissionCard(attemptId, submission, reload) {
+  const card = el("section", { class: "card" }, [el("h2", {}, "Assessment-ready submission"), el("p", { class: "hint" }, assessmentStatusText(submission))]);
+  const button = el("button", { class: "button", type: "button" }, submission ? "Refresh submission snapshot" : "Prepare READY FOR ASSESSMENT");
+  button.addEventListener("click", async () => { await api.post(`/academy/build-with-me/attempts/${attemptId}/submit`); await reload(); });
+  card.appendChild(button); return card;
 }

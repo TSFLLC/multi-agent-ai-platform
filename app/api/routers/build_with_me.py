@@ -54,6 +54,10 @@ class EvidenceRequest(BaseModel):
     execution_verification: ExecutionVerification = ExecutionVerification.NOT_APPLICABLE
 
 
+class CountLearningRequest(BaseModel):
+    confirmed: bool
+
+
 @router.get("/projects")
 def list_projects(
     db: Session = Depends(get_db),
@@ -171,6 +175,7 @@ def get_milestone_workspace(attempt_id: str, milestone_id: str, db: Session = De
         "status": milestone_attempt.status,
         "attempts_count": milestone_attempt.attempts_count,
         "max_assistance_level": milestone_attempt.max_assistance_level,
+        "maximum_unlocked_level": __import__("app.services.build_with_me_service", fromlist=["HintPolicyEngine"]).HintPolicyEngine.maximum_unlocked_level(milestone_attempt.max_assistance_level, milestone_attempt.attempts_count, milestone_attempt.attempts_count if milestone_attempt.status == MilestoneAttemptStatus.FAILED else 0),
         "mode": milestone_attempt.mode,
         "variants": [{"id": a.id, "mode": a.mode, "status": a.status, "attempts_count": a.attempts_count} for a in MilestoneAttemptService.attempts(db, attempt_id, milestone_id)],
     }
@@ -194,6 +199,19 @@ def run_milestone_checks(attempt_id: str, milestone_id: str, db: Session = Depen
     MilestoneAttemptService.record_attempt(db, milestone_attempt.id)
 
     return {"status": "checking", "attempts_count": milestone_attempt.attempts_count, "checks": [], "execution_available": False, "message": "No execution capability is available in AIL.5B; submit an actual platform result or continue after MA9."}
+
+
+@router.post("/attempts/{attempt_id}/milestones/{milestone_id}/start")
+def start_milestone(attempt_id: str, milestone_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    ProjectAttemptService.own_attempt(db, attempt_id, user.id)
+    from app.models.academy import MilestoneAttempt
+    row = db.query(MilestoneAttempt).filter_by(project_attempt_id=attempt_id, project_milestone_id=milestone_id).order_by(MilestoneAttempt.created_at.desc()).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Milestone not found")
+    row.status = MilestoneAttemptStatus.IN_PROGRESS
+    if row.started_at is None: row.started_at = datetime.utcnow()
+    db.commit()
+    return {"milestone_attempt_id": row.id, "status": row.status, "mode": row.mode}
 
 
 @router.post("/attempts/{attempt_id}/milestones/{milestone_id}/hint")
@@ -338,6 +356,29 @@ def save_project_decision(attempt_id: str, link_id: str, body: DecisionRequest, 
     if row is None: raise HTTPException(status_code=404, detail="Experiment link not found")
     row.learner_decision = body.learner_decision; db.commit()
     return {"id": row.id, "learner_decision": row.learner_decision}
+
+
+@router.get("/attempts/{attempt_id}/experiments/eligible")
+def eligible_experiments(attempt_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    from app.models.lab import Experiment
+    from app.services.experiment_learning_qualification_service import ExperimentLearningQualificationService
+    ProjectAttemptService.own_attempt(db, attempt_id, user.id)
+    experiments = db.query(Experiment).filter(Experiment.user_id == user.id).order_by(Experiment.created_at.desc()).limit(40).all()
+    return [{"id": e.id, "hypothesis": e.hypothesis, "status": e.status, "qualification": ExperimentLearningQualificationService(db).assess(user.id, e.id)} for e in experiments]
+
+
+@router.post("/attempts/{attempt_id}/experiments/{experiment_id}/count-toward-learning")
+def count_experiment(attempt_id: str, experiment_id: str, body: CountLearningRequest, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    if not body.confirmed:
+        raise HTTPException(status_code=400, detail="Explicit confirmation is required")
+    from app.services.experiment_learning_qualification_service import ExperimentLearningQualificationService
+    from app.services.learner_state_service import LearnerStateService
+    ProjectAttemptService.own_attempt(db, attempt_id, user.id)
+    evidence, created, qualification = ExperimentLearningQualificationService(db).count_toward_learning(user.id, experiment_id)
+    if evidence is None:
+        raise HTTPException(status_code=409, detail=qualification)
+    state = LearnerStateService(db).state(user.id, evidence.concept_id)
+    return {"created": created, "candidate_evidence": {"source": "experiment", "source_id": experiment_id}, "learning_evidence_id": evidence.id, "qualification": qualification, "learner_state": {"ladder": state.ladder, "overlays": sorted(state.overlays)}}
 
 
 @router.post("/attempts/{attempt_id}/submit")

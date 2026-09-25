@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { academyEnrollmentHref, academyProgressText, groupAcademyItems } from "../assets/js/pages/academy.js";
+import { academyEnrollmentHref, academyProgressText, groupAcademyItems, assistanceDescription, studyModeLabel, evidenceSummaryText, assessmentStatusText } from "../assets/js/pages/academy.js";
 
 test("Academy progress reports explicit evidence denominators", () => {
   assert.equal(
@@ -20,4 +20,12 @@ test("Program overview groups curriculum items by module deterministically", () 
 
 test("Academy routes encode enrollment identifiers", () => {
   assert.equal(academyEnrollmentHref("enrollment/1", "progress"), "#/academy/enrollments/enrollment%2F1/progress");
+});
+
+test("Build With Me displays policy-owned assistance and recovery semantics", () => {
+  assert.equal(assistanceDescription("h4"), "Guided steps");
+  assert.match(studyModeLabel(true), /different variant retry/);
+  assert.match(evidenceSummaryText({ project_activity: 2, candidate_evidence: 1, qualified_learning_evidence: 0 }), /recomputed/);
+  assert.match(assessmentStatusText(null), /no grade or pass\/fail/);
+  assert.match(assessmentStatusText({ grader_invoked: false }), /Grader invoked: no/);
 });

@@ -83,6 +83,10 @@ class ProjectAttemptService:
             started_at=datetime.utcnow(),
         )
         db.add(attempt)
+        db.flush()
+        from app.models.academy import MilestoneAttempt
+        for milestone in template.milestones:
+            db.add(MilestoneAttempt(id=str(uuid4()), project_attempt_id=attempt.id, project_milestone_id=milestone.id, status=MilestoneAttemptStatus.NOT_STARTED, mode=MilestoneAttemptMode.NORMAL))
         db.commit()
         return attempt.id
 
@@ -97,7 +101,7 @@ class ProjectAttemptService:
             "status": attempt.status,
             "started_at": attempt.started_at,
             "template_id": attempt.project_template_id,
-            "milestones": [{"id": m.id, "milestone_id": m.project_milestone_id, "status": m.status, "mode": m.mode, "attempts_count": m.attempts_count, "max_assistance_level": m.max_assistance_level} for m in attempt.milestones],
+            "milestones": [{"id": m.id, "milestone_id": m.project_milestone_id, "status": m.status, "mode": m.mode, "attempts_count": m.attempts_count, "max_assistance_level": m.max_assistance_level, "maximum_unlocked_level": HintPolicyEngine.maximum_unlocked_level(m.max_assistance_level, m.attempts_count, m.attempts_count if m.status == MilestoneAttemptStatus.FAILED else 0)} for m in attempt.milestones],
         } if attempt else None
 
     @staticmethod
@@ -193,6 +197,11 @@ class HintPolicyEngine:
             if attempt.max_assistance_level is None or level > attempt.max_assistance_level:
                 attempt.max_assistance_level = level
             db.commit()
+
+    @staticmethod
+    def maximum_unlocked_level(current_level, attempts_count: int, failed_attempts: int = 0, minutes_since_last_level: int = 0):
+        eligible = [level for level in AssistanceLevel if HintPolicyEngine.can_unlock_hint(level, current_level, attempts_count, minutes_since_last_level, failed_attempts)]
+        return max(eligible, key=lambda level: int(level.value[1:])) if eligible else current_level or AssistanceLevel.H0
 
 
 class AssistanceProvenance:
