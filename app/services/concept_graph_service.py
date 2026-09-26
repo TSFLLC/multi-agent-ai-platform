@@ -19,13 +19,16 @@ means "A must be at least UNDERSTOOD before B is planned" (spec Sec
 15.2), matching the graph fragment's left-to-right arrows (Sec 15.4).
 """
 
+import json
 from datetime import datetime, timezone
 from typing import List, Optional, Set
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
 from app.db.enums import ConceptRelationType, ContentOrigin, VersionStatus
+from app.db.mixins import new_uuid
 from app.errors import ConflictError, NotFoundError
 from app.models.concepts import Concept, ConceptRelation, ConceptTerm, ConceptVersion, LearningItem
 from app.services.independence_policy import validate_evidence_requirements
@@ -273,6 +276,7 @@ class ConceptGraphService:
         reviewed: bool = False,
         est_minutes: Optional[int] = None,
         requires_capability_term_id: Optional[str] = None,
+        lineage_id: Optional[str] = None,
     ) -> LearningItem:
         item = LearningItem(
             concept_id=concept_id,
@@ -284,6 +288,7 @@ class ConceptGraphService:
             reviewed=reviewed,
             est_minutes=est_minutes,
             requires_capability_term_id=requires_capability_term_id,
+            lineage_id=lineage_id or new_uuid(),
         )
         self.db.add(item)
         self.db.commit()
@@ -293,3 +298,144 @@ class ConceptGraphService:
     def list_learning_items(self, concept_id: str) -> List[LearningItem]:
         stmt = select(LearningItem).where(LearningItem.concept_id == concept_id)
         return list(self.db.execute(stmt).scalars().all())
+
+    def get_current_learning_item(self, lineage_id: str, *, for_update: bool = False) -> Optional[LearningItem]:
+        """Return the highest immutable version for one logical activity."""
+        stmt = (
+            select(LearningItem)
+            .where(LearningItem.lineage_id == lineage_id)
+            .order_by(LearningItem.version.desc(), LearningItem.id.desc())
+        )
+        if for_update:
+            stmt = stmt.with_for_update()
+        return self.db.execute(stmt).scalars().first()
+
+    def list_current_learning_items(self, concept_id: str) -> List[LearningItem]:
+        """Return exactly one, latest version per lineage for a concept."""
+        items = self.list_learning_items(concept_id)
+        current: dict[str, LearningItem] = {}
+        for item in sorted(items, key=lambda row: (row.lineage_id, row.version, row.id), reverse=True):
+            current.setdefault(item.lineage_id, item)
+        return sorted(current.values(), key=lambda row: (row.created_at, row.id))
+
+    @staticmethod
+    def _learning_item_payload(
+        *,
+        item_type,
+        title: str,
+        body_md: Optional[str],
+        spec: Optional[dict],
+        grading_mode,
+        reviewed: bool,
+        est_minutes: Optional[int],
+        requires_capability_term_id: Optional[str],
+    ) -> dict:
+        def value(item):
+            return item.value if hasattr(item, "value") else item
+
+        return {
+            "item_type": value(item_type),
+            "title": title,
+            "body_md": body_md,
+            "spec": json.dumps(spec, sort_keys=True, separators=(",", ":")) if spec is not None else None,
+            "grading_mode": value(grading_mode),
+            "reviewed": reviewed,
+            "est_minutes": est_minutes,
+            "requires_capability_term_id": requires_capability_term_id,
+        }
+
+    def create_learning_item_version(
+        self,
+        *,
+        lineage_id: str,
+        expected_current_version: int,
+        item_type,
+        title: str,
+        body_md: Optional[str] = None,
+        spec: Optional[dict] = None,
+        grading_mode=None,
+        reviewed: bool = False,
+        est_minutes: Optional[int] = None,
+        requires_capability_term_id: Optional[str] = None,
+    ) -> LearningItem:
+        """Create one immutable N+1 revision, or return an identical retry."""
+        if expected_current_version < 1:
+            raise ConflictError("Expected Learning Item version must be positive")
+
+        current = self.get_current_learning_item(lineage_id, for_update=True)
+        if current is None:
+            raise NotFoundError(f"Learning Item lineage {lineage_id} not found")
+        if current.version != expected_current_version:
+            proposed = self._learning_item_payload(
+                item_type=item_type,
+                title=title,
+                body_md=body_md,
+                spec=spec,
+                grading_mode=grading_mode,
+                reviewed=reviewed,
+                est_minutes=est_minutes,
+                requires_capability_term_id=requires_capability_term_id,
+            )
+            current_payload = self._learning_item_payload(
+                item_type=current.item_type,
+                title=current.title,
+                body_md=current.body_md,
+                spec=current.spec,
+                grading_mode=current.grading_mode,
+                reviewed=current.reviewed,
+                est_minutes=current.est_minutes,
+                requires_capability_term_id=current.requires_capability_term_id,
+            )
+            if current.version == expected_current_version + 1 and current_payload == proposed:
+                return current
+            raise ConflictError(
+                f"Learning Item lineage {lineage_id} is at version {current.version}; "
+                f"expected {expected_current_version}"
+            )
+
+        next_version = current.version + 1
+        item = LearningItem(
+            concept_id=current.concept_id,
+            item_type=item_type,
+            title=title,
+            body_md=body_md,
+            spec=spec,
+            grading_mode=grading_mode,
+            reviewed=reviewed,
+            lineage_id=current.lineage_id,
+            version=next_version,
+            est_minutes=est_minutes,
+            requires_capability_term_id=requires_capability_term_id,
+        )
+        self.db.add(item)
+        try:
+            self.db.commit()
+        except (IntegrityError, OperationalError):
+            self.db.rollback()
+            winner = self.get_current_learning_item(lineage_id)
+            if winner is not None and winner.version == next_version:
+                winner_payload = self._learning_item_payload(
+                    item_type=winner.item_type,
+                    title=winner.title,
+                    body_md=winner.body_md,
+                    spec=winner.spec,
+                    grading_mode=winner.grading_mode,
+                    reviewed=winner.reviewed,
+                    est_minutes=winner.est_minutes,
+                    requires_capability_term_id=winner.requires_capability_term_id,
+                )
+                proposed_payload = self._learning_item_payload(
+                    item_type=item_type,
+                    title=title,
+                    body_md=body_md,
+                    spec=spec,
+                    grading_mode=grading_mode,
+                    reviewed=reviewed,
+                    est_minutes=est_minutes,
+                    requires_capability_term_id=requires_capability_term_id,
+                )
+                if winner_payload == proposed_payload:
+                    return winner
+            raise ConflictError("Concurrent Learning Item revision conflicts with the canonical version")
+        self.db.refresh(item)
+        return item

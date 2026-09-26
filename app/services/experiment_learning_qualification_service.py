@@ -31,6 +31,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.db.enums import (
+    AssistanceLevel,
     EvaluationFinding,
     EvaluationRunStatus,
     EvidenceRefType,
@@ -59,6 +60,8 @@ EVALUATION_PENDING = "EVALUATION_PENDING"
 EVALUATION_FAILED = "EVALUATION_FAILED"
 EVALUATION_INCOMPLETE = "EVALUATION_INCOMPLETE"
 NO_MEANINGFUL_EVALUATION = "NO_MEANINGFUL_EVALUATION"
+ASSISTANCE_REQUIRED = "ASSISTANCE_REQUIRED"
+ASSISTANCE_DISQUALIFIES = "ASSISTANCE_DISQUALIFIES"
 
 _MESSAGES = {
     READY: "Ready to count toward learning.",
@@ -71,6 +74,8 @@ _MESSAGES = {
     EVALUATION_FAILED: "Evaluation failed.",
     EVALUATION_INCOMPLETE: "Some required evaluations are incomplete.",
     NO_MEANINGFUL_EVALUATION: "The evaluation produced no meaningful results to learn from.",
+    ASSISTANCE_REQUIRED: "Record the actual assistance level before counting this Academy activity toward learning.",
+    ASSISTANCE_DISQUALIFIES: "This assistance level cannot independently qualify hands-on learning evidence.",
 }
 
 
@@ -89,6 +94,17 @@ class ExperimentLearningQualificationService:
 
         if not experiment.concept_id:
             return self._result(MISSING_CONCEPT, experiment)
+        config = experiment.config_snapshot or {}
+        if config.get("assistance_required_for_qualification"):
+            raw_assistance = config.get("assistance_level")
+            try:
+                assistance = AssistanceLevel(raw_assistance) if raw_assistance is not None else None
+            except ValueError:
+                assistance = None
+            if assistance is None:
+                return self._result(ASSISTANCE_REQUIRED, experiment)
+            if assistance == AssistanceLevel.H5:
+                return self._result(ASSISTANCE_DISQUALIFIES, experiment)
         version = (
             self.db.get(ConceptVersion, experiment.concept_version_id) if experiment.concept_version_id else None
         )
@@ -133,6 +149,15 @@ class ExperimentLearningQualificationService:
             return None, False, assessment
 
         experiment = self._owned(user_id, experiment_id)
+        config = experiment.config_snapshot or {}
+        assistance = None
+        if config.get("assistance_required_for_qualification"):
+            try:
+                assistance = AssistanceLevel(config.get("assistance_level"))
+            except (ValueError, TypeError):
+                return None, False, self._result(ASSISTANCE_REQUIRED, experiment)
+            if assistance == AssistanceLevel.H5:
+                return None, False, self._result(ASSISTANCE_DISQUALIFIES, experiment)
         try:
             evidence = self.evidence_service.record_evidence(
                 user_id=user_id,
@@ -144,6 +169,7 @@ class ExperimentLearningQualificationService:
                 passed=True,
                 ref_type=EvidenceRefType.EXPERIMENT,
                 ref_id=experiment.id,
+                assistance_level=assistance,
             )
         except IntegrityError:
             # A concurrent request inserted first; the partial unique index

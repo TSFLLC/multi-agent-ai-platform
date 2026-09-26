@@ -22,7 +22,7 @@ acyclicity declaratively, the same trade-off already accepted for
 from datetime import datetime
 from typing import List, Optional
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -36,7 +36,7 @@ from app.db.enums import (
     LearningItemType,
     VersionStatus,
 )
-from app.db.mixins import CreatedAtMixin, UUIDPrimaryKeyMixin, utcnow
+from app.db.mixins import CreatedAtMixin, UUIDPrimaryKeyMixin, new_uuid, utcnow
 from app.db.types import sa_enum
 
 
@@ -162,6 +162,11 @@ class LearningItem(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     """
 
     __tablename__ = "learning_items"
+    __table_args__ = (
+        UniqueConstraint("lineage_id", "version", name="uq_learning_items_lineage_version"),
+        CheckConstraint("version >= 1", name="ck_learning_items_version_positive"),
+        Index("ix_learning_items_lineage_id", "lineage_id"),
+    )
 
     concept_id: Mapped[str] = mapped_column(ForeignKey("concepts.id", ondelete="CASCADE"), nullable=False)
     item_type: Mapped[LearningItemType] = mapped_column(sa_enum(LearningItemType), nullable=False)
@@ -173,6 +178,7 @@ class LearningItem(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     spec: Mapped[Optional[dict]] = mapped_column("spec_json", nullable=True)
     grading_mode: Mapped[Optional[GradingMode]] = mapped_column(sa_enum(GradingMode), nullable=True)
     reviewed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    lineage_id: Mapped[str] = mapped_column(String(36), nullable=False, default=new_uuid)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     est_minutes: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     requires_capability_term_id: Mapped[Optional[str]] = mapped_column(

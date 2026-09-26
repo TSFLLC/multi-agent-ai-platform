@@ -264,7 +264,7 @@ class ProfessorContextAssembler:
                     data=_model_data(prerequisite, ["slug", "name", "level", "kind", "is_core", "status"]),
                 )
 
-        items = sorted(self._concepts.list_learning_items(concept.id), key=lambda item: item.id)
+        items = self._concepts.list_current_learning_items(concept.id)
         for item in items[:20]:
             self._add(
                 records,

@@ -218,6 +218,10 @@ class ReviewAttemptService:
             ).scalars()
             if qualifies_as_review_item(i, concept_id) is None
         ]
+        current_by_lineage = {}
+        for item in sorted(items, key=lambda row: (row.lineage_id, row.version, row.id), reverse=True):
+            current_by_lineage.setdefault(item.lineage_id, item)
+        items = list(current_by_lineage.values())
         if not items:
             return None
         attempts = list(

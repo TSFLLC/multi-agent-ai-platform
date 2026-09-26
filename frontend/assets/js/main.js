@@ -17,6 +17,7 @@ import { renderLab, renderExperimentDetail } from "./pages/lab.js";
 import { renderProfessor } from "./pages/professor.js";
 import { renderAssessmentCenter, renderAssessmentDefinition, renderAssessmentAttempt, renderDemonstrationRecord, renderReviewQueue, renderReviewDetail } from "./pages/assessments.js";
 import { renderAcademyHome, renderAcademyProgram, renderAcademyLesson, renderAcademyToday, renderAcademyProgress, renderProjectLibrary, renderProjectOverview, renderBuildWorkspace } from "./pages/academy.js";
+import { renderAcademy as renderLevel1Academy, renderAcademyDay as renderLevel1AcademyDay } from "./pages/academy-level1.js";
 
 registerRoute("/ask", renderAsk);
 registerRoute("/professor", renderProfessor);
@@ -39,6 +40,8 @@ registerRoute("/ail/radar/developments/:id", renderDevelopmentDetail);
 registerRoute("/ail/lab", renderLab);
 registerRoute("/ail/lab/experiments/:id", renderExperimentDetail);
 registerRoute("/academy", renderAcademyHome);
+registerRoute("/academy/level-1", renderLevel1Academy);
+registerRoute("/academy/level-1/:day", renderLevel1AcademyDay);
 registerRoute("/academy/programs/:id", renderAcademyProgram);
 registerRoute("/academy/concepts/:id", renderAcademyLesson);
 registerRoute("/academy/enrollments/:id/today", renderAcademyToday);

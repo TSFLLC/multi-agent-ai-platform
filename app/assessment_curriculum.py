@@ -592,6 +592,176 @@ FOUNDATION_ASSESSMENTS: List[Dict] = [
 ]
 
 
+# Level 1 explain-backs are authored in the Practical AI Foundations
+# curriculum.  They use the existing AIL.5C free-text assessment contract:
+# the deterministic length check is only a submission guard; the Grader Agent
+# decides the authored reference-point rubric.  ``academy_binding`` is
+# immutable provenance metadata, not a second assessment implementation.
+LEVEL1_EXPLAIN_BACK_ASSESSMENTS: List[Dict] = [
+    {
+        "day": 1, "key": "level1-day-01-explain-ai", "title": "Day 1 Explain AI",
+        "concepts": ["what-ai-is-and-isnt"], "min_chars": 150,
+        "prompt": "Imagine a friend or family member who has never studied AI asks: 'What actually is AI? Is it as smart as people say?' Explain what AI is, one realistic capability, one limitation or overclaim, and one situation where deterministic software is better.",
+        "points": [
+            "Defines AI using learning from data, finding patterns, or generating outputs from training",
+            "Gives one specific, real capability such as translation, image recognition, or text generation",
+            "Identifies a genuine limitation or overclaim such as hallucination, lack of understanding, or confident errors",
+            "Names a clear case where deterministic software is preferable, such as calculation, exact rules, auditability, or safety",
+        ],
+    },
+    {
+        "day": 4, "key": "level1-day-04-experiment-reflection", "title": "Day 4 Experiment Reflection",
+        "concepts": ["what-ai-is-and-isnt"], "min_chars": 100,
+        "prompt": "Reflect on the AI behavior experiment: what was the single most surprising observation, what does it tell you about when to trust or verify AI output, and one task you would use with minimal review versus one you would always verify.",
+        "points": [
+            "Draws a specific conclusion from the learner's own experiment results",
+            "Connects observed behavior to appropriate trust and verification",
+            "Distinguishes a low-risk task suitable for limited review from a task requiring independent verification",
+        ],
+    },
+    {
+        "day": 5, "key": "level1-day-05-grounding-reflection", "title": "Day 5 Grounding Reflection",
+        "concepts": ["hallucination-grounding"], "min_chars": 150,
+        "prompt": "In your own words, explain what grounding is, why it helps, what it does not protect against, and when you would use grounding in a real-world system.",
+        "points": [
+            "Explains grounding as supplying relevant source context for the model to use",
+            "Explains that it helps by constraining the answer to provided information",
+            "Names a limitation such as misleading or incomplete sources, retrieval failure, or continued hallucination",
+            "Gives a justified real-world situation where grounding is appropriate",
+        ],
+    },
+    {
+        "day": 9, "key": "level1-day-09-prompt-reflection", "title": "Day 9 Prompt Experiment Reflection",
+        "concepts": ["prompt-structure"], "min_chars": 150,
+        "prompt": "Reflect on the prompt engineering experiment: what is the most important lesson about what makes a prompt work, what would you tell someone building a production application about its limitations, and what would you change with more time or a larger test set.",
+        "points": [
+            "Draws a specific, evidence-based conclusion from the experiment results",
+            "Explains the roles of specificity, examples, constraints, or edge cases without claiming more examples always help",
+            "Identifies a production limitation of the prompt or experiment",
+            "Proposes a sensible improvement to the test set or experimental method",
+        ],
+    },
+    {
+        "day": 14, "key": "level1-day-14-application-reflection", "title": "Day 14 Application Reflection",
+        "concepts": ["how-apps-call-models"], "min_chars": 100,
+        "prompt": "Explain how your small AI application works, what you would need to add or change before putting it into a real product, and the safeguards needed to address silent failures.",
+        "points": [
+            "Explains the application's behavior in terms of inputs, model call, and outputs",
+            "Identifies at least two genuine production gaps or safeguards",
+            "Addresses silent failure, validation, oversight, privacy, or reliability concerns specifically",
+        ],
+    },
+    {
+        "day": 15, "key": "level1-day-15-grounded-qa-reflection", "title": "Day 15 Grounded Q&A Reflection",
+        "concepts": ["rag"], "min_chars": 200,
+        "prompt": "In plain language, explain how your bounded document Q&A system works, its two biggest limitations, and the safeguards you would recommend before using it for company policy questions.",
+        "points": [
+            "Explains the grounding mechanism using the supplied document context",
+            "Names at least two specific limitations such as missing context, wrong context, citation errors, or hallucination",
+            "Recommends at least one concrete safeguard appropriate to the deployment stakes",
+        ],
+    },
+    {
+        "day": 19, "key": "level1-day-19-workflow-reflection", "title": "Day 19 Workflow Reflection",
+        "concepts": ["workflows"], "min_chars": 150,
+        "prompt": "Explain your workflow in plain language, identify its two most important scope boundaries, and state where human oversight belongs and why.",
+        "points": [
+            "Describes the workflow's steps and handoffs accurately",
+            "Identifies at least one appropriate scope boundary and one additional boundary or non-use case",
+            "Places human oversight at a specific step and justifies it based on risk or failure modes",
+        ],
+    },
+    {
+        "day": 20, "key": "level1-day-20-evaluation-reflection", "title": "Day 20 Evaluation Reflection",
+        "concepts": ["application-evaluation"], "min_chars": 150,
+        "prompt": "Explain the difference between an AI system that seems to work and one that has been evaluated, and why ongoing evaluation matters in production.",
+        "points": [
+            "Distinguishes impression or anecdotal success from systematic measurement against predefined criteria",
+            "Explains the value of finding known and unknown failure modes",
+            "Connects ongoing evaluation to production stakes, drift, changing inputs, or regression risk",
+        ],
+    },
+]
+
+
+def seed_level1_explain_back_assessments(db: Session, author_user_id: str) -> List:
+    """Provision the authored Level 1 explain-backs through AIL.5C."""
+    graph = ConceptGraphService(db)
+    service = AssessmentDefinitionService(db)
+    created = []
+    for spec in LEVEL1_EXPLAIN_BACK_ASSESSMENTS:
+        if service.current(spec["key"]) is not None:
+            continue
+        criterion_keys = ["length", "rubric"]
+        definition = service.create_draft(
+            author_user_id=author_user_id,
+            definition_key=spec["key"],
+            kind=AssessmentKind.EXPLAIN_BACK,
+            title=spec["title"],
+            instructions_md=(
+                f"{spec['prompt']}\n\n"
+                "This is graded by the separate Grader Agent against the authored rubric. "
+                "The Professor does not grade this submission."
+            ),
+            criteria=[
+                {
+                    "key": "length", "label": "The response meets the authored length", "method": "deterministic",
+                    "required": True, "check": {"type": "length_bounds", "field": "fields.explanation", "min_chars": spec["min_chars"], "max_chars": 6000},
+                },
+                {
+                    "key": "rubric", "label": "The response demonstrates the authored understanding", "method": "grader",
+                    "required": True, "reference_points": spec["points"],
+                    "anchors": {"met": "All required elements are present and grounded in the learner's work", "partial": "Some required elements are present but important gaps remain", "not_met": "The explanation is missing, materially inaccurate, or unsupported"},
+                },
+            ],
+            concept_links=[
+                {"concept_id": graph.get_concept_by_slug(spec["concepts"][0]).id, "criterion_keys": criterion_keys}
+            ],
+            challenge_spec={
+                "entry_kind": "prompt", "draw_size": 1,
+                # AIL.5C requires a 3x authored challenge pool for a draw of
+                # one. These are three keyed instances of the same approved
+                # curriculum prompt, not generated or altered questions.
+                "pool": [
+                    {"entry_key": f"day{spec['day']}-explain-{n}", "prompt_md": spec["prompt"], "reference_points": spec["points"]}
+                    for n in range(1, 4)
+                ],
+                "academy_binding": {"program": "practical-ai-foundations", "day": spec["day"], "learning_item_key": f"level1-v2-day-{spec['day']}"},
+            },
+            grading_policy={"crosscheck": "always"},
+            independence_policy={"fresh_required": "always"},
+            allowed_resources=["The authored lesson", "The learner's own lab/project results"],
+        )
+        created.append(service.publish(definition.id))
+    return created
+
+
+def seed_level1_capstone_assessment(db: Session, author_user_id: str, project_template_id: str):
+    """Publish the next immutable capstone-foundations version for Level 1."""
+    service = AssessmentDefinitionService(db)
+    current = service.current("capstone-foundations")
+    if current is not None and current.project_template_id == project_template_id:
+        return current
+    spec = next(item for item in FOUNDATION_ASSESSMENTS if item["key"] == "capstone-foundations")
+    graph = ConceptGraphService(db)
+    concept_links = []
+    for slug in spec["concepts"]:
+        concept = graph.get_concept_by_slug(slug)
+        if concept is None or graph.get_current_version(concept.id) is None:
+            raise ValueError(f"Missing canonical capstone concept: {slug}")
+        concept_links.append({"concept_id": concept.id, "criterion_keys": [c["key"] for c in spec["criteria"]]})
+    definition = service.create_draft(
+        author_user_id=author_user_id,
+        definition_key=spec["key"], kind=spec["kind"], title=spec["title"],
+        instructions_md=spec["instructions_md"], criteria=spec["criteria"],
+        concept_links=concept_links, challenge_spec=spec.get("challenge"),
+        grading_policy=spec.get("grading"),
+        independence_policy={"fresh_required": "always"},
+        allowed_resources=spec.get("allowed_resources"), project_template_id=project_template_id,
+    )
+    return service.publish(definition.id)
+
+
 def seed_foundation_assessments(db: Session, author_user_id: str) -> List:
     """Idempotently publish the authored set. Raises ``ValueError`` (creating
     nothing) if a referenced Concept or published project template is missing."""

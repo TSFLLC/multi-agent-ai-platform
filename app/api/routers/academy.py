@@ -184,7 +184,7 @@ def get_concept_lesson(concept_id: str, db: Session = Depends(get_db), user: Use
         if not prerequisite_states[prerequisite_id].is_at_least("understood")
     ]
     review = state.review
-    items = sorted(graph.list_learning_items(concept.id), key=lambda item: item.id)
+    items = graph.list_current_learning_items(concept.id)
 
     return AcademyLessonRead(
         concept_id=concept.id,
