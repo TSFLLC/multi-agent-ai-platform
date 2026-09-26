@@ -20,6 +20,18 @@ depends_on: Union[str, Sequence[str], None] = None
 def upgrade() -> None:
     bind = op.get_bind()
     inspector = sa.inspect(bind)
+    table_names = set(inspector.get_table_names())
+    # A prior SQLite batch attempt can leave its private copy behind after the
+    # DROP TABLE of the referenced canonical table is rejected.  The canonical
+    # table is the source of truth; remove only the known temporary object and
+    # refuse to guess if the canonical table is missing.
+    if "_alembic_tmp_learning_items" in table_names:
+        if "learning_items" not in table_names:
+            raise RuntimeError(
+                "Cannot recover Learning Item lineage migration: canonical learning_items table is missing"
+            )
+        op.drop_table("_alembic_tmp_learning_items")
+        inspector = sa.inspect(bind)
     columns = {column["name"] for column in inspector.get_columns("learning_items")}
     if "lineage_id" not in columns:
         op.add_column("learning_items", sa.Column("lineage_id", sa.String(length=36), nullable=True))
@@ -48,32 +60,36 @@ def upgrade() -> None:
     if duplicates:
         raise RuntimeError("Existing Learning Items contain duplicate lineage/version pairs")
 
-    with op.batch_alter_table("learning_items", schema=None) as batch_op:
-        batch_op.alter_column(
-            "lineage_id",
-            existing_type=sa.String(length=36),
-            nullable=False,
-        )
-        batch_op.create_unique_constraint(
-            "uq_learning_items_lineage_version", ["lineage_id", "version"]
-        )
-        batch_op.create_check_constraint(
-            "ck_learning_items_version_positive", "version >= 1"
-        )
+    invalid_versions = bind.execute(
+        sa.text("SELECT COUNT(*) FROM learning_items WHERE version IS NULL OR version < 1")
+    ).scalar_one()
+    if invalid_versions:
+        raise RuntimeError(f"Learning Item lineage backfill found {invalid_versions} invalid version rows")
 
-    op.create_index("ix_learning_items_lineage_id", "learning_items", ["lineage_id"])
+    # SQLite cannot add NOT NULL/CHECK constraints to an existing table
+    # without rebuilding it.  Rebuilding learning_items is unsafe here: the
+    # deployed schema has LearningEvidence, experiments, Academy items,
+    # milestones, and review attempts referencing this table.  Keep the
+    # additive column nullable at the SQLite schema level after proving that
+    # every existing row is populated, and enforce the revision identity with
+    # indexes.  Application writes already require lineage_id/version and the
+    # unique index is the authoritative DB guard for duplicates.
+    indexes = {index["name"] for index in sa.inspect(bind).get_indexes("learning_items")}
+    if "uq_learning_items_lineage_version" not in indexes:
+        op.create_index(
+            "uq_learning_items_lineage_version",
+            "learning_items",
+            ["lineage_id", "version"],
+            unique=True,
+        )
+    if "ix_learning_items_lineage_id" not in indexes:
+        op.create_index("ix_learning_items_lineage_id", "learning_items", ["lineage_id"])
 
 
 def downgrade() -> None:
-    bind = op.get_bind()
-    has_revisions = bind.execute(
-        sa.text("SELECT COUNT(*) FROM learning_items WHERE version > 1")
-    ).scalar_one()
-    if has_revisions:
-        raise RuntimeError("Refusing to remove Learning Item lineage while revisions exist")
-
-    op.drop_index("ix_learning_items_lineage_id", table_name="learning_items")
-    with op.batch_alter_table("learning_items", schema=None) as batch_op:
-        batch_op.drop_constraint("uq_learning_items_lineage_version", type_="unique")
-        batch_op.drop_constraint("ck_learning_items_version_positive", type_="check")
-        batch_op.drop_column("lineage_id")
+    # Removing the column requires the same unsafe SQLite table rebuild.  The
+    # migration is intentionally irreversible once applied; callers must use
+    # a backup/restore procedure rather than risk losing historical references.
+    raise RuntimeError(
+        "Refusing to downgrade Learning Item lineage; restoring a pre-AIL5D backup is required"
+    )
