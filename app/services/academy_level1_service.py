@@ -36,6 +36,7 @@ from app.services.academy_service import AcademyService
 from app.services.learning_evidence_service import LearningEvidenceService
 from app.services.learner_state_service import LearnerStateService
 from app.services.independence_policy import counts_toward_demonstrated, counts_toward_practiced
+from app.services.practical_ai_foundations_provisioning import reconcile_curriculum_relation_corrections
 
 CANONICAL_SLUGS = CANONICAL_FOUNDATIONS_SLUGS
 
@@ -251,6 +252,7 @@ class AcademyLevel1Service:
         calls. No concept is created here, especially no Concept 29.
         """
         created: list[LearningItem] = []
+        reconcile_curriculum_relation_corrections(self.db)
         program = self.db.execute(select(AcademyProgram).where(AcademyProgram.slug == FOUNDATIONS_PROGRAM["slug"])).scalar_one_or_none()
         if program is None:
             try:

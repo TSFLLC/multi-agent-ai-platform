@@ -83,6 +83,23 @@ def test_prerequisite_edges_are_dag_and_evaluation_is_related_to_model_choice(db
         graph.add_relation(from_concept_id=choosing.id, to_concept_id=choosing.id, relation_type=ConceptRelationType.PREREQUISITE)
 
 
+def test_agents_and_workflows_are_co_taught_not_a_schedule_prerequisite(db):
+    provision_practical_ai_foundations(db)
+    agents = db.execute(select(Concept).where(Concept.slug == "agents")).scalar_one()
+    workflows = db.execute(select(Concept).where(Concept.slug == "workflows")).scalar_one()
+    assert db.execute(select(ConceptRelation).where(
+        ConceptRelation.from_concept_id == agents.id,
+        ConceptRelation.to_concept_id == workflows.id,
+        ConceptRelation.relation_type == ConceptRelationType.PREREQUISITE,
+    )).scalar_one_or_none() is None
+    related = db.execute(select(ConceptRelation).where(
+        ConceptRelation.from_concept_id == workflows.id,
+        ConceptRelation.to_concept_id == agents.id,
+        ConceptRelation.relation_type == ConceptRelationType.RELATED,
+    )).scalar_one()
+    assert related.label == "co_taught_with"
+
+
 def test_foundation_seed_consumers_and_professor_can_read_provisioned_concept(db, bootstrap):
     provision_practical_ai_foundations(db)
     program_version = AcademyService(db).seed_foundations_program(bootstrap.user)

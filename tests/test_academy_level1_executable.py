@@ -4,15 +4,23 @@ These tests use the disposable ``db`` fixture and never touch the persistent
 development database.
 """
 
+from types import SimpleNamespace
+
+import pytest
+
 from app.db.enums import AssistanceLevel, ConceptKind, ConceptLevel, EvidenceType, GradingMode, LearningItemType
 from app.models.academy import ProjectMilestone, ProjectTemplate
 from app.models.assessment import AssessmentDefinition
 from app.models.concepts import LearningItem
+from app.models.concepts import Concept, ConceptRelation
+from app.db.enums import ConceptRelationType
 from app.services.academy_level1_service import (
     AcademyLevel1Service, CANONICAL_SLUGS, EXISTING_ASSESSMENT_BINDINGS,
     LEVEL1_CAPSTONE_TEMPLATE_KEY, _authored_knowledge_checks, _day_body,
 )
 from app.services.concept_graph_service import ConceptGraphService
+from app.services.academy_service import AcademyService
+from app.errors import ConflictError
 from app.services.learning_evidence_service import LearningEvidenceService
 from app.services.learner_state_service import LearnerStateService, EXPOSED, PRACTICED
 from app.services.academy_level1_fixtures import ensure_day10, ensure_day14, ensure_day15, ensure_day19, ensure_day20
@@ -44,6 +52,38 @@ def test_provision_binds_exactly_28_concepts_and_is_idempotent(db):
     assert second == []
     assert db.query(LearningItem).filter(LearningItem.version == 2).count() == 30
     assert next(row for row in db.query(LearningItem).all() if (row.spec or {}).get("academy_key") == "level1-v2-day-21").concept.slug == "problem-framing-requirements"
+
+
+def test_level1_repairs_the_previously_seeded_agents_workflows_edge(db):
+    graph = ConceptGraphService(db)
+    for slug in CANONICAL_SLUGS:
+        concept = graph.create_concept(slug=slug, name=slug, level=ConceptLevel.FOUNDATIONAL, kind=ConceptKind.DEFINITIONAL)
+        make_published_version(db, concept=concept)
+    agents = db.query(Concept).filter_by(slug="agents").one()
+    workflows = db.query(Concept).filter_by(slug="workflows").one()
+    graph.add_relation(from_concept_id=agents.id, to_concept_id=workflows.id, relation_type=ConceptRelationType.PREREQUISITE)
+    user = make_user(db)
+    AcademyLevel1Service(db).provision(user)
+    assert db.query(ConceptRelation).filter_by(
+        from_concept_id=agents.id, to_concept_id=workflows.id,
+        relation_type=ConceptRelationType.PREREQUISITE,
+    ).one_or_none() is None
+
+
+def test_original_agents_workflows_edge_reproduces_schedule_conflict_by_slug(db):
+    graph = ConceptGraphService(db)
+    for slug in CANONICAL_SLUGS:
+        concept = graph.create_concept(slug=slug, name=slug, level=ConceptLevel.FOUNDATIONAL, kind=ConceptKind.DEFINITIONAL)
+        make_published_version(db, concept=concept)
+    agents = db.query(Concept).filter_by(slug="agents").one()
+    workflows = db.query(Concept).filter_by(slug="workflows").one()
+    graph.add_relation(from_concept_id=agents.id, to_concept_id=workflows.id, relation_type=ConceptRelationType.PREREQUISITE)
+    items = [
+        SimpleNamespace(concept_id=workflows.id, day=13, position=12, learning_item_id=None),
+        SimpleNamespace(concept_id=agents.id, day=16, position=15, learning_item_id=None),
+    ]
+    with pytest.raises(ConflictError, match="Prerequisite"):
+        AcademyService(db)._validate_items(None, items)
 
 
 def test_opening_lesson_is_exposed_only(db):

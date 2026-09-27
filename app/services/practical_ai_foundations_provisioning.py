@@ -52,6 +52,8 @@ def provision_practical_ai_foundations(db: Session) -> ProvisioningResult:
         ).scalars().all()
     }
 
+    reconcile_curriculum_relation_corrections(db, concepts)
+
     # Resolve identities first.  No authored content is written over an
     # existing Concept row, even if its metadata differs.
     for entry in FOUNDATIONS_CONCEPT_MANIFEST:
@@ -125,6 +127,38 @@ def provision_practical_ai_foundations(db: Session) -> ProvisioningResult:
             result.learning_items_created.append((entry["slug"], item["title"]))
 
     return result
+
+
+def reconcile_curriculum_relation_corrections(db: Session, concepts: dict[str, Concept] | None = None) -> None:
+    """Repair only the previously provisioned relation superseded by V2.
+
+    The original graph seed incorrectly made ``agents`` a hard prerequisite of
+    ``workflows``.  The approved curriculum teaches both in the Day 13 lecture
+    and revisits agent design on Day 16, so that edge conflicts with the frozen
+    Academy schedule.  This narrowly-scoped correction is safe for existing
+    staging graphs and leaves all other graph relations untouched.
+    """
+    if concepts is None:
+        concepts = {
+            concept.slug: concept
+            for concept in db.execute(
+                select(Concept).where(Concept.slug.in_(["agents", "workflows"]))
+            ).scalars().all()
+        }
+    agents = concepts.get("agents")
+    workflows = concepts.get("workflows")
+    if agents is None or workflows is None:
+        return
+    obsolete = db.execute(
+        select(ConceptRelation).where(
+            ConceptRelation.from_concept_id == agents.id,
+            ConceptRelation.to_concept_id == workflows.id,
+            ConceptRelation.relation_type == ConceptRelationType.PREREQUISITE,
+        )
+    ).scalar_one_or_none()
+    if obsolete is not None:
+        db.delete(obsolete)
+        db.commit()
 
 
 def _add_relation_if_absent(db, graph, from_id, to_id, relation_type, result, from_slug, to_slug, label=None):

@@ -47,6 +47,7 @@ def _concept(
     *,
     core: bool = True,
     prerequisites: tuple[str, ...] = (),
+    related: tuple[dict[str, Any], ...] = (),
     items: tuple[dict[str, Any], ...] = (),
 ) -> dict[str, Any]:
     return {
@@ -60,7 +61,7 @@ def _concept(
         "examples_md": examples,
         "evidence_requirements": evidence,
         "prerequisites": list(prerequisites),
-        "related": [],
+        "related": list(related),
         "learning_items": list(items),
     }
 
@@ -246,7 +247,8 @@ FOUNDATIONS_CONCEPT_MANIFEST: list[dict[str, Any]] = [
         "A workflow organizes tasks or steps into a defined execution process. AI may participate in some steps without controlling the entire workflow.",
         "Distinguish deterministic orchestration from model-driven decisions when designing a small workflow.",
         "A defined sequence of tasks with AI participating in selected steps and deterministic orchestration controlling the process.",
-        _lab(), prerequisites=("agents", "tool-calling"),
+        _lab(), prerequisites=("tool-calling",),
+        related=({"slug": "agents", "label": "co_taught_with"},),
         items=(_item("lab", "Design a small workflow", "Design a small workflow and distinguish deterministic orchestration from model-driven decisions."),)),
     _concept("application-evaluation", "Application Evaluation", "practitioner", "operational",
         "Application evaluation measures the whole AI application rather than an isolated model response.",
