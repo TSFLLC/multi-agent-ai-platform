@@ -178,3 +178,98 @@ def test_populated_lineage_migration_preserves_fk_references(tmp_path, monkeypat
         assert conn.execute(text("PRAGMA integrity_check")).scalar_one() == "ok"
         assert conn.execute(text("PRAGMA foreign_key_check")).fetchall() == []
     engine.dispose()
+
+
+def _migration_config(project_root):
+    cfg = Config(str(project_root / "alembic.ini"))
+    cfg.set_main_option("script_location", str(project_root / "alembic"))
+    return cfg
+
+
+def test_lineage_migration_resumes_exact_interrupted_add_column_state(tmp_path, monkeypatch):
+    from app.config import settings
+    from app.db.session import build_engine
+
+    project_root = Path(__file__).resolve().parent.parent
+    db_path = tmp_path / "ail5d-interrupted.db"
+    monkeypatch.setattr(settings, "database_path", db_path)
+    cfg = _migration_config(project_root)
+    command.upgrade(cfg, "ail5c_grader_agent_role")
+    engine = build_engine(f"sqlite:///{db_path.as_posix()}")
+    with engine.begin() as conn:
+        conn.execute(text("INSERT INTO concepts (id, slug, name, level, kind, is_core, created_at) VALUES ('c-i', 'c-i', 'C', 'foundational', 'mechanism', 0, '2026-01-01')"))
+        conn.execute(text("INSERT INTO learning_items (id, concept_id, item_type, title, reviewed, version, created_at) VALUES ('li-i', 'c-i', 'check_question', 'Interrupted', 1, 1, '2026-01-01')"))
+        conn.execute(text("ALTER TABLE learning_items ADD COLUMN lineage_id VARCHAR(36)"))
+    command.upgrade(cfg, "ail5d_learning_item_lineage")
+    with engine.begin() as conn:
+        assert conn.execute(text("SELECT lineage_id FROM learning_items WHERE id = 'li-i'")).scalar_one()
+        assert conn.execute(text("SELECT name FROM sqlite_master WHERE name = 'uq_learning_items_lineage_version'")).first()
+        assert conn.execute(text("PRAGMA foreign_key_check")).fetchall() == []
+    engine.dispose()
+
+
+def test_lineage_migration_resumes_preserving_valid_existing_lineage_ids(tmp_path, monkeypatch):
+    from app.config import settings
+    from app.db.session import build_engine
+
+    project_root = Path(__file__).resolve().parent.parent
+    db_path = tmp_path / "ail5d-partial-backfill.db"
+    monkeypatch.setattr(settings, "database_path", db_path)
+    cfg = _migration_config(project_root)
+    command.upgrade(cfg, "ail5c_grader_agent_role")
+    engine = build_engine(f"sqlite:///{db_path.as_posix()}")
+    existing = "11111111-1111-4111-8111-111111111111"
+    with engine.begin() as conn:
+        conn.execute(text("INSERT INTO concepts (id, slug, name, level, kind, is_core, created_at) VALUES ('c-p', 'c-p', 'C', 'foundational', 'mechanism', 0, '2026-01-01')"))
+        conn.execute(text("INSERT INTO learning_items (id, concept_id, item_type, title, reviewed, version, created_at) VALUES ('li-p1', 'c-p', 'check_question', 'Populated', 1, 1, '2026-01-01')"))
+        conn.execute(text("INSERT INTO learning_items (id, concept_id, item_type, title, reviewed, version, created_at) VALUES ('li-p2', 'c-p', 'scenario', 'Missing', 1, 1, '2026-01-01')"))
+        conn.execute(text("ALTER TABLE learning_items ADD COLUMN lineage_id VARCHAR(36)"))
+        conn.execute(text("UPDATE learning_items SET lineage_id = :lineage WHERE id = 'li-p1'"), {"lineage": existing})
+    command.upgrade(cfg, "ail5d_learning_item_lineage")
+    with engine.begin() as conn:
+        assert conn.execute(text("SELECT lineage_id FROM learning_items WHERE id = 'li-p1'")).scalar_one() == existing
+        assert conn.execute(text("SELECT lineage_id FROM learning_items WHERE id = 'li-p2'")).scalar_one() != existing
+    engine.dispose()
+
+
+def test_lineage_migration_fails_closed_for_incompatible_partial_schema(tmp_path, monkeypatch):
+    from app.config import settings
+    from app.db.session import build_engine
+
+    project_root = Path(__file__).resolve().parent.parent
+    db_path = tmp_path / "ail5d-incompatible.db"
+    monkeypatch.setattr(settings, "database_path", db_path)
+    cfg = _migration_config(project_root)
+    command.upgrade(cfg, "ail5c_grader_agent_role")
+    engine = build_engine(f"sqlite:///{db_path.as_posix()}")
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE learning_items ADD COLUMN lineage_id INTEGER"))
+    with pytest.raises(RuntimeError, match="lineage_id must be VARCHAR\\(36\\)"):
+        command.upgrade(cfg, "ail5d_learning_item_lineage")
+    engine.dispose()
+
+
+def test_lineage_migration_resume_is_idempotent_when_indexes_already_exist(tmp_path, monkeypatch):
+    from app.config import settings
+    from app.db.session import build_engine
+
+    project_root = Path(__file__).resolve().parent.parent
+    db_path = tmp_path / "ail5d-index-boundary.db"
+    monkeypatch.setattr(settings, "database_path", db_path)
+    cfg = _migration_config(project_root)
+    command.upgrade(cfg, "ail5c_grader_agent_role")
+    engine = build_engine(f"sqlite:///{db_path.as_posix()}")
+    with engine.begin() as conn:
+        conn.execute(text("INSERT INTO concepts (id, slug, name, level, kind, is_core, created_at) VALUES ('c-x', 'c-x', 'C', 'foundational', 'mechanism', 0, '2026-01-01')"))
+        conn.execute(text("INSERT INTO learning_items (id, concept_id, item_type, title, reviewed, version, created_at) VALUES ('li-x', 'c-x', 'check_question', 'Indexed', 1, 1, '2026-01-01')"))
+        conn.execute(text("ALTER TABLE learning_items ADD COLUMN lineage_id VARCHAR(36)"))
+        conn.execute(text("UPDATE learning_items SET lineage_id = '22222222-2222-4222-8222-222222222222' WHERE id = 'li-x'"))
+        conn.execute(text("CREATE UNIQUE INDEX uq_learning_items_lineage_version ON learning_items (lineage_id, version)"))
+        conn.execute(text("CREATE INDEX ix_learning_items_lineage_id ON learning_items (lineage_id)"))
+    command.upgrade(cfg, "ail5d_learning_item_lineage")
+    with engine.begin() as conn:
+        names = [row[0] for row in conn.execute(text("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'learning_items'"))]
+        assert names.count("uq_learning_items_lineage_version") == 1
+        assert names.count("ix_learning_items_lineage_id") == 1
+        assert conn.execute(text("PRAGMA foreign_key_check")).fetchall() == []
+    engine.dispose()

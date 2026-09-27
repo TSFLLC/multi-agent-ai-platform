@@ -16,6 +16,28 @@ down_revision: Union[str, None] = "ail5c_grader_agent_role"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
+_LINEAGE_NAMESPACE = uuid.UUID("5d9a3b42-8a61-4cf8-b3e6-0a89d0de5d5d")
+
+
+def _deterministic_lineage_id(item_id: str) -> str:
+    """Return the stable Version-1 lineage for a historical item."""
+
+    return str(uuid.uuid5(_LINEAGE_NAMESPACE, f"learning-item:{item_id}"))
+
+
+def _validate_lineage_column(column: dict) -> None:
+    """Accept only the column shape produced by this migration's safe add."""
+
+    column_type = column["type"]
+    if not isinstance(column_type, sa.String) or column_type.length != 36:
+        raise RuntimeError(
+            "Cannot resume Learning Item lineage migration: lineage_id must be VARCHAR(36)"
+        )
+    if column.get("default") is not None:
+        raise RuntimeError(
+            "Cannot resume Learning Item lineage migration: lineage_id has an unexpected default"
+        )
+
 
 def upgrade() -> None:
     bind = op.get_bind()
@@ -32,18 +54,39 @@ def upgrade() -> None:
             )
         op.drop_table("_alembic_tmp_learning_items")
         inspector = sa.inspect(bind)
-    columns = {column["name"] for column in inspector.get_columns("learning_items")}
-    if "lineage_id" not in columns:
+    learning_item_columns = inspector.get_columns("learning_items")
+    lineage_column = next(
+        (column for column in learning_item_columns if column["name"] == "lineage_id"),
+        None,
+    )
+    if lineage_column is None:
         op.add_column("learning_items", sa.Column("lineage_id", sa.String(length=36), nullable=True))
+    else:
+        # SQLite can persist the ADD COLUMN from the interrupted attempt while
+        # Alembic remains at ail5c. Resume only the exact compatible shape; do
+        # not guess at arbitrary pre-existing lineage schemas.
+        _validate_lineage_column(lineage_column)
 
     rows = bind.execute(
-        sa.text("SELECT id FROM learning_items WHERE lineage_id IS NULL ORDER BY id")
+        sa.text("SELECT id, lineage_id FROM learning_items ORDER BY id")
     ).fetchall()
-    for (item_id,) in rows:
-        bind.execute(
-            sa.text("UPDATE learning_items SET lineage_id = :lineage_id WHERE id = :item_id"),
-            {"lineage_id": str(uuid.uuid4()), "item_id": item_id},
-        )
+    for item_id, lineage_id in rows:
+        if lineage_id is None:
+            bind.execute(
+                sa.text("UPDATE learning_items SET lineage_id = :lineage_id WHERE id = :item_id"),
+                {"lineage_id": _deterministic_lineage_id(item_id), "item_id": item_id},
+            )
+            continue
+        try:
+            parsed_lineage_id = uuid.UUID(str(lineage_id))
+        except (ValueError, AttributeError, TypeError) as exc:
+            raise RuntimeError(
+                f"Cannot resume Learning Item lineage migration: invalid lineage_id for {item_id}"
+            ) from exc
+        if str(parsed_lineage_id) != str(lineage_id).lower():
+            raise RuntimeError(
+                f"Cannot resume Learning Item lineage migration: non-canonical lineage_id for {item_id}"
+            )
 
     null_count = bind.execute(
         sa.text("SELECT COUNT(*) FROM learning_items WHERE lineage_id IS NULL")
