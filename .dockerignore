@@ -14,7 +14,6 @@ data/
 .claude/
 tests/
 frontend/tests/
-docs/
 MULTI_AGENT_PLATFORM_SPEC_V1.1.md
 *.egg-info/
 build/
