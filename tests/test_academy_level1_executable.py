@@ -54,6 +54,37 @@ def test_provision_binds_exactly_28_concepts_and_is_idempotent(db):
     assert next(row for row in db.query(LearningItem).all() if (row.spec or {}).get("academy_key") == "level1-v2-day-21").concept.slug == "problem-framing-requirements"
 
 
+def test_existing_stale_v2_rows_reconcile_without_identity_or_evidence_loss(db):
+    graph = ConceptGraphService(db)
+    for slug in CANONICAL_SLUGS:
+        concept = graph.create_concept(slug=slug, name=slug, level=ConceptLevel.FOUNDATIONAL, kind=ConceptKind.DEFINITIONAL)
+        make_published_version(db, concept=concept)
+    user = make_user(db)
+    service = AcademyLevel1Service(db)
+    service.provision(user)
+    items = {row.spec["day"]: row for row in service._current_academy_items()}
+    ids = {day: row.id for day, row in items.items()}
+    evidence = service.expose(user.id, items[1].id)
+    evidence_count = db.query(type(evidence)).count()
+    agents = db.query(Concept).filter_by(slug="agents").one()
+    workflows = db.query(Concept).filter_by(slug="workflows").one()
+    db.add(ConceptRelation(from_concept_id=agents.id, to_concept_id=workflows.id, relation_type=ConceptRelationType.PREREQUISITE))
+    for row in items.values():
+        row.spec = {"academy_key": row.spec["academy_key"], "day": row.spec["day"], "curriculum": "ail5-level1-practical-ai-foundations-v2", "knowledge_check": []}
+    db.commit()
+
+    service.provision(user)
+    reconciled = {row.spec["day"]: row for row in service._current_academy_items()}
+    assert {day: row.id for day, row in reconciled.items()} == ids
+    assert sum(len((row.spec or {}).get("knowledge_check", [])) for row in reconciled.values()) == 34
+    assert db.query(type(evidence)).count() == evidence_count
+    assert service.validate_level1_contract()["knowledge_checks"] == 34
+
+    service.provision(user)
+    assert {row.spec["day"]: row.id for row in service._current_academy_items()} == ids
+    assert db.query(type(evidence)).count() == evidence_count
+
+
 def test_level1_repairs_the_previously_seeded_agents_workflows_edge(db):
     graph = ConceptGraphService(db)
     for slug in CANONICAL_SLUGS:

@@ -103,6 +103,12 @@ def provision_practical_ai_foundations(db: Session) -> ProvisioningResult:
             target = concepts[related["slug"]]
             _add_relation_if_absent(db, graph, dependent.id, target.id, ConceptRelationType.RELATED, result, entry["slug"], related["slug"], related.get("label"))
 
+    # Fresh graph provisioning creates the manifest's workflows -> agents
+    # relation above.  Run the same narrow correction after identities and
+    # relations exist so the compatibility agents -> workflows edge is also
+    # converged in the first provisioning pass, not only on retry.
+    reconcile_curriculum_relation_corrections(db, concepts)
+
     # LearningItem has no natural-key column.  The stable authored title plus
     # concept and version is the idempotency key; existing rows are never
     # updated.
@@ -158,7 +164,23 @@ def reconcile_curriculum_relation_corrections(db: Session, concepts: dict[str, C
     ).scalar_one_or_none()
     if obsolete is not None:
         db.delete(obsolete)
-        db.commit()
+    related = db.execute(
+        select(ConceptRelation).where(
+            ConceptRelation.from_concept_id == agents.id,
+            ConceptRelation.to_concept_id == workflows.id,
+            ConceptRelation.relation_type == ConceptRelationType.RELATED,
+        )
+    ).scalar_one_or_none()
+    if related is None:
+        ConceptGraphService(db).add_relation(
+            from_concept_id=agents.id,
+            to_concept_id=workflows.id,
+            relation_type=ConceptRelationType.RELATED,
+            label="co_taught_with",
+        )
+    elif related.label != "co_taught_with":
+        related.label = "co_taught_with"
+    db.commit()
 
 
 def _add_relation_if_absent(db, graph, from_id, to_id, relation_type, result, from_slug, to_slug, label=None):

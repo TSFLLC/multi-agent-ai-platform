@@ -61,6 +61,15 @@ def provision(db: Session = Depends(get_db), user: User = Depends(get_current_us
     idem = IdempotencyService(db)
     begun = idem.begin(key, scope=IdempotencyScope.API_REQUEST, resource_type="academy_level1_provision")
     if begun.outcome == BeginOutcome.ALREADY_COMPLETED:
+        # A completed request is not proof that the durable curriculum is
+        # complete: an earlier create-only implementation could have marked
+        # this key complete while leaving stale V2 rows.  Revalidate the
+        # authored contract and converge only when it is incomplete.
+        service = AcademyLevel1Service(db)
+        try:
+            service.validate_level1_contract()
+        except ConflictError:
+            service.provision(user)
         return begun.key_row.result_ref or {"created": 0, "total": 30, "canonical_concepts": 28}
     try:
         created = AcademyLevel1Service(db).provision(user)

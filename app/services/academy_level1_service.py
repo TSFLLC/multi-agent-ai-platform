@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 from app.db.enums import (AssistanceLevel, AcademyProgramItemKind, AcademyProgramVersionStatus,
                           EvidenceType, EvidenceRefType, GradingMode, LearningItemType,
                           ProjectAudienceLevel, ProjectLadderLevel, ProjectTemplateBuildMode,
-                          QuestionOrigin)
+                          QuestionOrigin, ConceptRelationType)
 from app.academy_curriculum import FOUNDATIONS_PROGRAM
 from app.practical_ai_foundations_manifest import CANONICAL_FOUNDATIONS_SLUGS
 from app.errors import ConflictError, NotFoundError
@@ -29,7 +29,7 @@ from app.models.academy import (AcademyProgram, AcademyProgramItem, AcademyProgr
                                  MilestoneAttempt, ProjectAttempt, ProjectMilestone,
                                  ProjectTemplate, ProjectTemplateConceptLink)
 from app.models.assessment import AssessmentAttempt, AssessmentDefinition, AssessmentResult
-from app.models.concepts import Concept, LearningItem
+from app.models.concepts import Concept, ConceptRelation, LearningItem
 from app.models.identity import User
 from app.services.concept_graph_service import ConceptGraphService
 from app.services.academy_service import AcademyService
@@ -291,11 +291,32 @@ class AcademyLevel1Service:
             slug = DAY_SLUGS[day]
             concept = self._concept(slug)
             key = f"level1-v2-day-{day}"
+            item_type = LearningItemType.LAB if day in LAB_DAYS else LearningItemType.RESOURCE
+            spec = {
+                "academy_key": key, "curriculum": "ail5-level1-practical-ai-foundations-v2", "day": day,
+                "week": (day - 1) // 5 + 1, "kind": "lab" if day in LAB_DAYS else "lecture",
+                "objectives": [f"Complete the authored Day {day} learning activity and produce its evidence."],
+                "sections": ["objectives", "prerequisite", "teaching_or_setup", "guided_practice", "knowledge_check", "explain_back", "recap", "evidence", "next_activity"],
+                "execution": LAB_DAYS.get(day, "academy_lecture"),
+                "capstone_stage": CAPSTONE_STAGES.get(day),
+                "engine_binding": {4: "personal_lab_experiment", 5: "personal_lab_experiment", 9: "personal_lab_experiment", 10: "agent_version", 14: "agent_version", 15: "bounded_manual_grounding", 19: "ma7_workflow", 20: "evaluation_or_personal_lab", 29: "assessment_center_grader", 30: "professor_review"}.get(day),
+                "explain_back": {"required": day in AUTHORED_EXPLAIN_BACK_DAYS, "assessment_definition_key": EXISTING_ASSESSMENT_BINDINGS.get(day), "binding_status": "bound" if day in EXISTING_ASSESSMENT_BINDINGS else ("needs_binding" if day in AUTHORED_EXPLAIN_BACK_DAYS else "not_applicable")},
+                "assessment_definition_key": EXISTING_ASSESSMENT_BINDINGS.get(day),
+                "capability_boundary": "real vector RAG deferred to MA9" if day == 15 else None,
+                "body_source": "docs/ail5-level1-practical-ai-foundations-curriculum-v2.md",
+                "knowledge_check": _authored_knowledge_checks(day),
+            }
             existing = next((row for row in self.db.execute(select(LearningItem)).scalars() if (row.spec or {}).get("academy_key") == key and row.version == max(r.version for r in self.db.execute(select(LearningItem)).scalars() if (r.spec or {}).get("academy_key") == key)), None)
             if existing:
+                existing.title = f"Day {day}: {title}"
+                existing.body_md = _day_body(day)
+                existing.spec = spec
+                existing.item_type = item_type
+                existing.reviewed = True
+                existing.est_minutes = 90 if item_type == LearningItemType.LAB else 60
+                existing.grading_mode = GradingMode.DETERMINISTIC if item_type == LearningItemType.LAB else None
                 self._program_item(version, day, existing, title)
                 continue
-            item_type = LearningItemType.LAB if day in LAB_DAYS else LearningItemType.RESOURCE
             spec = {
                 "academy_key": key, "curriculum": "ail5-level1-practical-ai-foundations-v2", "day": day,
                 "week": (day - 1) // 5 + 1, "kind": "lab" if day in LAB_DAYS else "lecture",
@@ -336,10 +357,112 @@ class AcademyLevel1Service:
         ).scalar_one()
         seed_level1_capstone_assessment(self.db, user.id, capstone_template.id)
         seed_level1_explain_back_assessments(self.db, user.id)
+        from app.services.academy_level1_fixtures import ensure_day10, ensure_day14, ensure_day15, ensure_day19, ensure_day20
+        current_items = {row.spec["day"]: row for row in self._current_academy_items()}
+        ensure_day10(self.db, user, current_items[10])
+        ensure_day14(self.db, user, current_items[14])
+        ensure_day15(self.db, user, current_items[15])
+        ensure_day19(self.db, user, current_items[19])
+        ensure_day20(self.db, user, current_items[20])
         if version.status == AcademyProgramVersionStatus.DRAFT:
             self.db.commit()
             AcademyService(self.db).publish_version(user, version.id)
         return created
+
+    def validate_level1_contract(self) -> dict:
+        """Validate the persisted authored Level 1 contract, not row counts."""
+        items = self._current_academy_items()
+        if len(items) != 30 or {row.spec.get("day") for row in items} != set(range(1, 31)):
+            raise ConflictError("Level 1 requires exactly 30 current Academy days")
+        if sum(len((row.spec or {}).get("knowledge_check", [])) for row in items) != 34:
+            raise ConflictError("Level 1 authored knowledge-check bank is incomplete")
+        canonical_present = {
+            slug for slug, in self.db.execute(
+                select(Concept.slug).where(Concept.slug.in_(CANONICAL_SLUGS))
+            ).all()
+        }
+        if canonical_present != set(CANONICAL_SLUGS) or not {row.concept.slug for row in items}.issubset(canonical_present):
+            raise ConflictError("Level 1 is not bound to the canonical 28 concepts")
+        agents = self._concept("agents")
+        workflows = self._concept("workflows")
+        related = self.db.execute(select(ConceptRelation).where(
+            ConceptRelation.from_concept_id == agents.id,
+            ConceptRelation.to_concept_id == workflows.id,
+            ConceptRelation.relation_type == ConceptRelationType.RELATED,
+            ConceptRelation.label == "co_taught_with",
+        )).scalar_one_or_none()
+        prerequisite = self.db.execute(select(ConceptRelation).where(
+            ConceptRelation.from_concept_id == agents.id,
+            ConceptRelation.to_concept_id == workflows.id,
+            ConceptRelation.relation_type == ConceptRelationType.PREREQUISITE,
+        )).scalar_one_or_none()
+        if related is None or prerequisite is not None:
+            raise ConflictError("agents -> workflows must be RELATED/co_taught_with only")
+        # ``eb-structured-output`` is an existing AIL.5C definition owned by
+        # the platform assessment seed; the Level 1 provisioner binds to it
+        # but does not recreate it.  All other Level 1 definitions are seeded
+        # by this curriculum provisioner.
+        required_definitions = set(EXISTING_ASSESSMENT_BINDINGS.values()) - {"eb-structured-output"}
+        present_definitions = {
+            key for key, in self.db.execute(select(AssessmentDefinition.definition_key).where(
+                AssessmentDefinition.definition_key.in_(required_definitions),
+                AssessmentDefinition.status == "published",
+            )).all()
+        }
+        if present_definitions != required_definitions:
+            raise ConflictError("Level 1 Assessment Definitions are incomplete")
+        template = self.db.execute(select(ProjectTemplate).where(
+            ProjectTemplate.template_key == LEVEL1_CAPSTONE_TEMPLATE_KEY,
+            ProjectTemplate.version == 1,
+            ProjectTemplate.status == "published",
+        )).scalar_one_or_none()
+        if template is None or self.db.query(ProjectMilestone).filter_by(project_template_id=template.id).count() != 10:
+            raise ConflictError("Level 1 capstone template/milestones are incomplete")
+        milestones = self.db.query(ProjectMilestone).filter_by(project_template_id=template.id).all()
+        if {m.check_spec.get("academy_day") for m in milestones} != set(range(21, 31)):
+            raise ConflictError("Level 1 capstone stages are incomplete")
+
+        from app.models.tasks import Task
+        from app.models.workflow import Workflow, WorkflowVersion
+        tasks = self.db.query(Task).all()
+        requirements = [task.requirements or {} for task in tasks]
+        fixture_keys = {req.get("academy_fixture") for req in requirements}
+        required_fixtures = {
+            "level1-day10-structured-extraction", "level1-day14-small-ai-application",
+            "level1-day15-bounded-grounding", "level1-day19-agent-handoff-workflow",
+            "level1-day20-broken-system-evaluation",
+        }
+        if not required_fixtures.issubset(fixture_keys):
+            raise ConflictError("Level 1 governed fixture definitions are incomplete")
+        if self.db.query(ProjectTemplate).filter_by(template_key="level1-day14-small-ai-application", version=1, status="published").count() != 1:
+            raise ConflictError("Day 14 Build With Me template is incomplete")
+        workflow = self.db.query(Workflow).filter_by(name="Level 1 Agent Handoff Workflow").one_or_none()
+        if workflow is None or self.db.query(WorkflowVersion).filter_by(workflow_id=workflow.id, status="active").count() < 1:
+            raise ConflictError("Day 19 MA7 workflow definition is incomplete")
+        if not any(req.get("academy_fixture") == "level1-day15-bounded-grounding" and req.get("not_vector_rag") is True for req in requirements):
+            raise ConflictError("Day 15 bounded grounding definition is incomplete")
+        if not any(req.get("academy_fixture") == "level1-day20-broken-system-evaluation" and req.get("requires_baseline_and_improved") is True for req in requirements):
+            raise ConflictError("Day 20 evaluation definition is incomplete")
+
+        program_version = next(
+            (
+                candidate for candidate in self.db.execute(
+                    select(AcademyProgramVersion).where(
+                        AcademyProgramVersion.status == AcademyProgramVersionStatus.PUBLISHED
+                    )
+                ).scalars().all()
+                if (candidate.completion_rules or {}).get("academy_curriculum") == "ail5-level1-practical-ai-foundations-v2"
+            ),
+            None,
+        )
+        if program_version is not None:
+            program_items = list(self.db.execute(select(AcademyProgramItem).where(
+                AcademyProgramItem.program_version_id == program_version.id
+            )).scalars())
+            AcademyService(self.db)._validate_items(program_version, program_items)
+        return {"days": 30, "canonical_concepts": 28, "knowledge_checks": 34,
+                "assessment_definitions": len(present_definitions), "capstone_milestones": 10,
+                "agents_workflows": "related:co_taught_with"}
 
     def _program_item(self, version, day: int, item: LearningItem, title: str) -> None:
         existing = self.db.execute(select(AcademyProgramItem).where(AcademyProgramItem.program_version_id == version.id, AcademyProgramItem.day == day, AcademyProgramItem.learning_item_id == item.id)).scalar_one_or_none()
