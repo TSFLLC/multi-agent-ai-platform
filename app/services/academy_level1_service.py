@@ -364,8 +364,13 @@ class AcademyLevel1Service:
         ensure_day15(self.db, user, current_items[15])
         ensure_day19(self.db, user, current_items[19])
         ensure_day20(self.db, user, current_items[20])
-        if version.status == AcademyProgramVersionStatus.DRAFT:
-            self.db.commit()
+        # Reconciliation also runs against an already-published Level 1
+        # version.  Persist authored-content repairs before returning; the
+        # request transaction must not roll them back merely because there is
+        # no draft version to publish.
+        was_draft = version.status == AcademyProgramVersionStatus.DRAFT
+        self.db.commit()
+        if was_draft:
             AcademyService(self.db).publish_version(user, version.id)
         return created
 
