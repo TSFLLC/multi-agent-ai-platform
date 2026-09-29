@@ -190,7 +190,7 @@ class LearningItem(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
 
     # Fail closed in Python before the database is reached. The database keeps
     # the same contract (NOT NULL / CHECK on create_all databases, triggers on
-    # migrated SQLite databases: see academy_learning_item_lineage).
+    # migrated SQLite databases: see academy_lineage_enforcement).
     @validates("lineage_id")
     def _validate_lineage_id(self, _key: str, value: object) -> str:
         try:

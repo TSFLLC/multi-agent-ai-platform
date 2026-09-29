@@ -234,7 +234,7 @@ def test_lineage_migration_backfills_without_changing_existing_rows(tmp_path, mo
             text("SELECT id, title, body_md, version FROM learning_items ORDER BY id")
         ).fetchall()
 
-    command.upgrade(cfg, "academy_learning_item_lineage")
+    command.upgrade(cfg, "ail5d_learning_item_lineage")
     with engine.begin() as conn:
         after = conn.execute(
             text("SELECT id, title, body_md, version FROM learning_items ORDER BY id")
@@ -323,7 +323,7 @@ def test_populated_lineage_migration_preserves_fk_references(tmp_path, monkeypat
         # Model the SQLite batch-rebuild residue left when the old migration
         # copied rows and then failed while dropping the referenced table.
         conn.execute(text("CREATE TABLE _alembic_tmp_learning_items (id VARCHAR(36) PRIMARY KEY)"))
-    command.upgrade(cfg, "academy_learning_item_lineage")
+    command.upgrade(cfg, "ail5d_learning_item_lineage")
     with engine.begin() as conn:
         assert (
             conn.execute(
@@ -377,7 +377,7 @@ def test_lineage_migration_resumes_exact_interrupted_add_column_state(tmp_path, 
             )
         )
         conn.execute(text("ALTER TABLE learning_items ADD COLUMN lineage_id VARCHAR(36)"))
-    command.upgrade(cfg, "academy_learning_item_lineage")
+    command.upgrade(cfg, "ail5d_learning_item_lineage")
     with engine.begin() as conn:
         assert conn.execute(text("SELECT lineage_id FROM learning_items WHERE id = 'li-i'")).scalar_one()
         assert conn.execute(
@@ -418,7 +418,7 @@ def test_lineage_migration_resumes_preserving_valid_existing_lineage_ids(tmp_pat
         conn.execute(
             text("UPDATE learning_items SET lineage_id = :lineage WHERE id = 'li-p1'"), {"lineage": existing}
         )
-    command.upgrade(cfg, "academy_learning_item_lineage")
+    command.upgrade(cfg, "ail5d_learning_item_lineage")
     with engine.begin() as conn:
         assert (
             conn.execute(text("SELECT lineage_id FROM learning_items WHERE id = 'li-p1'")).scalar_one()
@@ -444,7 +444,7 @@ def test_lineage_migration_fails_closed_for_incompatible_partial_schema(tmp_path
     with engine.begin() as conn:
         conn.execute(text("ALTER TABLE learning_items ADD COLUMN lineage_id INTEGER"))
     with pytest.raises(RuntimeError, match="lineage_id must be VARCHAR\\(36\\)"):
-        command.upgrade(cfg, "academy_learning_item_lineage")
+        command.upgrade(cfg, "ail5d_learning_item_lineage")
     engine.dispose()
 
 
@@ -481,7 +481,7 @@ def test_lineage_migration_resume_is_idempotent_when_indexes_already_exist(tmp_p
             )
         )
         conn.execute(text("CREATE INDEX ix_learning_items_lineage_id ON learning_items (lineage_id)"))
-    command.upgrade(cfg, "academy_learning_item_lineage")
+    command.upgrade(cfg, "ail5d_learning_item_lineage")
     with engine.begin() as conn:
         names = [
             row[0]

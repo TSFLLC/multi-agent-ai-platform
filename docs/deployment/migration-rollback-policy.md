@@ -4,19 +4,45 @@ Alembic `downgrade` is **not** the production rollback mechanism for this
 platform. Rollback is a **restore of the pre-migration backup** of the database
 volume. A migration may therefore be irreversible on purpose.
 
+## Deployed migration history is never rewritten
+
+A revision that has been applied to a hosted database keeps its exact revision id
+and its exact body forever. Anything new it should have done ships as a **new
+forward revision** on top of it. (Renaming a deployed revision makes Alembic fail
+with `Can't locate revision identified by '…'` at deploy time, and the hosted
+entrypoint then never starts the Web/Worker pair.)
+
+## Learning Item lineage: `ail5d_` is a historical name, not a phase
+
+| Revision | Status | What it does |
+|---|---|---|
+| `ail5d_learning_item_lineage` | **Deployed to staging. Never edit or rename.** Irreversible. | Adds `learning_items.lineage_id`, backfills every row with a deterministic uuid5 lineage (Version 1), adds the unique `(lineage_id, version)` index and the lineage index. `lineage_id` stays nullable and there is no `version >= 1` rule (SQLite cannot add them without rebuilding a table that other tables reference). |
+| `academy_lineage_enforcement` | Forward revision (this is what new deployments add). Reversible. | Proves the data is valid, ensures the indexes exist, then enforces `lineage_id IS NOT NULL` and `version >= 1` in the database: SQLite triggers (`trg_learning_items_lineage_insert` / `_update`), or a real NOT NULL + CHECK on other engines. Downgrade removes only what it added. |
+
+The `ail5d_` prefix is a naming accident. **It does not mean the Structured
+Learning Experience (lesson steps, `academy_step_progress`, step-scoped Professor,
+step UI, curriculum v3) has started; it has not.** The revision is Learning Item
+revision infrastructure for the Level 1 Academy.
+
+Both paths reach the same contract: an already-migrated database (staging) runs
+only `academy_lineage_enforcement`; a fresh or pre-AIL5 database runs the whole
+chain including `ail5d_learning_item_lineage` first.
+
 ## Irreversible revisions
 
 | Revision | Why it refuses to downgrade |
 |---|---|
-| `academy_learning_item_lineage` | Adds `learning_items.lineage_id` and the revision lineage that Level 1 Academy content and Review Attempts now reference. Removing the column needs a table rebuild of a table that other tables reference; the lineage is historical evidence. |
+| `ail5d_learning_item_lineage` | Adds `learning_items.lineage_id` and the revision lineage that Level 1 Academy content and Review Attempts now reference. Removing the column needs a table rebuild of a table that other tables reference; the lineage is historical evidence. |
 
 An irreversible revision:
 
-1. declares `IRREVERSIBLE = True` at module level;
-2. has a `downgrade()` whose only action is to raise `RuntimeError` **before
+1. has a `downgrade()` whose only action is to raise `RuntimeError` **before
    touching anything**;
-3. is listed in `EXPECTED_IRREVERSIBLE` in `tests/test_migration_rollback_policy.py`
-   (adding one requires editing that list, i.e. a review decision).
+2. is listed in `EXPECTED_IRREVERSIBLE` in `tests/test_migration_rollback_policy.py`
+   (adding one requires editing that list, i.e. a review decision);
+3. if it is added after this policy, also declares `IRREVERSIBLE = True` at module
+   level. (`ail5d_learning_item_lineage` predates the policy and is deployed, so it
+   is grandfathered without the marker rather than edited to add one.)
 
 `downgrade()` implementations that refuse only *while data exists* (the
 `ail5c_evidence_enum_ext` and `ail5c_grader_agent_role` revisions) are reversible
@@ -31,7 +57,8 @@ and are not affected by this policy.
 4. To roll back: stop the app, restore the backup, redeploy the previous image.
 
 Never run `alembic downgrade` against a real database, and never
-`downgrade base` on `data/multi_agent_platform.db`.
+`downgrade base` on `data/multi_agent_platform.db`. Never run `alembic stamp` or
+edit `alembic_version` by hand to make a deploy pass.
 
 ## Tests that exercise the chain
 

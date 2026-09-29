@@ -18,7 +18,11 @@ ROOT = Path(__file__).resolve().parent.parent
 POLICY_DOC = ROOT / "docs" / "deployment" / "migration-rollback-policy.md"
 
 # Adding a revision here is a review decision: rollback for it is backup/restore.
-EXPECTED_IRREVERSIBLE = {"academy_learning_item_lineage"}
+EXPECTED_IRREVERSIBLE = {"ail5d_learning_item_lineage"}
+# Deployed before the policy existed, so it cannot carry the IRREVERSIBLE marker: editing a
+# deployed migration to add one is exactly what must not happen. Every irreversible revision
+# added AFTER the policy declares ``IRREVERSIBLE = True``.
+GRANDFATHERED_WITHOUT_MARKER = {"ail5d_learning_item_lineage"}
 
 
 def _cfg() -> Config:
@@ -49,7 +53,8 @@ def test_every_unconditionally_refusing_downgrade_is_declared_and_expected():
     script = ScriptDirectory.from_config(_cfg())
     refusing = {r.revision for r in script.walk_revisions() if _downgrade_only_raises(r.path)}
     declared = {r.revision for r in script.walk_revisions() if _declares_irreversible(r.path)}
-    assert refusing == declared == EXPECTED_IRREVERSIBLE
+    assert refusing == EXPECTED_IRREVERSIBLE
+    assert declared == EXPECTED_IRREVERSIBLE - GRANDFATHERED_WITHOUT_MARKER
 
 
 def test_policy_document_names_every_irreversible_revision_and_backup_restore():
@@ -71,6 +76,8 @@ def test_downgrading_an_irreversible_revision_refuses_and_changes_nothing(tmp_pa
     path = tmp_path / "rollback-policy.db"
     monkeypatch.setattr(settings, "database_path", path)
     command.upgrade(_cfg(), "head")
+    # the forward enforcement revision above it IS reversible: it removes only its own triggers
+    command.downgrade(_cfg(), "ail5d_learning_item_lineage")
     engine = build_engine(f"sqlite:///{path.as_posix()}")
     with engine.begin() as conn:
         conn.execute(
@@ -84,12 +91,12 @@ def test_downgrading_an_irreversible_revision_refuses_and_changes_nothing(tmp_pa
             )
         )
     before = _snapshot(engine)
-    with pytest.raises(RuntimeError, match="restoring a pre-lineage backup is required"):
+    with pytest.raises(RuntimeError, match="restoring a pre-AIL5D backup is required"):
         command.downgrade(_cfg(), "-1")
     assert _snapshot(engine) == before
     with engine.begin() as conn:
         assert (
             conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-            == "academy_learning_item_lineage"
+            == "ail5d_learning_item_lineage"
         )
     engine.dispose()

@@ -102,8 +102,8 @@ UI, curriculum v3) has **not** been started.
 
 | # | Correction | Result |
 |---|---|---|
-| 1 | Lineage provenance | Revision `ail5d_learning_item_lineage` renamed to **`academy_learning_item_lineage`** (file, revision id, docstring, tests). `down_revision` unchanged (`ail5c_grader_agent_role`); one linear chain, one head. Only safe because the revision was never pushed or deployed: no remote ref contains it, and no local/rehearsal/backup DB carries the old id. Functionality untouched. |
-| 2 | ORM / migration drift | The database now enforces `lineage_id NOT NULL` and `version >= 1` on migrated SQLite databases with `BEFORE INSERT/UPDATE` triggers (no rebuild of the referenced `learning_items` table); `create_all` databases keep the model's real constraints; other engines get a real NOT NULL + CHECK. `(lineage_id, version)` uniqueness stays a unique index everywhere. The ORM validates in Python and fails closed. Both schema origins are tested against the same raw-SQL invariants. |
+| 1 | Lineage provenance | **Reversed** (see "Follow-up: staging already runs the lineage revision"). The rename to `academy_learning_item_lineage` was wrong: `ail5d_learning_item_lineage` is applied on hosted staging, so deployed history keeps its id and body. The stronger enforcement ships as the new forward revision `academy_lineage_enforcement`. |
+| 2 | ORM / migration drift | (Delivered by the forward revision `academy_lineage_enforcement`, not by editing the deployed one.) The database now enforces `lineage_id NOT NULL` and `version >= 1` on migrated SQLite databases with `BEFORE INSERT/UPDATE` triggers (no rebuild of the referenced `learning_items` table); `create_all` databases keep the model's real constraints; other engines get a real NOT NULL + CHECK. `(lineage_id, version)` uniqueness stays a unique index everywhere. The ORM validates in Python and fails closed. Both schema origins are tested against the same raw-SQL invariants. |
 | 3 | Golden-set gate | `app/assessment_golden.py` + `scripts/ail5c_grader_gate.py`. See below. |
 | 4 | Curriculum outcomes | `curriculum_outcome()` maps internal outcomes to PASS / NEEDS_REVISION / pending states; result views expose it. "Revise once" is definition policy (`grading_policy.max_revisions`). |
 | 5 | Observability | `assessment.deterministic_completed` added; budget-exhaustion pause made explicit and proven. |
@@ -148,8 +148,9 @@ Budget exhaustion was already a retry-safe pause (run refused, nothing written, 
 pending message) and is proven end to end, including resumption on the same attempt.
 
 ### Rollback policy
-Irreversible revisions declare `IRREVERSIBLE = True`, refuse in `downgrade()` before touching
-anything, and are listed in `EXPECTED_IRREVERSIBLE`. Rollback is restoring the pre-migration backup.
+Irreversible revisions refuse in `downgrade()` before touching anything and are listed in
+`EXPECTED_IRREVERSIBLE`; ones added after the policy also declare `IRREVERSIBLE = True` (the deployed
+`ail5d_learning_item_lineage` predates it and is grandfathered rather than edited). Rollback is restoring the pre-migration backup.
 The four historical full-chain downgrade tests still fail at that revision by design (they were already
 failing) and were not edited.
 
@@ -161,7 +162,7 @@ already has that column through the 5B migrations; merging the duplicate would c
 head. Left untouched for a separate cleanup.
 
 ### Validation
-* Alembic: single head `academy_learning_item_lineage`, no branch points, old id gone.
+* Alembic (superseded by the follow-up below): single head, no branch points.
 * Focused (`-k "ail5 or academy or rollback_policy or lineage"`): **314 passed**.
 * Migration/lineage/rollback: 23 passed. Isolation + blindness + API: 31. Golden gate: 18.
   Outcome/revision + observability: 21. Level 1 executable: 12. Frontend: 473 passed.
@@ -170,3 +171,40 @@ head. Left untouched for a separate cleanup.
   (unchanged causes), and 4 full-chain downgrade tests that now stop at the deliberately irreversible
   revision (expected irreversible-migration-policy mismatch; they failed before it existed, on an
   older cause). The two load-sensitive failures seen at `38562dd` did not recur.
+
+## Follow-up: staging already runs the lineage revision
+
+Read-only evidence from the live hosted staging (`/ready` and a read-only SQLite query inside the
+service) showed `alembic_version = ail5d_learning_item_lineage`, integrity ok, 0 foreign-key violations,
+no `_alembic_tmp_*`, `lineage_id` present, 94 Learning Items, 0 NULL lineage, 0 duplicate
+`(lineage_id, version)`. So that revision **is deployed**, and the correction pass's rename would have
+made the deploy fail (`Can't locate revision identified by 'ail5d_learning_item_lineage'`), leaving the
+Web/Worker unstarted. The earlier "never pushed or deployed" conclusion came from git remotes only; staging
+evidently received the code some other way, so remotes are not evidence of what is deployed.
+
+* **Restored:** `alembic/versions/ail5d_learning_item_lineage.py` is byte-identical to its last committed
+  body (`38562dd`), same revision id, same `down_revision` (`ail5c_grader_agent_role`).
+* **New forward revision:** `academy_lineage_enforcement` (down_revision `ail5d_learning_item_lineage`)
+  adds the `NOT NULL` / `version >= 1` enforcement (SQLite triggers, or real constraints elsewhere), ensures
+  the indexes exist, refuses invalid data without changing anything, and is idempotent and reversible.
+* **Graph:** one head, `academy_lineage_enforcement`. An already-migrated database runs only that revision;
+  a fresh or pre-AIL5 database runs the whole chain; both end with an identical lineage contract.
+* **The `ail5d_` name is historical.** It does not mean the Structured Learning Experience has started;
+  it has not. See `docs/deployment/migration-rollback-policy.md`.
+* Which historical body staging ran is not known for certain (the file changed three times; the first
+  version rebuilt the table and could not have succeeded against referenced data). The forward revision is
+  shape-agnostic, so it converges every plausible deployed shape to the same contract.
+
+
+### Follow-up validation
+* Alembic: single head `academy_lineage_enforcement` (32 revisions, no branch points).
+* Focused (`-k "ail5 or academy or rollback_policy or lineage"`): 321 passed. Lineage/migration/rollback: 30.
+  Isolation + blindness + API: 31. Level 1 executable: 12. Golden gate + outcome/revision + observability: 39.
+  Frontend: 473.
+* Full backend suite: **2282 passed, 9 failed** — the same 9 historical baseline ids (4 stale pinned-head
+  assertions, `test_model_policy_via_api`, and 4 full-chain downgrade tests that stop at the irreversible
+  `ail5d_learning_item_lineage`).
+* Paths on scratch copies through the hosted migration step: A (94-item staging-shaped DB at
+  `ail5d_learning_item_lineage`) ran only the forward revision, lineage ids/versions/data unchanged; B (the
+  2026-09-25 snapshot) ran all 8 revisions; C (fresh) ran all 32. Final learning_items DDL, indexes, triggers
+  and enforcement behaviour are identical across A, B and C; a second run re-applies nothing.
