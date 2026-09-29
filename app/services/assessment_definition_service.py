@@ -312,6 +312,7 @@ class AssessmentDefinitionService:
             "mentor_locked_during_attempt": True,
             "time_limit_hours": (defn.grading_policy or {}).get("expiry_hours", 24),
             "retake_cooldown_hours": (defn.grading_policy or {}).get("cooldown_hours", 12),
+            "max_revisions": (defn.grading_policy or {}).get("max_revisions"),
             "concept_ids": [l.concept_id for l in links],
             "criteria": [
                 {

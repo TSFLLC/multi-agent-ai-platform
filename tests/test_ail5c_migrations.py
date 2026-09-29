@@ -23,7 +23,7 @@ from app.db.session import build_engine
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 PREVIOUS_HEAD = "c31b7f4a1a5e"
 R1, R2, R3 = "ail5c_assessment_tables", "ail5c_evidence_enum_ext", "ail5c_grader_agent_role"
-R4 = "ail5d_learning_item_lineage"
+R4 = "academy_learning_item_lineage"
 NOW = "2026-01-01T00:00:00"
 NEW_TABLES = {
     "assessment_definitions",

@@ -18,6 +18,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db
+from app.assessment_outcome import curriculum_outcome
 from app.auth import get_current_user
 from app.db.enums import (
     AssessmentAttemptStatus,
@@ -411,6 +412,8 @@ def _result_view(
             "demonstration_effect": (
                 effective.demonstration_effect.value if effective.demonstration_effect else None
             ),
+            "curriculum_outcome": curriculum_outcome(effective.outcome, effective.demonstration_effect),
+            "revision": service.revision_status(user.id, service.definitions.get(attempt.definition_id)),
             "report": effective.report,
             "gaps": effective.gaps,
             "remediation": effective.remediation,
@@ -418,11 +421,24 @@ def _result_view(
             "record_result_id": record_result.id if record_result is not None else None,
         }
     else:
+        from app.services.assessment_grader_service import AssessmentGraderService
+
+        paused = (
+            AssessmentGraderService(db).pause_reason(user, attempt)
+            if attempt.status == AssessmentAttemptStatus.AWAITING_GRADING
+            else None
+        )
         view["pending"] = {
+            "reason": paused,
             "message": (
-                "The Grader could not finish. Your platform checks are saved and it is safe to try again."
-                if attempt.status == AssessmentAttemptStatus.AWAITING_GRADING
-                else "Your attempt is being checked."
+                "Grading is paused because the grading budget is exhausted. Your submission and platform "
+                "checks are saved; grading resumes when budget is available."
+                if paused == "budget_exhausted"
+                else (
+                    "The Grader could not finish. Your platform checks are saved and it is safe to try again."
+                    if attempt.status == AssessmentAttemptStatus.AWAITING_GRADING
+                    else "Your attempt is being checked."
+                )
             ),
             "deterministic_checks": [
                 {"key": c["key"], "label": c["label"], "finding": c["finding"], "detail": c.get("detail", "")}

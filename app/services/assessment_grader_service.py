@@ -54,6 +54,7 @@ from app.models.artifacts_eval import Artifact
 from app.models.assessment import AssessmentAttempt, AssessmentDefinition, AssessmentResult
 from app.models.execution import ModelCall
 from app.models.identity import Project, User
+from app.models.observability import ExecutionEvent
 from app.models.tasks import AgentRun, Task, TaskRun
 from app.services.assessment_grading_packet import GradingPacket, GradingPacketBuilder, GradingPacketError
 from app.services.flight_recorder import FlightRecorderService
@@ -65,6 +66,11 @@ GRADING_KIND = "assessment_grading_request"
 MAX_RUNS_PER_ROUND = 3
 SLOTS = ("primary", "crosscheck")
 _INVALID_SUFFIX = ":invalid"
+BUDGET_REJECTED_EVENT = "budget.reservation_rejected"
+BUDGET_EXHAUSTED_DETAIL = (
+    "grading is paused because the budget for assessment grading is exhausted; "
+    "your submission and platform checks are saved, and grading resumes when budget is available"
+)
 
 
 @dataclass
@@ -533,7 +539,11 @@ Rules:
                 "provider_failure",
                 run_id=run.id,
                 provider_model_id=model_pm,
-                detail="the grading provider run did not complete",
+                detail=(
+                    BUDGET_EXHAUSTED_DETAIL
+                    if self._budget_rejected(run)
+                    else "the grading provider run did not complete"
+                ),
             )
         artifact = (
             self.db.execute(
@@ -568,6 +578,35 @@ Rules:
             self._mark_invalid(run, task, str(exc))
             return SlotResult(slot, "invalid", run_id=run.id, provider_model_id=model_pm, detail=str(exc))
         return SlotResult(slot, "ok", run_id=run.id, criteria=criteria, provider_model_id=model_pm)
+
+    def _budget_rejected(self, run: AgentRun) -> bool:
+        """The executor refuses a run whose budget reservation would breach the hard
+        threshold (``budget.reservation_rejected``). That is a pause, not a failure of
+        the learner's work: nothing is written and the same round can be resumed."""
+        return (
+            self.db.execute(
+                select(ExecutionEvent.id)
+                .where(
+                    ExecutionEvent.agent_run_id == run.id, ExecutionEvent.event_type == BUDGET_REJECTED_EVENT
+                )
+                .limit(1)
+            ).first()
+            is not None
+        )
+
+    def pause_reason(self, user: User, attempt: AssessmentAttempt) -> Optional[str]:
+        """Why an AWAITING_GRADING attempt is paused, when the platform knows.
+        ``"budget_exhausted"`` if the most recent grading run was refused by the
+        budget governor; otherwise ``None`` (a provider problem, retry-safe)."""
+        project = ensure_ail_system_project(self.db, user)
+        latest = None
+        for task in self._round_tasks(project, attempt.id, 1):
+            run = self._agent_run_for_task(task)
+            if run is not None:
+                latest = run
+        if latest is not None and latest.status != AgentRunStatus.COMPLETED and self._budget_rejected(latest):
+            return "budget_exhausted"
+        return None
 
     def _mark_invalid(self, run: AgentRun, task: Task, reason: str) -> None:
         """Same discipline as the Professor: an unvalidatable answer is a FAILED

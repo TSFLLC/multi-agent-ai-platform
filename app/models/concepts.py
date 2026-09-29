@@ -19,11 +19,12 @@ acyclicity declaratively, the same trade-off already accepted for
 ``job_queue``'s lease/fencing protocol.
 """
 
+import uuid
 from datetime import datetime
 from typing import List, Optional
 
 from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column, relationship, validates
 
 from app.db.base import Base
 from app.db.enums import (
@@ -186,3 +187,22 @@ class LearningItem(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     )
 
     concept: Mapped["Concept"] = relationship(back_populates="learning_items")
+
+    # Fail closed in Python before the database is reached. The database keeps
+    # the same contract (NOT NULL / CHECK on create_all databases, triggers on
+    # migrated SQLite databases: see academy_learning_item_lineage).
+    @validates("lineage_id")
+    def _validate_lineage_id(self, _key: str, value: object) -> str:
+        try:
+            canonical = isinstance(value, str) and str(uuid.UUID(value)) == value.lower()
+        except ValueError:
+            canonical = False
+        if not canonical:
+            raise ValueError("A Learning Item lineage_id must be a canonical UUID string")
+        return value.lower()
+
+    @validates("version")
+    def _validate_version(self, _key: str, value: object) -> int:
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError("A Learning Item version must be an integer >= 1")
+        return value

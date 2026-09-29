@@ -247,3 +247,48 @@ def remediation_for(
     if not steps or not any(s.get("kind") == "retry" for s in steps):
         steps.append(dict(DEFAULT_NEXT_STEP))
     return steps
+
+
+# -- learner-facing curriculum semantics ----------------------------------------------------------------
+#
+# The authored curriculum speaks in two final outcomes, PASS and NEEDS_REVISION.
+# The engine keeps its richer internal outcomes (they drive evidence, review and
+# retry); this pure mapping is the only place they are translated, so a pending
+# review or an unavailable Grader is never reported as a final PASS or
+# NEEDS_REVISION.
+
+CURRICULUM_PASS = "PASS"
+CURRICULUM_NEEDS_REVISION = "NEEDS_REVISION"
+CURRICULUM_PENDING_CONFIRMATION = "PENDING_CONFIRMATION"
+CURRICULUM_PENDING_HUMAN_REVIEW = "PENDING_HUMAN_REVIEW"
+CURRICULUM_UNABLE_TO_ASSESS = "UNABLE_TO_ASSESS"
+CURRICULUM_NOT_COUNTED = "NOT_COUNTED"
+
+_COUNTING_EFFECTS = (
+    DemonstrationEffect.COUNTS_TOWARD_DEMONSTRATED,
+    DemonstrationEffect.COUNTS_TOWARD_PRACTICED_ONLY,
+)
+
+
+def curriculum_outcome(
+    outcome: Optional[AssessmentOutcome], effect: Optional[DemonstrationEffect]
+) -> Dict[str, Any]:
+    """Translate an internal outcome (+ demonstration effect) to curriculum wording.
+
+    ``final`` is True only for PASS and NEEDS_REVISION (and NOT_COUNTED, which is
+    a completed attempt that produced no evidence). Every other state is pending
+    or unable, never a verdict.
+    """
+    if outcome == AssessmentOutcome.PASSED:
+        if effect in _COUNTING_EFFECTS:
+            return {"code": CURRICULUM_PASS, "final": True}
+        return {"code": CURRICULUM_NOT_COUNTED, "final": True}
+    if outcome == AssessmentOutcome.NEEDS_WORK:
+        return {"code": CURRICULUM_NEEDS_REVISION, "final": True}
+    if outcome == AssessmentOutcome.PROVISIONAL:
+        return {"code": CURRICULUM_PENDING_CONFIRMATION, "final": False}
+    if outcome == AssessmentOutcome.HUMAN_REVIEW_REQUIRED:
+        return {"code": CURRICULUM_PENDING_HUMAN_REVIEW, "final": False}
+    if outcome == AssessmentOutcome.UNABLE_TO_ASSESS:
+        return {"code": CURRICULUM_UNABLE_TO_ASSESS, "final": False}
+    return {"code": None, "final": False}

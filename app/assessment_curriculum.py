@@ -327,7 +327,7 @@ FOUNDATION_ASSESSMENTS: List[Dict] = [
         "concepts": ["structured-output"],
         "instructions_md": "Explain your understanding in your own words. Reread your lessons and your own project if you like; AI assistants are not allowed.",
         "allowed_resources": ["Your lessons", "Your own project and results"],
-        "grading": {"crosscheck": "deciding"},
+        "grading": {"crosscheck": "deciding", "max_revisions": 1},
         "criteria": [
             {
                 "key": "long_enough",
@@ -513,7 +513,7 @@ FOUNDATION_ASSESSMENTS: List[Dict] = [
         "template_key": "p4-project-direction",
         "instructions_md": "Show that your project works, then explain and adapt it in fresh work. Assessment Mode applies to the fresh challenge and the explain-back.",
         "allowed_resources": ["Your own project and results", "Your lessons"],
-        "grading": {"crosscheck": "always"},
+        "grading": {"crosscheck": "always", "max_revisions": 1},
         "criteria": [
             {
                 "key": "milestones",
@@ -728,7 +728,7 @@ def seed_level1_explain_back_assessments(db: Session, author_user_id: str) -> Li
                 ],
                 "academy_binding": {"program": "practical-ai-foundations", "day": spec["day"], "learning_item_key": f"level1-v2-day-{spec['day']}"},
             },
-            grading_policy={"crosscheck": "always"},
+            grading_policy={"crosscheck": "always", "max_revisions": 1},
             independence_policy={"fresh_required": "always"},
             allowed_resources=["The authored lesson", "The learner's own lab/project results"],
         )

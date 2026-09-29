@@ -269,6 +269,11 @@ def validate_definition(
         raise DefinitionInvalid("a required AI-judged criterion must be cross-checked")
     if independence_policy.get("fresh_required", "if_assisted") not in FRESH_POLICIES:
         raise DefinitionInvalid("independence_policy.fresh_required is invalid")
+    max_revisions = grading_policy.get("max_revisions")
+    if max_revisions is not None and (
+        isinstance(max_revisions, bool) or not isinstance(max_revisions, int) or not 0 <= max_revisions <= 3
+    ):
+        raise DefinitionInvalid("grading_policy.max_revisions must be an integer from 0 to 3, or absent")
 
     if kind == AssessmentKind.CAPSTONE:
         share = sum(1 for c in required if c["method"] == "deterministic") / len(required)

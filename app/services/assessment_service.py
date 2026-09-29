@@ -276,6 +276,20 @@ class AssessmentService:
             available_at=available_at.isoformat() if available_at else None,
         )
 
+        revision = self.revision_status(user.id, definition)
+        if revision["max_revisions"] is not None:
+            add(
+                "revision_limit",
+                "You have a revision left",
+                not revision["exhausted"],
+                (
+                    ""
+                    if not revision["exhausted"]
+                    else "You have used your revision. Ask for a human review of your result instead."
+                ),
+                review_available=revision["exhausted"],
+            )
+
         fresh_policy = indep.get("fresh_required", "if_assisted")
         source = self._source_work(pa) if pa else {"levels": [], "study_mode_used": False}
         levels = [AssistanceLevel(l) for l in source["levels"]]
@@ -353,6 +367,55 @@ class AssessmentService:
         if effective is None or effective.outcome != AssessmentOutcome.NEEDS_WORK:
             return None
         return aware(last.finalized_at) + timedelta(hours=hours)
+
+    def _needs_work_streak(self, user_id: str, definition_key: str) -> int:
+        """Consecutive most-recent finalized attempts whose EFFECTIVE result is
+        NEEDS_WORK. Any other outcome ends the streak (a pass, or a provisional /
+        review-pending / could-not-assess result that was not the learner's doing),
+        and an attempt a human requested starts a new round."""
+        attempts = (
+            self.db.execute(
+                select(AssessmentAttempt)
+                .join(AssessmentDefinition, AssessmentDefinition.id == AssessmentAttempt.definition_id)
+                .where(
+                    AssessmentAttempt.user_id == user_id,
+                    AssessmentDefinition.definition_key == definition_key,
+                    AssessmentAttempt.status == AssessmentAttemptStatus.FINALIZED,
+                )
+                .order_by(AssessmentAttempt.finalized_at.desc())
+            )
+            .scalars()
+            .all()
+        )
+        streak = 0
+        for attempt in attempts:
+            effective = self.effective_result(attempt.id)
+            if effective is None or effective.outcome != AssessmentOutcome.NEEDS_WORK:
+                break
+            streak += 1
+            if attempt.origin == AssessmentOrigin.HUMAN_REQUESTED:
+                break
+        return streak
+
+    def revision_status(self, user_id: str, definition: AssessmentDefinition) -> Dict[str, Any]:
+        """The definition's revision policy applied to this learner.
+
+        ``max_revisions`` is definition policy (the authored Level 1 curriculum
+        says "revise and resubmit once"); the generic engine has no limit when a
+        definition does not set it. Once the revisions are used up the learner is
+        pointed at human review instead of being told to try again."""
+        max_revisions = (definition.grading_policy or {}).get("max_revisions")
+        if max_revisions is None:
+            return {"max_revisions": None, "used": 0, "remaining": None, "exhausted": False}
+        streak = self._needs_work_streak(user_id, definition.definition_key)
+        used = max(0, streak - 1)
+        exhausted = streak >= max_revisions + 1
+        return {
+            "max_revisions": max_revisions,
+            "used": min(used, max_revisions),
+            "remaining": 0 if exhausted else max_revisions - used,
+            "exhausted": exhausted,
+        }
 
     # -- source work / manifest ------------------------------------------------------------------------------
 
@@ -580,7 +643,9 @@ class AssessmentService:
 
         report = self.readiness(user, definition_key, project_attempt_id=project_attempt_id)
         unmet = [
-            c for c in report["checks"] if not c["met"] and not (bypass_cooldown and c["key"] == "cooldown")
+            c
+            for c in report["checks"]
+            if not c["met"] and not (bypass_cooldown and c["key"] in ("cooldown", "revision_limit"))
         ]
         if unmet:
             raise AssessmentNotReady(
@@ -928,6 +993,19 @@ class AssessmentService:
             facts={"manifest_hash": attempt.input_manifest_hash, "submission_hash": attempt.submission_hash},
         )
         self.db.add(result)
+        self.db.flush()
+        self._audit(
+            user,
+            "assessment.deterministic_completed",
+            attempt,
+            {
+                "result_id": result.id,
+                "criteria": len(rows),
+                "required_unmet": sum(
+                    1 for r in rows if r["required"] and r["finding"] in ("partial", "not_met")
+                ),
+            },
+        )
         self.db.commit()
         self.db.refresh(result)
         return result
