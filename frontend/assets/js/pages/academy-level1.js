@@ -1,11 +1,13 @@
 import { api } from "../api.js";
 import { el, mount } from "../dom.js";
 import { navigate } from "../router.js";
+import { academyEntryLinks, level1AssessmentAction } from "../academyLinks.js";
 
 export async function renderAcademy(root) {
   mount(root, el("section", { class: "page-section academy-page" }, [
     el("h1", {}, ["AI Academy"]),
     el("p", { class: "page-intro" }, ["Practical AI Foundations · 30 days · evidence over completion."]),
+    academyEntryLinks({ current: "level1" }),
     el("div", { class: "academy-content" }, [el("p", {}, ["Loading Academy…"])]),
   ]));
   const content = root.querySelector(".academy-content");
@@ -38,10 +40,17 @@ export async function renderAcademyDay(root, { day }) {
   try {
     const item = await api.get(`/academy/level-1/days/${encodeURIComponent(day)}`);
     await api.post(`/academy/level-1/items/${encodeURIComponent(item.id)}/open`);
+    const assessment = level1AssessmentAction(item);
     const children = [
       el("p", { class: "muted" }, [`Day ${item.day} · Week ${item.week} · ${item.kind === "lab" ? "Personal Lab" : "Lecture"} · ${item.estimated_minutes || 60} min`]),
       el("h1", {}, [item.title]),
+      academyEntryLinks({ current: "level1" }),
       item.capability_boundary ? el("p", { class: "notice" }, [item.capability_boundary]) : null,
+      assessment ? el("section", { class: "card level1-assessment-action" }, [
+        el("h2", {}, [assessment.heading]),
+        el("p", { class: "hint" }, [assessment.hint]),
+        el("a", { class: "button primary", href: assessment.href }, [assessment.label]),
+      ]) : null,
       el("div", { class: "markdown-body" }, [item.body_md || "This authored activity is being prepared."]),
     ];
     if (item.kind === "lab") {

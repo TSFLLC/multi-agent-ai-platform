@@ -1,5 +1,6 @@
 import { api } from "../api.js";
 import { clear, el } from "../dom.js";
+import { academyEntryLinks } from "../academyLinks.js";
 
 const stateLabel = (state) => state ? state.replaceAll("_", " ") : "not started";
 
@@ -88,6 +89,7 @@ export async function renderAcademyLesson(root, params) {
       el("p", { class: "hint" }, `Learning state: ${stateLabel(lesson.learner_state)}${lesson.review_overlays.length ? ` · ${lesson.review_overlays.join(" · ")}` : ""}`),
       el("a", { class: "button-link", href: "#/academy" }, "Back to Academy"),
       el("a", { class: "button-link", href: `#/professor?intent=EXPLAIN_THIS&target_type=concept&target_id=${encodeURIComponent(lesson.concept_id)}` }, "Ask Professor about this concept"),
+      academyEntryLinks({ current: "home" }),
     ]));
     root.appendChild(lessonSection("Plain definition", el("p", {}, lesson.plain_definition)));
     lesson.technical_explanation ? root.appendChild(lessonSection("Technical explanation", el("p", {}, lesson.technical_explanation))) : null;
@@ -123,13 +125,13 @@ export async function renderAcademyHome(root) {
     if (!enrollments.length) {
       const programs = await api.get("/academy/programs");
       clear(root);
-      root.appendChild(el("div", { class: "page-header" }, [el("h1", {}, "AI Academy"), el("p", { class: "subtitle" }, "Build capability through concepts, practice, evidence, and reflection.")]));
+      root.appendChild(el("div", { class: "page-header" }, [el("h1", {}, "AI Academy"), el("p", { class: "subtitle" }, "Build capability through concepts, practice, evidence, and reflection."), academyEntryLinks({ current: "home" })]));
       root.appendChild(el("section", { class: "stack" }, programs.length ? programs.map((program) => el("article", { class: "card" }, [el("h2", {}, program.title), el("p", {}, program.description || ""), el("a", { class: "button-link", href: `#/academy/programs/${encodeURIComponent(program.id)}` }, "View program")])) : [el("div", { class: "empty-state" }, "No published Academy programs are available yet.")]));
       return;
     }
     const details = await Promise.all(enrollments.map((e) => api.get(`/academy/enrollments/${encodeURIComponent(e.id)}`)));
     clear(root);
-    root.appendChild(el("div", { class: "page-header" }, [el("h1", {}, "AI Academy"), el("p", { class: "subtitle" }, "Your learning is measured by evidence, not page views.")]));
+    root.appendChild(el("div", { class: "page-header" }, [el("h1", {}, "AI Academy"), el("p", { class: "subtitle" }, "Your learning is measured by evidence, not page views."), academyEntryLinks({ current: "home" })]));
     root.appendChild(el("div", { class: "stack" }, details.map((detail) => el("article", { class: "card" }, [
       el("div", { class: "row between" }, [el("div", { class: "eyebrow" }, detail.enrollment.status), el("span", { class: "badge badge-neutral" }, `${detail.program.versions[0]?.duration_days || ""} days`)]),
       el("h2", {}, detail.program.title),
@@ -145,7 +147,7 @@ export async function renderAcademyProgram(root, params) {
     const program = await api.get(`/academy/programs/${encodeURIComponent(params.id)}`);
     const version = program.versions.find((v) => v.status === "published") || program.versions[program.versions.length - 1];
     clear(root);
-    root.appendChild(el("div", { class: "page-header" }, [el("h1", {}, program.title), el("p", { class: "subtitle" }, program.description || ""), el("p", { class: "hint" }, `${version?.duration_days || 0} days · version ${version?.version || "draft"}`)]));
+    root.appendChild(el("div", { class: "page-header" }, [el("h1", {}, program.title), el("p", { class: "subtitle" }, program.description || ""), el("p", { class: "hint" }, `${version?.duration_days || 0} days · version ${version?.version || "draft"}`), academyEntryLinks()]));
     const grouped = groupAcademyItems(version?.items || []);
     root.appendChild(el("div", { class: "stack" }, Object.entries(grouped).map(([module, items]) => el("section", { class: "card" }, [el("h2", {}, module), el("div", { class: "stack" }, items.map(itemCard))]))));
   } catch (err) { error(root, err); }
