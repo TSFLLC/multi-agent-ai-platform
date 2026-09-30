@@ -148,7 +148,7 @@ def _progress_row(conn, **over):
 
 def test_there_is_one_head_and_it_sits_on_the_forward_lineage_enforcement_revision():
     script = ScriptDirectory.from_config(_cfg())
-    assert script.get_heads() == [HEAD]  # later slices sit above this revision; this one is exactly one step below the head
+    assert script.get_heads() == ["academy_professor_help"]  # later slices sit above this revision; this one is exactly one step below the head
     assert script.get_revision(HEAD).down_revision == NEW
     revision = script.get_revision(NEW)
     assert revision.down_revision == PREVIOUS

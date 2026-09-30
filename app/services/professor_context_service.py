@@ -8,10 +8,12 @@ or performs arbitrary project search.
 
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional
+from uuid import UUID, uuid5
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.academy_steps import is_structured
 from app.errors import NotFoundError
 from app.models.artifacts_eval import Artifact
 from app.models.execution import ModelCall, ModelRoutingDecision
@@ -140,6 +142,8 @@ class ProfessorContextAssembler:
                 self._assemble_assessment_result(user_id, request.target, records, facts)
             elif request.target.type == ProfessorTargetType.DEVELOPMENT:
                 self._assemble_development(user_id, request.target, records, facts)
+            elif request.target.type == ProfessorTargetType.ACADEMY_STEP:
+                self._assemble_academy_step(user_id, request, records, facts)
 
         for attachment in request.attachments:
             record = self._authorize_attachment(user_id, attachment)
@@ -186,6 +190,8 @@ class ProfessorContextAssembler:
             raise ProfessorContextError("HELP_ME_AFTER_ASSESSMENT requires an assessment result target.")
         if intent == ProfessorIntent.WHY_DOES_THIS_MATTER and target and target.type != ProfessorTargetType.DEVELOPMENT:
             raise ProfessorContextError("WHY_DOES_THIS_MATTER requires a Development target.")
+        if target is not None and target.type == ProfessorTargetType.ACADEMY_STEP and intent != ProfessorIntent.EXPLAIN_THIS:
+            raise ProfessorContextError("An academy_step target is used with EXPLAIN_THIS.")
 
     @staticmethod
     def _add(
@@ -212,6 +218,61 @@ class ProfessorContextAssembler:
         )
         records.append(record)
         return record
+
+    def _assemble_academy_step(
+        self, user_id: str, request: ProfessorContextRequest, records: List[ProfessorContextRecord], facts: Dict[str, Any]
+    ) -> None:
+        """AIL.5D.4: the minimum useful context for helping ONE learner with ONE authored step.
+
+        Everything comes from ``AcademyStepService.professor_view``, the single place authored private material is read,
+        and only once the learner is eligible to see it. Learner responses are limited to this step (and, for a
+        reflection, the earlier step it explicitly compares to)."""
+        from app.academy_curriculum import FOUNDATIONS_PROGRAM
+        from app.academy_professor import HelpRequest, decide_level, describe, mode_for_step, solution_eligible
+        from app.services.academy_step_service import AcademyStepService
+
+        target = request.target
+        view = AcademyStepService(self.db).professor_view(user_id, target.id, target.step_key)
+        item, step, learner = view["item"], view["step"], view["learner"]
+        help_request = HelpRequest(request.help or "ask")
+        mode = mode_for_step(step)
+        eligible = solution_eligible(step, view["state"])
+        level = decide_level(mode, help_request, view["prior_hints"], eligible)
+        revealed = bool(view["reveal"] or view["rationales"])
+        facts["assistance"] = {**describe(mode, level, help_request, prior_hints=view["prior_hints"], eligible=eligible, step_type=step["type"]), "revealed_solution": revealed}
+        facts["academy_step"] = {
+            "program": FOUNDATIONS_PROGRAM["title"], "day": item["day"], "week": item["week"], "item_version": item["version"],
+            "step": {"key": step["key"], "type": step["type"], "title": step["title"], "required": step["required"], "position": step["position"], "status": learner["status"]},
+            "progress": view["progress"], "outline": view["outline"],
+        }
+
+        def ref(*parts: str) -> str:
+            return str(uuid5(UUID(item["id"]), ":".join(parts)))
+
+        concept = self._concepts.get_concept(item["concept_id"])
+        version = self._concepts.get_current_version(item["concept_id"])
+        if concept is not None and version is not None:
+            self._add(records, "concept", concept.id, "concept", ProfessorProvenanceKind.LEARNING_RECORD,
+                      data=_model_data(concept, ["slug", "name", "level", "kind"]))
+            self._add(records, "concept_version", version.id, "current_concept_version", ProfessorProvenanceKind.LEARNING_RECORD,
+                      data=_model_data(version, ["version", "plain_definition", "technical_explanation"]))
+        self._add(records, "academy_day", item["id"], "day_outline", ProfessorProvenanceKind.LEARNING_RECORD,
+                  data={"title": item["title"], "day": item["day"], "week": item["week"], "version": item["version"], "outline": view["outline"], "vocabulary": view["vocabulary"]})
+        self._add(records, "academy_step", ref(step["key"]), "current_step", ProfessorProvenanceKind.LEARNING_RECORD,
+                  data={"step": step, "learner": {k: v for k, v in learner.items() if k != "response"}})
+        if learner.get("response") is not None:
+            self._add(records, "academy_step_response", ref(step["key"], "response"), "learner_response_to_this_step",
+                      ProfessorProvenanceKind.USER_AUTHORED_CONCLUSION, data={"step_key": step["key"], "response": learner["response"]})
+        if view["compare_to"] and view["compare_to"]["response"] is not None:
+            earlier = view["compare_to"]
+            self._add(records, "academy_step_response", ref(earlier["key"], "response"), "earlier_response_this_step_compares_to",
+                      ProfessorProvenanceKind.USER_AUTHORED_CONCLUSION, data={"step_key": earlier["key"], "title": earlier["title"], "response": earlier["response"]})
+        if view["reveal"] is not None:
+            self._add(records, "academy_reveal", ref(step["key"], "reveal"), "authored_reveal_the_learner_has_seen",
+                      ProfessorProvenanceKind.LEARNING_RECORD, data={"step_key": step["key"], **view["reveal"]})
+        if view["rationales"] is not None:
+            self._add(records, "academy_rationale", ref(step["key"], "rationale"), "authored_rationale_released_after_a_pass",
+                      ProfessorProvenanceKind.LEARNING_RECORD, data={"step_key": step["key"], "rationales": view["rationales"]})
 
     def _assemble_concept(
         self, user_id: str, target: ProfessorTarget, records: List[ProfessorContextRecord], facts: Dict[str, Any]
@@ -266,13 +327,20 @@ class ProfessorContextAssembler:
 
         items = self._concepts.list_current_learning_items(concept.id)
         for item in items[:20]:
+            item_data = _model_data(item, ["concept_id", "item_type", "title", "body_md", "grading_mode", "reviewed", "version", "est_minutes"])
+            # AIL.5D.4: a legacy Academy Day body was authored with the answer reveals and the AIL.5C Grader's reference
+            # points inline, so it is never handed to the Professor. A structured Day's body is rebuilt from public step
+            # content only and stays available.
+            spec = item.spec or {}
+            if spec.get("academy_key") and not is_structured(spec):
+                item_data["body_md"] = None
             self._add(
                 records,
                 "learning_item",
                 item.id,
                 "learning_item",
                 ProfessorProvenanceKind.LEARNING_RECORD,
-                data=_model_data(item, ["concept_id", "item_type", "title", "body_md", "grading_mode", "reviewed", "version", "est_minutes"]),
+                data=item_data,
             )
 
         state = self._states.state(user_id, concept.id)

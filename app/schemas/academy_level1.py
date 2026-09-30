@@ -59,6 +59,8 @@ class Level1EvidenceRead(BaseModel):
     learner_state: str
     passed: Optional[bool] = None
     results: Optional[List[dict]] = None
+    # AIL.5D.4: learning feedback after an unsuccessful STRUCTURED knowledge check (never answers); null otherwise.
+    feedback: Optional[Dict[str, Any]] = None
     # AIL.5D.2: a structured Day is only opened, never completed, by /open.
     opened: Optional[bool] = None
     evidence_recorded: Optional[bool] = None
@@ -186,6 +188,17 @@ class Level1RevealRead(BaseModel):
     step_key: str
     reveal_md: Optional[str] = None
     claims: Optional[Dict[str, Any]] = None
+
+
+class Level1StepProfessorRequest(BaseModel):
+    """AIL.5D.4: ask the step-scoped AI Professor. The learner and step come from the URL and session; the mode and the
+    help level are chosen by the server, never by this body."""
+
+    question: Optional[str] = Field(default=None, max_length=2000)
+    help: str = Field(default="ask", pattern="^(ask|hint)$")
+
+    class Config:
+        extra = "forbid"
 
 
 class Level1StepProgressRead(BaseModel):

@@ -1,5 +1,6 @@
 """AIL.4C Professor orchestration over the normal Agent execution engine."""
 
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -13,7 +14,7 @@ from app.db.enums import AgentRunRole, AgentRunStatus, ExecutionMode, TaskRunSta
 from app.errors import ConflictError, ForbiddenError, NotFoundError
 from app.models.agents import Agent, AgentVersion, PromptVersion
 from app.models.artifacts_eval import Artifact
-from app.models.concepts import Concept
+from app.models.concepts import Concept, LearningItem
 from app.models.governance import Budget
 from app.models.identity import Project, User
 from app.models.lab import Experiment
@@ -173,6 +174,11 @@ class ProfessorExecutionService:
                 attempt = self.db.get(ReviewAttempt, target.id)
                 if attempt is not None and attempt.user_id == user.id:
                     concept_ids.append(attempt.concept_id)
+            elif target.type == ProfessorTargetType.ACADEMY_STEP:
+                # AIL.5D.4: step help is held for the Concept of the Day exactly like Concept help: AIL.5D cannot weaken the lock.
+                item = self.db.get(LearningItem, target.id)
+                if item is not None:
+                    concept_ids.append(item.concept_id)
             elif target.type == ProfessorTargetType.ASSESSMENT_RESULT:
                 from app.models.assessment import AssessmentAttempt, AssessmentDefinitionConcept, AssessmentResult
 
@@ -201,7 +207,7 @@ class ProfessorExecutionService:
         agent_version = self._ensure_professor_agent(project)
         budget_id = self._authorized_budget(user, project, request.budget_id)
 
-        question = request.question or self._default_question(request.intent)
+        question = request.question or self._default_question(request.intent, context)
         requirements = {
             PROFESSOR_CONTEXT_KEY: context.model_dump(mode="json"),
             "context_truncated": truncated,
@@ -245,7 +251,62 @@ class ProfessorExecutionService:
         except Exception as exc:  # noqa: BLE001 - execution service persists categorized failure state
             self.db.rollback()
             return self._read_interaction(task_run.id, user, fallback_error=("execution_error", str(exc)))
-        return self._read_interaction(task_run.id, user)
+        result = self._read_interaction(task_run.id, user)
+        if result.status == "complete" and request.intent == ProfessorIntent.EXPLAIN_THIS:
+            self._record_step_help(user, context, result)
+        return result
+
+    # What the step Professor can never see, stated to the learner (kept in one place so the UI and the tests agree).
+    STEP_HELP_CANNOT_SEE = (
+        "answers you have not earned yet", "the assessment's grading material", "other learners", "your responses on other steps",
+    )
+
+    def step_help_status(self, user: User, item_id: str, step_key: str) -> dict:
+        """What the learner may be told before asking: the mode, the level the next hint would be, what the Professor can
+        see, and whether it is paused by an open AIL.5C assessment. Read-only; writes nothing."""
+        from app.schemas.professor import ProfessorTarget
+
+        request = ProfessorContextRequest(
+            intent=ProfessorIntent.EXPLAIN_THIS, target=ProfessorTarget(type=ProfessorTargetType.ACADEMY_STEP, id=item_id, step_key=step_key), help="hint",
+        )
+        context = ProfessorContextAssembler(self.db).assemble(user.id, request)   # raises the stale-version / not-found errors
+        try:
+            self._assert_not_in_assessment_mode(user, request)
+            paused = None
+        except ConflictError as exc:
+            paused = exc.message
+        facts = context.deterministic_facts
+        return {
+            "mode": facts["assistance"]["mode"], "next_hint_level": facts["assistance"]["level"], "prior_hints": facts["assistance"]["prior_hints"],
+            "solution_eligible": facts["assistance"]["solution_eligible"], "available": paused is None, "paused_reason": paused,
+            "knows": [r.role.replace("_", " ") for r in context.records], "cannot_see": list(self.STEP_HELP_CANNOT_SEE),
+        }
+
+    def _record_step_help(self, user: User, context: ProfessorContext, result: ProfessorInteractionRead) -> None:
+        """AIL.5D.4: audit delivered step help (mode, level, H-level, what the Professor was given). Never evidence."""
+        assistance = context.deterministic_facts.get("assistance")
+        step = context.deterministic_facts.get("academy_step")
+        if not assistance or not step or context.target is None or context.target.step_key is None:
+            return
+        from app.academy_professor import HelpLevel, HelpRequest, ProfessorMode, assistance_for
+        from app.models.academy import AcademyProfessorHelp
+
+        item = self.db.get(LearningItem, context.target.id)
+        record = next((r for r in context.records if r.ref_type == "academy_step"), None)
+        if item is None or record is None:
+            return
+        mode, level = ProfessorMode(assistance["mode"]), HelpLevel(assistance["level"])
+        digest = hashlib.sha256(json.dumps(context.model_dump(mode="json"), sort_keys=True, default=str).encode("utf-8")).hexdigest()
+        from app.academy_steps import public_steps
+
+        fingerprint = next((s["fingerprint"] for s in public_steps(item.spec) or [] if s["key"] == context.target.step_key), "")
+        self.db.add(AcademyProfessorHelp(
+            user_id=user.id, learning_item_id=item.id, lineage_id=item.lineage_id, step_key=context.target.step_key, step_fingerprint=fingerprint,
+            mode=mode, request_kind=HelpRequest(assistance["request"]), help_level=level,
+            assistance_level=assistance_for(mode, level, revealed_solution=bool(assistance.get("revealed_solution"))),
+            revealed_solution=bool(assistance.get("revealed_solution")), interaction_id=result.interaction_id, context_sha256=digest,
+        ))
+        self.db.commit()
 
     def read_interaction(self, user: User, interaction_id: str) -> ProfessorInteractionRead:
         return self._read_interaction(interaction_id, user)
@@ -262,6 +323,10 @@ class ProfessorExecutionService:
         prior_context = requirements
         if not prior_context.get(PROFESSOR_CONTEXT_KEY):
             raise NotFoundError("Professor interaction context is unavailable.")
+        if (prior_context[PROFESSOR_CONTEXT_KEY].get("deterministic_facts") or {}).get("assistance"):
+            # AIL.5D.4: step help is re-assembled from the current step, never replayed from a stored context, so the
+            # help ladder, eligibility and the version check cannot be bypassed by continuing an old interaction.
+            raise ConflictError("Ask for help from the step itself; step help cannot be continued.", detail={"code": "step_help_not_continuable"})
         # The continuation is explicit and bounded: only this immediate
         # interaction's answer is made available, never an old transcript.
         artifact = self._artifact_for(prior)
@@ -403,6 +468,8 @@ class ProfessorExecutionService:
 
 Return exactly one JSON object matching the canonical ProfessorResponse JSON Schema below. Return ONLY that object: no Markdown fences, prose, alternate intent-specific schema, status field, topic field, question field, evidence_used field, learner_conclusion field, state_changes field, or other extra field. Every required field must be present. `suggested_next_actions` must contain objects with exactly the schema-defined fields, never strings. Use null for nullable fields and empty arrays when there are no items.
 
+If deterministic_facts.assistance is present this is step-scoped help for one lesson step: follow assistance.mode, assistance.level and assistance.instructions exactly. Never reveal, confirm or rule out an answer the learner has not earned, and never write the learner's own response for them.
+
 Never invent evidence or IDs. Preserve conflict groups and the learner's conclusion through the canonical evidence, grounded_assertions, uncertainties, and attachment_references fields. AI explanations are not canonical evidence. All actions are advisory. Never claim mastery or change learning, review, experiment, Radar, or plan state. Do not reveal hidden reasoning.
 
 CANONICAL_PROFESSOR_RESPONSE_JSON_SCHEMA:
@@ -431,7 +498,10 @@ CANONICAL_PROFESSOR_RESPONSE_JSON_SCHEMA:
         return policy
 
     @staticmethod
-    def _default_question(intent: ProfessorIntent) -> str:
+    def _default_question(intent: ProfessorIntent, context: Optional[ProfessorContext] = None) -> str:
+        assistance = (context.deterministic_facts.get("assistance") if context is not None else None) or None
+        if assistance:
+            return "Give me a hint for this step." if assistance.get("request") == "hint" else "Help me understand this step."
         return {
             ProfessorIntent.WHAT_SHOULD_I_LEARN_NEXT: "What should I learn next based on my current AIL state?",
             ProfessorIntent.WHY_DOES_THIS_MATTER: "Why does this matter to my learning?",
@@ -496,7 +566,18 @@ CANONICAL_PROFESSOR_RESPONSE_JSON_SCHEMA:
             attachment_references=response.attachment_references if response else [],
             error_kind=error_kind,
             error_message=error_message,
+            assistance=self._assistance_view((task.requirements or {}).get(PROFESSOR_CONTEXT_KEY, {})),
         )
+
+    @staticmethod
+    def _assistance_view(context: dict) -> Optional[dict]:
+        """What the learner may be told about step help: its mode, level and kind. Never the instructions or any content."""
+        facts = context.get("deterministic_facts") or {}
+        assistance, step = facts.get("assistance"), facts.get("academy_step")
+        if not assistance or not step:
+            return None
+        return {"mode": assistance["mode"], "level": assistance["level"], "request": assistance["request"],
+                "step_key": step["step"]["key"], "prior_hints": assistance["prior_hints"]}
 
     @staticmethod
     def _safe_provider_error(kind: str, message: Optional[str], error: Optional[dict]):

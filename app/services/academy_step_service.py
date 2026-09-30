@@ -11,8 +11,9 @@ Rules it enforces
 * ``open`` records "the learner viewed this step" and can never produce completion.
 * ``complete`` succeeds for a self-completable step (teach, example) on the learner's explicit Continue. An
   interactive step completes only when the SERVER verifies its own interaction from persisted records (AIL.5D.3): a
-  valid saved response (reflect, reflection, explain_back outline), a committed answer (think), or the canonical
-  knowledge-check evidence (check). The client never states that a step is complete; a ``lab`` step cannot complete
+  valid saved response (reflect, reflection, explain_back outline), a committed answer (think), or a PASSED canonical
+  knowledge-check evidence row (check; AIL.5D.4: an unsuccessful attempt is recorded and can be retried, it never
+  completes the step). The client never states that a step is complete; a ``lab`` step cannot complete
   until the Lab slice. A ``VerifiedCompletion`` can still be supplied by trusted server code, never by a request.
 * Learner responses (AIL.5D.3) are append-only, owned by the learner, bound to the exact item version, and private.
   A ``think`` answer is committed once and the authored reveal is only served after that commit.
@@ -40,7 +41,7 @@ from app.academy_steps import SELF_COMPLETABLE, STEP_SCHEMA_VERSION, StepType, i
 from app.db.enums import AcademyStepResponseKind, AcademyStepStatus, EvidenceType, GradingMode
 from app.db.mixins import utcnow
 from app.errors import ConflictError, InvalidResponseError, NotFoundError
-from app.models.academy import AcademyStepProgress, AcademyStepResponse
+from app.models.academy import AcademyProfessorHelp, AcademyStepProgress, AcademyStepResponse
 from app.models.concepts import LearningItem
 from app.models.learner import LearningEvidence
 from app.services.concept_graph_service import ConceptGraphService
@@ -328,6 +329,15 @@ class AcademyStepService:
         step = self._step(item, step_key)
         return {"step_key": step_key, "response": self._response_view(step, self._latest_responses(user_id, item, step))}
 
+    @staticmethod
+    def _reveal_payload(step: dict, private: dict, mine: dict) -> Dict[str, Any]:
+        if "statements" in step["content"]:
+            return {"claims": {
+                sid: {"answer": c["answer"], "why_md": c["why_md"], "matched": mine["statements"][sid]["choice"] == c["answer"]}
+                for sid, c in private["claims"].items()
+            }}
+        return {"reveal_md": private["reveal_md"]}
+
     def reveal(self, user_id: str, item_id: str, step_key: str) -> Dict[str, Any]:
         """The authored reveal of a ``think`` step, served only after THIS learner committed an answer. The only path
         by which ``private`` content is ever returned, and it is explicitly scoped to the committed learner and step."""
@@ -342,13 +352,7 @@ class AcademyStepService:
         private = self._raw_step(item, step_key)["private"]
         if (AcademyStepResponseKind.NOTE, "reveal-viewed") not in latest:
             self._append(user_id, item, step, [_NoteViewed])
-        if "statements" in step["content"]:
-            claims = {
-                sid: {"answer": c["answer"], "why_md": c["why_md"], "matched": mine["statements"][sid]["choice"] == c["answer"]}
-                for sid, c in private["claims"].items()
-            }
-            return {"step_key": step_key, "claims": claims}
-        return {"step_key": step_key, "reveal_md": private["reveal_md"]}
+        return {"step_key": step_key, **self._reveal_payload(step, private, mine)}
 
     # -- knowledge check (the existing canonical mechanism) --------------------------------------------------------------
 
@@ -368,6 +372,20 @@ class AcademyStepService:
         part = _Part(AcademyStepResponseKind.ANSWER, "", {"answers": answers, "passed": bool(evidence.passed)})
         self._append(user_id, item, step, [part], ref_type="learning_evidence", ref_id=evidence.id)
 
+    def check_feedback(self, user_id: str, item: LearningItem, passed: bool, results: List[dict]) -> Optional[Dict[str, Any]]:
+        """Learning feedback after an unsuccessful structured knowledge check. It says how far the learner is and that they
+        can retry, and deliberately withholds the answers and the authored rationale (released once every item is right)
+        so that retrying remains meaningful. None for a pass and for any non-structured item."""
+        if passed or not is_structured(item.spec):
+            return None
+        incorrect = [r["id"] for r in results if not r["passed"]]
+        return {
+            "message": "Not quite. Review the scenarios marked incorrect, think about what makes each one AI or ordinary software, "
+                       "and try again. The explanations unlock when every item is right.",
+            "incorrect_item_ids": incorrect, "incorrect": len(incorrect), "total": len(results),
+            "attempt": len(self._kc_evidence(user_id, item)), "retry_allowed": True,
+        }
+
     def _check_view(self, user_id: str, item: LearningItem) -> Dict[str, Any]:
         public = [{k: v for k, v in q.items() if k not in ("answer", "explanation", "pass_criteria")} for q in (item.spec or {}).get("knowledge_check", [])]
         rows = self._kc_evidence(user_id, item)
@@ -376,7 +394,7 @@ class AcademyStepService:
         if rows:
             last = rows[-1]
             score = last.score or {}
-            result = {"submitted": True, "attempts": len(rows), "passed": bool(last.passed), "score": {"raw": score.get("raw"), "max": score.get("max")}, "items": [{"id": i.get("id"), "passed": i.get("passed")} for i in score.get("items", [])]}
+            result = {"submitted": True, "attempts": len(rows), "passed": bool(last.passed), "ever_passed": any(r.passed for r in rows), "score": {"raw": score.get("raw"), "max": score.get("max")}, "items": [{"id": i.get("id"), "passed": i.get("passed")} for i in score.get("items", [])]}
             if any(r.passed for r in rows):
                 # The authored rationale is revealed only once the check has been passed, so it cannot be used to copy answers.
                 review = [{"id": q["id"], "explanation": q.get("explanation")} for q in (item.spec or {}).get("knowledge_check", [])]
@@ -387,8 +405,11 @@ class AcademyStepService:
     def _verify(self, user_id: str, item: LearningItem, step: dict) -> Optional[VerifiedCompletion]:
         t = StepType(step["type"])
         if t == StepType.CHECK:
-            rows = self._kc_evidence(user_id, item)
-            return VerifiedCompletion("knowledge_check_evidence", rows[-1].id) if rows else None
+            # AIL.5D.4: a knowledge check is practice, not assessment, but it is still where a misunderstanding is
+            # corrected. Only the authored success condition (every item right, recorded by the existing checker as
+            # passed evidence) satisfies the step; failed attempts stay in the history and the learner may retry.
+            passed = [r for r in self._kc_evidence(user_id, item) if r.passed]
+            return VerifiedCompletion("knowledge_check_passed", passed[-1].id) if passed else None
         if t in (StepType.REFLECT, StepType.REFLECTION, StepType.THINK, StepType.EXPLAIN_BACK):
             latest = self._latest_responses(user_id, item, step)
             if self._response_view(step, latest) is None:
@@ -397,6 +418,76 @@ class AcademyStepService:
             newest = max((r for k, r in latest.items() if k[0] != AcademyStepResponseKind.NOTE), key=lambda r: r.created_at)
             return VerifiedCompletion(kind, newest.id)
         return None  # lab: only the Lab slice can verify it
+
+    # -- step-scoped Professor (AIL.5D.4) ------------------------------------------------------------------------------------
+
+    def help_history(self, user_id: str, item: LearningItem, step: dict) -> List[AcademyProfessorHelp]:
+        """This learner's delivered Professor help on this step (same definition), oldest first."""
+        return list(self.db.execute(select(AcademyProfessorHelp).where(
+            AcademyProfessorHelp.user_id == user_id, AcademyProfessorHelp.lineage_id == item.lineage_id,
+            AcademyProfessorHelp.step_key == step["key"], AcademyProfessorHelp.step_fingerprint == step["fingerprint"],
+        ).order_by(AcademyProfessorHelp.created_at)).scalars())
+
+    def professor_view(self, user_id: str, item_id: str, step_key: str) -> Dict[str, Any]:
+        """Everything the step-scoped Professor may know, and nothing else. This is the single place where authored
+        private material is read for the Professor, and it is only included once the learner is eligible to see it:
+
+        * the think reveal   - only after THIS learner committed an answer AND was served the reveal;
+        * the check rationale - only after THIS learner passed the check;
+        * never an answer key, never the AIL.5C rubric, never another learner's data, never a response from an unrelated
+          step (the one exception is the earlier step a reflection is explicitly asked to compare to).
+
+        Raises the same stale-version conflict as every other step operation, so a stale item yields no context."""
+        item = self._item(item_id)
+        step = self._step(item, step_key)
+        steps = self._steps(item)
+        progress = self.progress(user_id, item.id)
+        status = {s["key"]: s["status"] for s in progress["steps"]}
+        latest = self._latest_responses(user_id, item, step)
+        mine = self._response_view(step, latest)
+        t = StepType(step["type"])
+        state: Dict[str, Any] = {"committed": mine is not None if t == StepType.THINK else False, "passed": False}
+        public = {k: step[k] for k in ("key", "position", "type", "title", "required", "estimated_minutes", "content", "binding") if k in step}
+        learner: Dict[str, Any] = {"status": status[step_key]}
+        reveal = rationales = compare = None
+        if t in (StepType.REFLECT, StepType.REFLECTION, StepType.EXPLAIN_BACK):
+            learner["response"] = mine
+            if t == StepType.REFLECTION and step["content"].get("compare_to"):
+                target = next(s for s in steps if s["key"] == step["content"]["compare_to"])
+                compare = {"key": target["key"], "title": target["title"], "response": self._response_view(target, self._latest_responses(user_id, item, target))}
+        elif t == StepType.THINK:
+            learner["response"] = mine
+            learner["committed"] = mine is not None
+            served = (AcademyStepResponseKind.NOTE, "reveal-viewed") in latest
+            learner["reveal_served"] = served
+            if mine is not None and served:
+                reveal = self._reveal_payload(step, self._raw_step(item, step_key)["private"], mine)
+        elif t == StepType.CHECK:
+            check = self._check_view(user_id, item)
+            public["questions"] = check["questions"]
+            result = check["result"]
+            learner["attempts"] = result["attempts"] if result else 0
+            learner["passed"] = bool(result and result["ever_passed"])
+            learner["last_attempt_items"] = result["items"] if result else []
+            state["passed"] = learner["passed"]
+            if learner["passed"]:
+                rationales = check["review"]
+        vocabulary = []
+        for s in steps:
+            for block in (s["content"].get("blocks") or []):
+                if block.get("kind") == "compare" and block["head"][0].lower() == "term":
+                    vocabulary.extend({"term": r[0], "definition": r[1]} for r in block["rows"])
+        return {
+            "item": {"id": item.id, "lineage_id": item.lineage_id, "version": item.version, "title": item.title, "day": item.spec.get("day"),
+                     "week": item.spec.get("week"), "curriculum": item.spec.get("curriculum"), "concept_id": item.concept_id},
+            "step": public, "step_fingerprint": step["fingerprint"], "learner": learner, "state": state,
+            "progress": {"required_completed": progress["required_completed"], "required_total": progress["required_total"],
+                         "learning_complete": progress["learning_complete"], "current_step_key": progress["current_step_key"],
+                         "completed_keys": [k for k, v in status.items() if v == "completed"], "skipped_keys": [k for k, v in status.items() if v == "skipped"]},
+            "outline": [{"position": s["position"], "key": s["key"], "type": s["type"], "title": s["title"], "required": s["required"], "status": status[s["key"]]} for s in steps],
+            "vocabulary": vocabulary[:40], "reveal": reveal, "rationales": rationales, "compare_to": compare,
+            "prior_hints": len([h for h in self.help_history(user_id, item, step) if h.request_kind.value == "hint"]),
+        }
 
     def _record_lesson_completed_once(self, user_id: str, item: LearningItem) -> None:
         """Earned, not opened: written only when every required step has completed, once per learner and lineage."""

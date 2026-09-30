@@ -165,26 +165,52 @@ def test_an_explain_back_step_takes_a_private_outline_and_references_the_existin
 # -- knowledge check: the existing canonical mechanism ---------------------------------------------------------------------------
 
 
-def test_a_check_step_completes_only_from_canonical_knowledge_check_evidence(client, auth_headers, item, db):
+def test_a_required_check_step_completes_only_from_a_passed_attempt_and_failures_can_be_retried(client, auth_headers, item, db):
     early = _complete(client, auth_headers, item, "ai-or-not")
     assert early.status_code == 409 and early.json()["error"]["detail"]["code"] == "interaction_required"
     wrong = client.post(f"{L1}/items/{item.id}/knowledge-check", json={"answers": {"q1": "b"}}, headers=auth_headers)
     assert wrong.status_code == 200 and wrong.json()["passed"] is False
     assert [r["passed"] for r in wrong.json()["results"]] == [False] and "explanation" not in wrong.json()["results"][0]
+    feedback = wrong.json()["feedback"]
+    assert feedback["retry_allowed"] is True and feedback["incorrect_item_ids"] == ["q1"] and feedback["attempt"] == 1
+    assert "answer" not in json.dumps(feedback).lower().replace("the answers", "")   # feedback guides; it never gives the answer
     view = client.get(f"{L1}/days/1/learning", headers=auth_headers).json()
     check = next(s for s in view["steps"] if s["key"] == "ai-or-not")
     assert check["check_result"]["submitted"] is True and check["check_result"]["passed"] is False and check["review"] is None
     assert "answer" not in json.dumps(check["questions"]) and [q["id"] for q in check["questions"]] == ["q1"]
-    # a submission is the canonical event; the step then completes from the evidence row, not from a claim
+    # an unsuccessful attempt is recorded, creates no demonstrated state, and does NOT complete the required step
+    blocked = _complete(client, auth_headers, item, "ai-or-not")
+    assert blocked.status_code == 409 and blocked.json()["error"]["detail"]["code"] == "interaction_required"
+    assert view["learning_complete"] is False and view["demonstrated"] is False
+    # retry until the authored success condition holds, then the step completes from that PASSED evidence
+    for _ in range(2):
+        again = client.post(f"{L1}/items/{item.id}/knowledge-check", json={"answers": {"q1": "c"}}, headers=auth_headers).json()
+        assert again["passed"] is False and _complete(client, auth_headers, item, "ai-or-not").status_code == 409
+    right = client.post(f"{L1}/items/{item.id}/knowledge-check", json={"answers": {"q1": "a"}}, headers=auth_headers).json()
+    assert right["passed"] is True and right["feedback"] is None
     done = _complete(client, auth_headers, item, "ai-or-not")
     assert done.status_code == 200 and done.json()["step"]["status"] == "completed"
-    evidence = db.query(LearningEvidence).filter_by(evidence_type=EvidenceType.KNOWLEDGE_CHECK).all()
-    assert len(evidence) == 1 and evidence[0].passed is False
+    evidence = db.query(LearningEvidence).filter_by(evidence_type=EvidenceType.KNOWLEDGE_CHECK).order_by(LearningEvidence.created_at).all()
+    assert [e.passed for e in evidence] == [False, False, False, True]          # the whole history is preserved
     progress = __import__("app.models.academy", fromlist=["AcademyStepProgress"]).AcademyStepProgress
-    assert db.query(progress).filter_by(step_key="ai-or-not").one().completion_basis == {"kind": "knowledge_check_evidence", "reference": evidence[0].id}
-    # the learner's own answers are kept with the step, linked to the evidence
+    assert db.query(progress).filter_by(step_key="ai-or-not").one().completion_basis == {"kind": "knowledge_check_passed", "reference": evidence[-1].id}
+    # the learner's own answers are kept with the step for every attempt, linked to its evidence
     kept = _rows(db, step_key="ai-or-not")
-    assert kept[0].content["answers"] == {"q1": "b"} and kept[0].ref_type == "learning_evidence" and kept[0].ref_id == evidence[0].id
+    assert [k.content["answers"] for k in kept] == [{"q1": "b"}, {"q1": "c"}, {"q1": "c"}, {"q1": "a"}]
+    assert [k.ref_id for k in kept] == [e.id for e in evidence] and {k.ref_type for k in kept} == {"learning_evidence"}
+    assert db.query(LearningEvidence).filter_by(evidence_type=EvidenceType.LESSON_COMPLETED).count() == 0   # other required steps remain
+
+
+def test_an_unsuccessful_check_never_satisfies_the_day_and_creates_no_demonstrated_state(client, auth_headers, item, db):
+    client.post(f"{L1}/items/{item.id}/knowledge-check", json={"answers": {"q1": "zzz"}}, headers=auth_headers)
+    view = client.get(f"{L1}/days/1/learning", headers=auth_headers).json()
+    assert view["demonstrated"] is False and view["concept_state"] != "demonstrated" and view["learning_complete"] is False
+    failed = db.query(LearningEvidence).filter_by(evidence_type=EvidenceType.KNOWLEDGE_CHECK).one()
+    assert failed.passed is False
+    from app.services.learner_state_service import LearnerStateService
+
+    assert LearnerStateService(db).state(failed.user_id, item.concept_id).ladder != "demonstrated"
+
 
 
 def test_the_authored_rationale_is_returned_only_once_the_check_is_passed(client, auth_headers, db, bootstrap):

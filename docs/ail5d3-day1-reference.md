@@ -26,7 +26,7 @@ API (all learner-scoped, bodies carry no learner/version/step/status):
 | `teach`, `example` | Continue | nothing (explicit Continue) |
 | `reflect`, `reflection` | `PUT response {text}` (8+ chars, <= 8000) | a valid saved response |
 | `think` | `PUT response` once (text, or per-statement choice + optional reasoning) | a committed answer; the commit is final |
-| `check` | the EXISTING `POST /items/{id}/knowledge-check` | canonical knowledge-check evidence for this learner and item |
+| `check` | the EXISTING `POST /items/{id}/knowledge-check` | canonical knowledge-check PASSED knowledge-check evidence for this learner and item (AIL.5D.4: an unsuccessful attempt never completes the step) |
 | `explain_back` | `PUT response {points}` (every point, 5+ chars): a private outline | a saved outline. The graded work stays in AIL.5C |
 | `lab` | not yet | cannot complete until the Lab slice |
 
@@ -44,7 +44,7 @@ commit. Re-committing is refused (409 `already_committed`). Statement steps repo
 The structured `check` step binds to the Day's existing `spec.knowledge_check`; there is no second checker. A submission
 writes the canonical `knowledge_check` evidence as before; for a structured Day it also keeps the learner's own answers
 (`answer` response, `ref` -> the evidence row). The step completes from that evidence. A failed submission is recorded and
-completes the step; it never makes the Day demonstrated. The authored rationale (`explanation`) is returned only once every
+does NOT complete the step (AIL.5D.4): it is recorded and the learner retries until every item is right. The authored rationale (`explanation`) is returned only once every
 item is right, so it cannot be used to copy answers into a passing evidence row.
 
 ## 5. Explain-back and AIL.5C

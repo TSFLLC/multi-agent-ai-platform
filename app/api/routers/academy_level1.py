@@ -19,7 +19,7 @@ from app.schemas.academy_level1 import (
     Level1DayRead, Level1EvidenceRead, Level1GraduationRead, Level1ItemRead, Level1LabRead,
     Level1KnowledgeCheckRequest, Level1ReviewRead, Level1LabLaunchRequest, Level1LabResultRequest,
     Level1AssistanceRequest, Level1LearningRead, Level1RevealRead, Level1StepProgressRead, Level1StepResponseRead,
-    Level1StepResponseRequest, Level1StepsRead,
+    Level1StepProfessorRequest, Level1StepResponseRequest, Level1StepsRead,
 )
 from app.schemas.lab import ExperimentCreate
 from app.services.academy_level1_service import (
@@ -27,6 +27,8 @@ from app.services.academy_level1_service import (
     ensure_level1_capstone_template,
 )
 from app.academy_steps import strip_private
+from app.schemas.professor import ProfessorContextRequest, ProfessorIntent, ProfessorInteractionRead, ProfessorTarget, ProfessorTargetType
+from app.services.professor_execution_service import ProfessorExecutionService
 from app.services.academy_structured_authoring import author_day_structure
 from app.services.academy_step_service import AcademyStepService
 from app.services.assessment_service import AssessmentService
@@ -114,8 +116,10 @@ def open_item(item_id: str, db: Session = Depends(get_db), user: User = Depends(
 
 @router.post("/items/{item_id}/knowledge-check", response_model=Level1EvidenceRead)
 def knowledge_check(item_id: str, body: Level1KnowledgeCheckRequest, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    evidence, results, state = AcademyLevel1Service(db).knowledge_check(user.id, item_id, body.answers)
-    return {"evidence_id": evidence.id, "concept_id": evidence.concept_id, "learner_state": state.ladder, "passed": evidence.passed, "results": results}
+    service = AcademyLevel1Service(db)
+    evidence, results, state = service.knowledge_check(user.id, item_id, body.answers)
+    feedback = AcademyStepService(db).check_feedback(user.id, service.item(item_id), bool(evidence.passed), results)
+    return {"evidence_id": evidence.id, "concept_id": evidence.concept_id, "learner_state": state.ladder, "passed": evidence.passed, "results": results, "feedback": feedback}
 
 
 @router.post("/days/{day}/start-lab", response_model=Level1LabRead)
@@ -348,6 +352,23 @@ def get_step_response(item_id: str, step_key: str, db: Session = Depends(get_db)
 def reveal_step(item_id: str, step_key: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     """The authored reveal of a think step. Served only after this learner has committed an answer."""
     return AcademyStepService(db).reveal(user.id, item_id, step_key)
+
+
+@router.get("/items/{item_id}/steps/{step_key}/professor")
+def step_professor_status(item_id: str, step_key: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """AIL.5D.4: what the step Professor is (mode, next hint level), what it can see, and whether it is paused."""
+    return ProfessorExecutionService(db).step_help_status(user, item_id, step_key)
+
+
+@router.post("/items/{item_id}/steps/{step_key}/professor", response_model=ProfessorInteractionRead)
+def ask_step_professor(item_id: str, step_key: str, body: Level1StepProfessorRequest, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """AIL.5D.4: ask the AI Professor about ONE step. Context is assembled on the server from the current step and this
+    learner only; it is held while an AIL.5C assessment is open; it never creates evidence."""
+    request = ProfessorContextRequest(
+        intent=ProfessorIntent.EXPLAIN_THIS, question=body.question, help=body.help,
+        target=ProfessorTarget(type=ProfessorTargetType.ACADEMY_STEP, id=item_id, step_key=step_key),
+    )
+    return ProfessorExecutionService(db).create_and_execute(user, request)
 
 
 @router.post("/items/{item_id}/steps/{step_key}/open", response_model=Level1StepProgressRead)

@@ -44,6 +44,14 @@ depends on the body of `ail5d_learning_item_lineage`.
 
 `downgrade` drops only that table (and its index) and **refuses, changing nothing, while any learner response exists**: that is learner data, and rollback is a restore of the pre-migration backup, not `downgrade`. Not in `EXPECTED_IRREVERSIBLE`.
 
+## Structured Learning (AIL.5D.4): `academy_professor_help`
+
+| Revision | Status | What it does |
+|---|---|---|
+| `academy_professor_help` | Forward revision on top of `academy_step_response`. **Reversible.** | Creates ONE table, `academy_professor_help` (append-only audit of step-scoped Professor help a learner received: mode, level, H0-H5 assistance, a fingerprint of the context). Touches no existing table, row, index or trigger. |
+
+`downgrade` drops only that table (and its index) and **refuses, changing nothing, while any help row exists**: that is learner data, and rollback is a restore of the pre-migration backup. Not in `EXPECTED_IRREVERSIBLE`.
+
 Both paths reach the same contract: an already-migrated database (staging) runs
 only `academy_lineage_enforcement`; a fresh or pre-AIL5 database runs the whole
 chain including `ail5d_learning_item_lineage` first.

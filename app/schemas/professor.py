@@ -6,9 +6,9 @@ does not execute a model, create evidence, or persist a conversation.
 """
 
 from enum import Enum
-from typing import Dict, List, Optional
+from typing import Dict, List, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.models.radar import ClaimType
 
@@ -31,6 +31,8 @@ class ProfessorTargetType(str, Enum):
     EXPERIMENT = "experiment"
     REVIEW_ATTEMPT = "review_attempt"
     ASSESSMENT_RESULT = "assessment_result"
+    # AIL.5D.4: one authored step of a structured Academy Day (id = the current Learning Item version, plus ``step_key``).
+    ACADEMY_STEP = "academy_step"
 
 
 class ProfessorAttachmentType(str, Enum):
@@ -92,6 +94,13 @@ class ProfessorTarget(BaseModel):
 
     type: ProfessorTargetType
     id: str = Field(min_length=1, max_length=36)
+    step_key: Optional[str] = Field(default=None, min_length=1, max_length=64)
+
+    @model_validator(mode="after")
+    def step_key_only_for_steps(self) -> "ProfessorTarget":
+        if (self.type == ProfessorTargetType.ACADEMY_STEP) != (self.step_key is not None):
+            raise ValueError("step_key is required for, and only valid with, an academy_step target")
+        return self
 
 
 class ProfessorAttachment(BaseModel):
@@ -113,6 +122,16 @@ class ProfessorContextRequest(BaseModel):
     attachments: List[ProfessorAttachment] = Field(default_factory=list, max_length=8)
     previous_interaction_id: Optional[str] = Field(default=None, max_length=36)
     budget_id: Optional[str] = Field(default=None, max_length=36)
+    # AIL.5D.4: for an academy_step target only. The client asks ("ask" a question, or for a "hint"); the SERVER decides the
+    # mode and the help level. There is deliberately no way to request a level or a mode.
+    help: Optional[Literal["ask", "hint"]] = None
+
+    @model_validator(mode="after")
+    def help_only_for_steps(self) -> "ProfessorContextRequest":
+        is_step = self.target is not None and self.target.type == ProfessorTargetType.ACADEMY_STEP
+        if self.help is not None and not is_step:
+            raise ValueError("help is only valid with an academy_step target")
+        return self
 
     @field_validator("question")
     @classmethod
@@ -236,6 +255,8 @@ class ProfessorInteractionRead(BaseModel):
     error_kind: Optional[str] = None
     error_message: Optional[str] = None
     context_preview: Optional[ProfessorContext] = None
+    # AIL.5D.4: for step-scoped help, what kind of help this was (mode, level, request); never instructions or content.
+    assistance: Optional[Dict] = None
 
 
 class ProfessorContextPreviewRead(BaseModel):

@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_db
 from app.auth import get_current_user
+from app.errors import ConflictError
 from app.models.identity import User
 from app.schemas.professor import (
     ProfessorContextPreviewRead,
@@ -66,9 +67,15 @@ def context_preview(
     question: Optional[str] = Query(None, max_length=4000),
     target_type: Optional[ProfessorTargetType] = Query(None),
     target_id: Optional[str] = Query(None, max_length=36),
+    step_key: Optional[str] = Query(None, max_length=64),
+    help: Optional[str] = Query(None, pattern="^(ask|hint)$"),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    target = ProfessorTarget(type=target_type, id=target_id) if target_type and target_id else None
-    request = ProfessorContextRequest(intent=intent, question=question, target=target)
+    try:
+        target = ProfessorTarget(type=target_type, id=target_id, step_key=step_key) if target_type and target_id else None
+        request = ProfessorContextRequest(intent=intent, question=question, target=target, help=help)
+    except ValueError as exc:   # e.g. an academy_step target without its step, or help without a step target
+        errors = exc.errors() if hasattr(exc, "errors") else []
+        raise ConflictError(errors[0]["msg"].replace("Value error, ", "") if errors else "Invalid Professor context request.")
     return ProfessorExecutionService(db).preview(user, request)

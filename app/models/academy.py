@@ -11,6 +11,7 @@ from typing import List, Optional
 from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, Index
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from app.academy_professor import HelpLevel, HelpRequest, ProfessorMode
 from app.db.base import Base
 from app.db.enums import (
     AcademyEnrollmentStatus,
@@ -347,3 +348,34 @@ class AcademyStepResponse(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     ref_type: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
     ref_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
     assistance: Mapped[Optional[dict]] = mapped_column("assistance_json", nullable=True)
+
+
+class AcademyProfessorHelp(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
+    """AIL.5D.4 - one delivered step-scoped AI Professor help, recorded for later independence decisions.
+
+    A row exists only for help the learner actually received (a completed, validated interaction). It is an audit of
+    assistance, never evidence: writing it never changes what a learner has demonstrated. ``assistance_level`` is on the
+    platform's existing H0-H5 scale (None when a teaching-mode question is not assistance on an exercise);
+    ``revealed_solution`` is true when authored solution material was in the context (recorded as H5).
+    ``context_sha256`` fingerprints exactly what the Professor was given. A future practice instance reads the highest
+    level recorded for its step. Owned by ``user_id`` (server-set) and bound to the exact item version and step.
+    """
+
+    __tablename__ = "academy_professor_help"
+    __table_args__ = (
+        UniqueConstraint("interaction_id", name="uq_academy_professor_help_interaction"),
+        Index("ix_academy_professor_help_user_lineage_step", "user_id", "lineage_id", "step_key"),
+    )
+
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    learning_item_id: Mapped[str] = mapped_column(ForeignKey("learning_items.id", ondelete="RESTRICT"), nullable=False)
+    lineage_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    step_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    step_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    mode: Mapped[ProfessorMode] = mapped_column(sa_enum(ProfessorMode), nullable=False)
+    request_kind: Mapped[HelpRequest] = mapped_column(sa_enum(HelpRequest), nullable=False)
+    help_level: Mapped[HelpLevel] = mapped_column(sa_enum(HelpLevel), nullable=False)
+    assistance_level: Mapped[Optional[AssistanceLevel]] = mapped_column(sa_enum(AssistanceLevel), nullable=True)
+    revealed_solution: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    interaction_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    context_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
