@@ -34,6 +34,7 @@ from app.db.session import build_engine
 ROOT = Path(__file__).resolve().parent.parent
 PREVIOUS = "academy_lineage_enforcement"
 NEW = "academy_step_progress"
+HEAD = "academy_step_response"  # AIL.5D.3, the current head
 DEPLOYED = "ail5d_learning_item_lineage"
 TABLE = "academy_step_progress"
 NOW = "2026-01-01T00:00:00"
@@ -147,7 +148,8 @@ def _progress_row(conn, **over):
 
 def test_there_is_one_head_and_it_sits_on_the_forward_lineage_enforcement_revision():
     script = ScriptDirectory.from_config(_cfg())
-    assert script.get_heads() == [NEW]
+    assert script.get_heads() == [HEAD]  # later slices sit above this revision; this one is exactly one step below the head
+    assert script.get_revision(HEAD).down_revision == NEW
     revision = script.get_revision(NEW)
     assert revision.down_revision == PREVIOUS
     assert script.get_revision(PREVIOUS).down_revision == DEPLOYED
@@ -176,7 +178,7 @@ def test_upgrading_from_the_current_head_runs_only_the_new_revision_and_loses_no
     before = _content_hash(engine)
     assert TABLE not in _tables(engine)
     engine.dispose()
-    steps = _run("upgrade", "head")
+    steps = _run("upgrade", NEW)
     assert steps == [f"Running upgrade {PREVIOUS} -> {NEW}"]
     engine = _engine(path)
     assert _version(engine) == NEW and TABLE in _tables(engine)
@@ -193,7 +195,7 @@ def test_the_new_revision_changes_no_existing_table(path):
     with engine.begin() as conn:
         before = {r[0]: r[1] for r in conn.execute(text("SELECT name, sql FROM sqlite_master WHERE tbl_name <> 'alembic_version' ORDER BY name"))}
     engine.dispose()
-    command.upgrade(_cfg(), "head")
+    command.upgrade(_cfg(), NEW)
     engine = _engine(path)
     with engine.begin() as conn:
         after = {r[0]: r[1] for r in conn.execute(text("SELECT name, sql FROM sqlite_master WHERE tbl_name <> 'alembic_version' ORDER BY name"))}
@@ -207,7 +209,7 @@ def test_the_new_revision_changes_no_existing_table(path):
 
 
 def test_the_whole_chain_on_a_fresh_database_reaches_the_new_head(path):
-    steps = _run("upgrade", "head")
+    steps = _run("upgrade", NEW)
     assert steps[0].startswith("Running upgrade  ->") and steps[-1] == f"Running upgrade {PREVIOUS} -> {NEW}"
     assert any(DEPLOYED in s for s in steps)
     engine = _engine(path)
@@ -217,22 +219,22 @@ def test_the_whole_chain_on_a_fresh_database_reaches_the_new_head(path):
 
 
 def test_upgrade_is_idempotent_at_head_and_refuses_a_stray_preexisting_table(path):
-    command.upgrade(_cfg(), "head")
-    assert _run("upgrade", "head") == []
+    command.upgrade(_cfg(), NEW)
+    assert _run("upgrade", NEW) == []
     command.downgrade(_cfg(), PREVIOUS)
     engine = _engine(path)
     with engine.begin() as conn:
         conn.execute(text(f"CREATE TABLE {TABLE} (x INTEGER)"))
     engine.dispose()
     with pytest.raises(RuntimeError, match="already exists"):
-        command.upgrade(_cfg(), "head")
+        command.upgrade(_cfg(), NEW)
 
 
 # -- the schema equals the model, and the database enforces the invariants -------------------------------------------------------
 
 
 def test_the_migrated_table_matches_the_orm_model(path):
-    command.upgrade(_cfg(), "head")
+    command.upgrade(_cfg(), NEW)
     engine = _engine(path)
     with engine.connect() as conn:
         diffs = compare_metadata(MigrationContext.configure(conn, opts={"compare_type": False}), Base.metadata)
@@ -241,7 +243,7 @@ def test_the_migrated_table_matches_the_orm_model(path):
 
 
 def test_the_database_rejects_rows_that_break_the_step_progress_invariants(path):
-    command.upgrade(_cfg(), "head")
+    command.upgrade(_cfg(), NEW)
     engine = _engine(path)
     _seed(engine)
     with engine.begin() as conn:
@@ -269,7 +271,7 @@ def test_the_database_rejects_rows_that_break_the_step_progress_invariants(path)
 
 
 def test_learner_deletion_cascades_and_an_item_with_progress_cannot_be_deleted(path):
-    command.upgrade(_cfg(), "head")
+    command.upgrade(_cfg(), NEW)
     engine = _engine(path)
     _seed(engine)
     with engine.begin() as conn:
@@ -288,7 +290,7 @@ def test_learner_deletion_cascades_and_an_item_with_progress_cannot_be_deleted(p
 
 
 def test_downgrade_with_no_progress_removes_only_the_new_table_and_can_be_reapplied(path):
-    command.upgrade(_cfg(), "head")
+    command.upgrade(_cfg(), NEW)
     engine = _engine(path)
     _seed(engine)
     content = _content_hash(engine)
@@ -302,14 +304,14 @@ def test_downgrade_with_no_progress_removes_only_the_new_table_and_can_be_reappl
     assert {"trg_learning_items_lineage_insert", "trg_learning_items_lineage_update"} <= names
     _health(engine)
     engine.dispose()
-    command.upgrade(_cfg(), "head")
+    command.upgrade(_cfg(), NEW)
     engine = _engine(path)
     assert TABLE in _tables(engine) and _content_hash(engine) == content
     engine.dispose()
 
 
 def test_downgrade_refuses_while_learner_progress_exists_and_changes_nothing(path):
-    command.upgrade(_cfg(), "head")
+    command.upgrade(_cfg(), NEW)
     engine = _engine(path)
     _seed(engine)
     with engine.begin() as conn:

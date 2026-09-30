@@ -36,6 +36,14 @@ rollback is a restore of the pre-migration backup, not `downgrade`. This revisio
 is deliberately **not** in `EXPECTED_IRREVERSIBLE`. It never renames, rewrites or
 depends on the body of `ail5d_learning_item_lineage`.
 
+## Structured Learning (AIL.5D.3): `academy_step_response`
+
+| Revision | Status | What it does |
+|---|---|---|
+| `academy_step_response` | Forward revision on top of `academy_step_progress`. **Reversible.** | Creates ONE table, `academy_step_responses` (append-only, user-scoped learner responses to authored steps). Touches no existing table, row, index or trigger. |
+
+`downgrade` drops only that table (and its index) and **refuses, changing nothing, while any learner response exists**: that is learner data, and rollback is a restore of the pre-migration backup, not `downgrade`. Not in `EXPECTED_IRREVERSIBLE`.
+
 Both paths reach the same contract: an already-migrated database (staging) runs
 only `academy_lineage_enforcement`; a fresh or pre-AIL5 database runs the whole
 chain including `ail5d_learning_item_lineage` first.

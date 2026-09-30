@@ -17,6 +17,7 @@ from app.db.enums import (
     AcademyPace,
     AcademyProgramItemKind,
     AcademyProgramVersionStatus,
+    AcademyStepResponseKind,
     AcademyStepStatus,
     AssistanceLevel,
     ExecutionVerification,
@@ -308,3 +309,41 @@ class AcademyStepProgress(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     skipped_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     completion_basis: Mapped[Optional[dict]] = mapped_column("completion_basis_json", nullable=True)
+
+
+class AcademyStepResponse(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
+    """AIL.5D.3 - what one learner wrote or chose on one authored step of one immutable Learning Item version.
+
+    Append-only learner data. The authored step lives in ``learning_items.spec_json.steps``; this row only records the
+    learner's own response to it. Refining a response appends a new ``revision`` (the latest wins); nothing is updated
+    or deleted, so ordering is provable from ``created_at`` (for example, that an answer was committed before a reveal).
+
+    * Strictly owned: ``user_id`` (set by the service from the authenticated learner, never by a client).
+    * Bound to the exact version: ``learning_item_id`` plus a server-set ``lineage_id``, and ``step_fingerprint`` (the
+      step definition at write time) so a newer version can tell an unchanged step's response from a revised one.
+    * ``response_key`` names a part of the response (a statement id, an outline point) and is ``""`` for a single value.
+    * ``content`` is bounded JSON (text, a structured answer, ...). It is private to the learner and is never grading:
+      it writes no evidence and is never shown to the Professor or the Grader unless a later, explicit slice says so.
+    * ``ref_type`` / ``ref_id`` optionally point at the canonical record the response belongs to (a knowledge-check
+      evidence row now; an experiment or run for Lab / Practice later). ``assistance`` is reserved for help metadata.
+    """
+
+    __tablename__ = "academy_step_responses"
+    __table_args__ = (
+        UniqueConstraint("user_id", "learning_item_id", "step_key", "kind", "response_key", "revision", name="uq_academy_step_responses_revision"),
+        CheckConstraint("revision >= 1", name="revision_positive"),
+        Index("ix_academy_step_responses_user_lineage_step", "user_id", "lineage_id", "step_key"),
+    )
+
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    learning_item_id: Mapped[str] = mapped_column(ForeignKey("learning_items.id", ondelete="RESTRICT"), nullable=False)
+    lineage_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    step_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    step_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    kind: Mapped[AcademyStepResponseKind] = mapped_column(sa_enum(AcademyStepResponseKind), nullable=False)
+    response_key: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    content: Mapped[dict] = mapped_column("content_json", nullable=False)
+    ref_type: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+    ref_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
+    assistance: Mapped[Optional[dict]] = mapped_column("assistance_json", nullable=True)

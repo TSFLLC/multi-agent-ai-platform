@@ -164,6 +164,30 @@ class Level1LearningRead(BaseModel):
     note: Optional[str] = None
 
 
+class Level1StepResponseRequest(BaseModel):
+    """AIL.5D.3: a learner's response to an interactive step. Exactly the fields the step type accepts (see
+    ``app.academy_step_responses``); the learner, version and step come from the URL and the session, never from here."""
+
+    text: Optional[str] = None
+    points: Optional[Dict[str, str]] = None
+    statements: Optional[Dict[str, Dict[str, Any]]] = None
+
+    class Config:
+        extra = "forbid"
+
+
+class Level1StepResponseRead(BaseModel):
+    step_key: str
+    response: Optional[Dict[str, Any]] = None
+    saved: Optional[bool] = None
+
+
+class Level1RevealRead(BaseModel):
+    step_key: str
+    reveal_md: Optional[str] = None
+    claims: Optional[Dict[str, Any]] = None
+
+
 class Level1StepProgressRead(BaseModel):
     step: Dict[str, Any]
     day: Dict[str, Any]

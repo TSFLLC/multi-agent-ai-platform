@@ -9,9 +9,13 @@ Rules it enforces
   another learner, and the item is looked up by id, never trusted from a request body.
 * Only the CURRENT version of an item can be acted on. A stale id gets a 409 that names the current version.
 * ``open`` records "the learner viewed this step" and can never produce completion.
-* ``complete`` succeeds for a self-completable step (teach, example) on the learner's explicit Continue. Every
-  interactive type needs a ``VerifiedCompletion`` that only server code can construct; nothing reachable from the
-  API builds one in this slice, so an interactive step cannot be completed by asking for it.
+* ``complete`` succeeds for a self-completable step (teach, example) on the learner's explicit Continue. An
+  interactive step completes only when the SERVER verifies its own interaction from persisted records (AIL.5D.3): a
+  valid saved response (reflect, reflection, explain_back outline), a committed answer (think), or the canonical
+  knowledge-check evidence (check). The client never states that a step is complete; a ``lab`` step cannot complete
+  until the Lab slice. A ``VerifiedCompletion`` can still be supplied by trusted server code, never by a request.
+* Learner responses (AIL.5D.3) are append-only, owned by the learner, bound to the exact item version, and private.
+  A ``think`` answer is committed once and the authored reveal is only served after that commit.
 * Required steps cannot be skipped. Optional steps can.
 * Completion is never evidence, with ONE deliberate exception (AIL.5D.2): when the learner's last REQUIRED step
   actually completes, a single ``lesson_completed`` evidence row is written (idempotent per learner and lineage). It
@@ -27,15 +31,16 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.academy_steps import SELF_COMPLETABLE, STEP_SCHEMA_VERSION, StepType, is_structured, public_steps
-from app.db.enums import AcademyStepStatus, EvidenceType, GradingMode
+from app.academy_step_responses import ResponseError, accepts_response, validate_response
+from app.academy_steps import SELF_COMPLETABLE, STEP_SCHEMA_VERSION, StepType, is_structured, public_steps, validate_structured_spec
+from app.db.enums import AcademyStepResponseKind, AcademyStepStatus, EvidenceType, GradingMode
 from app.db.mixins import utcnow
-from app.errors import ConflictError, NotFoundError
-from app.models.academy import AcademyStepProgress
+from app.errors import ConflictError, InvalidResponseError, NotFoundError
+from app.models.academy import AcademyStepProgress, AcademyStepResponse
 from app.models.concepts import LearningItem
 from app.models.learner import LearningEvidence
 from app.services.concept_graph_service import ConceptGraphService
@@ -56,6 +61,16 @@ class VerifiedCompletion:
 
     kind: str
     reference: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class _Part:
+    kind: AcademyStepResponseKind
+    key: str
+    content: Dict[str, Any]
+
+
+_NoteViewed = _Part(AcademyStepResponseKind.NOTE, "reveal-viewed", {"viewed": True})
 
 
 class AcademyStepService:
@@ -198,13 +213,14 @@ class AcademyStepService:
         step_type = StepType(step["type"])
         if step_type in SELF_COMPLETABLE:
             basis = {"kind": "continue"}
-        elif verified is not None:
-            basis = {"kind": verified.kind, "reference": verified.reference}
         else:
-            raise ConflictError(
-                "This step is completed by doing it, not by asking for completion.",
-                detail={"code": "interaction_required", "step_type": step_type.value},
-            )
+            verified = verified or self._verify(user_id, item, step)
+            if verified is None:
+                raise ConflictError(
+                    "This step is completed by doing it, not by asking for completion.",
+                    detail={"code": "interaction_required", "step_type": step_type.value},
+                )
+            basis = {"kind": verified.kind, "reference": verified.reference}
         row, _ = self._row(user_id, item, step)
         if row.status != AcademyStepStatus.COMPLETED:
             now = self._clock()
@@ -229,6 +245,158 @@ class AcademyStepService:
             row.skipped_at = self._clock()
         self.db.commit()
         return self._one(user_id, item, step_key)
+
+    # -- learner responses (AIL.5D.3) --------------------------------------------------------------------------------
+
+    def _raw_step(self, item: LearningItem, step_key: str) -> dict:
+        """The authored step INCLUDING ``private`` -- for server-side use only, never returned to a client."""
+        return next(s for s in validate_structured_spec(item.spec) if s["key"] == step_key)
+
+    def _latest_responses(self, user_id: str, item: LearningItem, step: dict) -> Dict[tuple, AcademyStepResponse]:
+        """This learner's latest response per (kind, key) for the step, across versions of the lineage but only where the
+        step's learner-visible definition is unchanged."""
+        rows = self.db.execute(select(AcademyStepResponse).where(
+            AcademyStepResponse.user_id == user_id, AcademyStepResponse.lineage_id == item.lineage_id,
+            AcademyStepResponse.step_key == step["key"], AcademyStepResponse.step_fingerprint == step["fingerprint"],
+        ).order_by(AcademyStepResponse.created_at, AcademyStepResponse.revision)).scalars().all()
+        latest: Dict[tuple, AcademyStepResponse] = {}
+        for row in rows:
+            latest[(row.kind, row.response_key)] = row
+        return latest
+
+    def _append(self, user_id: str, item: LearningItem, step: dict, parts, *, ref_type: Optional[str] = None, ref_id: Optional[str] = None) -> List[AcademyStepResponse]:
+        now = self._clock()
+        rows = []
+        for part in parts:
+            top = self.db.execute(select(func.max(AcademyStepResponse.revision)).where(
+                AcademyStepResponse.user_id == user_id, AcademyStepResponse.learning_item_id == item.id,
+                AcademyStepResponse.step_key == step["key"], AcademyStepResponse.kind == part.kind, AcademyStepResponse.response_key == part.key,
+            )).scalar()
+            row = AcademyStepResponse(
+                user_id=user_id, learning_item_id=item.id, lineage_id=item.lineage_id, step_key=step["key"], step_fingerprint=step["fingerprint"],
+                kind=part.kind, response_key=part.key, revision=(top or 0) + 1, content=part.content, ref_type=ref_type, ref_id=ref_id, created_at=now,
+            )
+            self.db.add(row)
+            rows.append(row)
+        try:
+            self.db.commit()
+        except IntegrityError:
+            self.db.rollback()
+            raise ConflictError("Your response was saved by another request at the same moment; reload and try again.", detail={"code": "concurrent_response"})
+        return rows
+
+    @staticmethod
+    def _response_view(step: dict, latest: Dict[tuple, AcademyStepResponse]) -> Optional[dict]:
+        """The learner's own latest response, shaped per step type. None when there is none."""
+        t = StepType(step["type"])
+        if t in (StepType.REFLECT, StepType.REFLECTION):
+            row = latest.get((AcademyStepResponseKind.REFLECTION, ""))
+            return {"text": row.content["text"]} if row else None
+        if t == StepType.THINK:
+            if "statements" in step["content"]:
+                chosen = {s["id"]: latest.get((AcademyStepResponseKind.ANSWER, s["id"])) for s in step["content"]["statements"]}
+                return {"statements": {k: dict(v.content) for k, v in chosen.items()}} if all(chosen.values()) else None
+            row = latest.get((AcademyStepResponseKind.ANSWER, ""))
+            return {"text": row.content["text"]} if row else None
+        if t == StepType.EXPLAIN_BACK:
+            rows = {p["key"]: latest.get((AcademyStepResponseKind.OUTLINE, p["key"])) for p in step["content"]["points"]}
+            return {"points": {k: v.content["text"] for k, v in rows.items()}} if all(rows.values()) else None
+        return None
+
+    def respond(self, user_id: str, item_id: str, step_key: str, payload: Optional[dict]) -> Dict[str, Any]:
+        """Persist the learner's response to a step. Validates against the authored step; never grades, never writes
+        evidence, never completes the step (Continue does, after the server verifies the response)."""
+        item = self._item(item_id)
+        step = self._step(item, step_key)
+        if not accepts_response(step):
+            raise ConflictError("This step does not take a direct response.", detail={"code": "no_response_accepted", "step_type": step["type"]})
+        try:
+            parts = validate_response(step, payload)
+        except ResponseError as exc:
+            raise InvalidResponseError(str(exc))
+        latest = self._latest_responses(user_id, item, step)
+        if StepType(step["type"]) == StepType.THINK and self._response_view(step, latest) is not None:
+            raise ConflictError(
+                "Your answer is already committed and cannot be changed after the reveal is available.", detail={"code": "already_committed"},
+            )
+        self._append(user_id, item, step, parts)
+        latest = self._latest_responses(user_id, item, step)
+        return {"step_key": step_key, "response": self._response_view(step, latest), "saved": True}
+
+    def responses(self, user_id: str, item_id: str, step_key: str) -> Dict[str, Any]:
+        item = self._item(item_id)
+        step = self._step(item, step_key)
+        return {"step_key": step_key, "response": self._response_view(step, self._latest_responses(user_id, item, step))}
+
+    def reveal(self, user_id: str, item_id: str, step_key: str) -> Dict[str, Any]:
+        """The authored reveal of a ``think`` step, served only after THIS learner committed an answer. The only path
+        by which ``private`` content is ever returned, and it is explicitly scoped to the committed learner and step."""
+        item = self._item(item_id)
+        step = self._step(item, step_key)
+        if StepType(step["type"]) != StepType.THINK:
+            raise ConflictError("Only a think step has a reveal.", detail={"code": "no_reveal"})
+        latest = self._latest_responses(user_id, item, step)
+        mine = self._response_view(step, latest)
+        if mine is None:
+            raise ConflictError("Commit your answer first; the explanation is shown after you commit.", detail={"code": "commit_required"})
+        private = self._raw_step(item, step_key)["private"]
+        if (AcademyStepResponseKind.NOTE, "reveal-viewed") not in latest:
+            self._append(user_id, item, step, [_NoteViewed])
+        if "statements" in step["content"]:
+            claims = {
+                sid: {"answer": c["answer"], "why_md": c["why_md"], "matched": mine["statements"][sid]["choice"] == c["answer"]}
+                for sid, c in private["claims"].items()
+            }
+            return {"step_key": step_key, "claims": claims}
+        return {"step_key": step_key, "reveal_md": private["reveal_md"]}
+
+    # -- knowledge check (the existing canonical mechanism) --------------------------------------------------------------
+
+    def _kc_evidence(self, user_id: str, item: LearningItem) -> List[LearningEvidence]:
+        return list(self.db.execute(select(LearningEvidence).where(
+            LearningEvidence.user_id == user_id, LearningEvidence.learning_item_id == item.id,
+            LearningEvidence.evidence_type == EvidenceType.KNOWLEDGE_CHECK,
+        ).order_by(LearningEvidence.created_at)).scalars())
+
+    def record_check_submission(self, user_id: str, item: LearningItem, answers: dict, evidence: LearningEvidence) -> None:
+        """Keep the learner's own submitted answers with the structured step. The canonical result stays the evidence row."""
+        if not is_structured(item.spec):
+            return
+        step = next((s for s in self._steps(item) if s["type"] == StepType.CHECK.value), None)
+        if step is None:
+            return
+        part = _Part(AcademyStepResponseKind.ANSWER, "", {"answers": answers, "passed": bool(evidence.passed)})
+        self._append(user_id, item, step, [part], ref_type="learning_evidence", ref_id=evidence.id)
+
+    def _check_view(self, user_id: str, item: LearningItem) -> Dict[str, Any]:
+        public = [{k: v for k, v in q.items() if k not in ("answer", "explanation", "pass_criteria")} for q in (item.spec or {}).get("knowledge_check", [])]
+        rows = self._kc_evidence(user_id, item)
+        result = None
+        review = None
+        if rows:
+            last = rows[-1]
+            score = last.score or {}
+            result = {"submitted": True, "attempts": len(rows), "passed": bool(last.passed), "score": {"raw": score.get("raw"), "max": score.get("max")}, "items": [{"id": i.get("id"), "passed": i.get("passed")} for i in score.get("items", [])]}
+            if any(r.passed for r in rows):
+                # The authored rationale is revealed only once the check has been passed, so it cannot be used to copy answers.
+                review = [{"id": q["id"], "explanation": q.get("explanation")} for q in (item.spec or {}).get("knowledge_check", [])]
+        return {"questions": public, "result": result, "review": review}
+
+    # -- server verification of interactive completion ---------------------------------------------------------------------
+
+    def _verify(self, user_id: str, item: LearningItem, step: dict) -> Optional[VerifiedCompletion]:
+        t = StepType(step["type"])
+        if t == StepType.CHECK:
+            rows = self._kc_evidence(user_id, item)
+            return VerifiedCompletion("knowledge_check_evidence", rows[-1].id) if rows else None
+        if t in (StepType.REFLECT, StepType.REFLECTION, StepType.THINK, StepType.EXPLAIN_BACK):
+            latest = self._latest_responses(user_id, item, step)
+            if self._response_view(step, latest) is None:
+                return None
+            kind = {StepType.THINK: "committed_answer", StepType.EXPLAIN_BACK: "outline_saved"}.get(t, "response_saved")
+            newest = max((r for k, r in latest.items() if k[0] != AcademyStepResponseKind.NOTE), key=lambda r: r.created_at)
+            return VerifiedCompletion(kind, newest.id)
+        return None  # lab: only the Lab slice can verify it
 
     def _record_lesson_completed_once(self, user_id: str, item: LearningItem) -> None:
         """Earned, not opened: written only when every required step has completed, once per learner and lineage."""
@@ -255,13 +423,15 @@ class AcademyStepService:
         progress = self.progress(user_id, item_id)
         status = {s["key"]: s for s in progress["steps"]}
         steps = []
-        for step in self._steps(item):
+        all_steps = self._steps(item)
+        for step in all_steps:
             s = status[step["key"]]
             view = {k: step[k] for k in ("key", "position", "type", "title", "required", "estimated_minutes", "content", "binding") if k in step}
             view.update(
                 status=s["status"], carried_from_version=s["carried_from_version"], open_count=s["open_count"], completed_at=s["completed_at"],
                 is_current=step["key"] == progress["current_step_key"], is_next=step["key"] == progress["next_step_key"],
             )
+            self._add_learner_view(user_id, item, step, view, all_steps)
             steps.append(view)
         ladder = LearnerStateService(self.db).state(user_id, item.concept_id).ladder
         return {
@@ -274,6 +444,23 @@ class AcademyStepService:
             "learning_complete": progress["learning_complete"], "demonstrated": ladder == "demonstrated", "concept_state": ladder,
             "note": NOT_EVIDENCE,
         }
+
+    def _add_learner_view(self, user_id: str, item: LearningItem, step: dict, view: dict, all_steps: List[dict]) -> None:
+        """This learner's OWN data for an interactive step. Never the reveal, never an answer key."""
+        t = StepType(step["type"])
+        if t in (StepType.REFLECT, StepType.REFLECTION, StepType.THINK, StepType.EXPLAIN_BACK):
+            mine = self._response_view(step, self._latest_responses(user_id, item, step))
+            view["response"] = mine
+            if t == StepType.THINK:
+                view["committed"] = mine is not None
+                view["reveal_available"] = mine is not None
+            if t == StepType.REFLECTION and step["content"].get("compare_to"):
+                target = next(s for s in all_steps if s["key"] == step["content"]["compare_to"])
+                earlier = self._response_view(target, self._latest_responses(user_id, item, target))
+                view["compare_to"] = {"key": target["key"], "title": target["title"], "response": earlier}
+        elif t == StepType.CHECK:
+            check = self._check_view(user_id, item)
+            view["questions"], view["check_result"], view["review"] = check["questions"], check["result"], check["review"]
 
     def _one(self, user_id: str, item: LearningItem, step_key: str) -> Dict[str, Any]:
         summary = self.progress(user_id, item.id)

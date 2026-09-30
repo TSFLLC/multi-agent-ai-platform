@@ -666,6 +666,20 @@ class AcademyStepStatus(str, enum.Enum):
     SKIPPED = "skipped"
 
 
+class AcademyStepResponseKind(str, enum.Enum):
+    """AIL.5D.3 what a learner-authored step response IS. A closed vocabulary shared by every interactive step type and
+    by later Lab / Practice work: ``answer`` (a committed answer or a submitted check), ``prediction`` and ``observation``
+    (Lab), ``reflection`` (free reflection), ``outline`` (a private outline, e.g. before an AIL.5C explain-back) and
+    ``note`` (server bookkeeping such as "reveal viewed"). Never a grade and never evidence."""
+
+    ANSWER = "answer"
+    PREDICTION = "prediction"
+    OBSERVATION = "observation"
+    REFLECTION = "reflection"
+    OUTLINE = "outline"
+    NOTE = "note"
+
+
 class AcademyPace(str, enum.Enum):
     SCHEDULED = "scheduled"
     SELF_PACED = "self_paced"

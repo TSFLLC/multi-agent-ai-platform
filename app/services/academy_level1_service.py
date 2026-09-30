@@ -309,6 +309,11 @@ class AcademyLevel1Service:
                 "knowledge_check": _authored_knowledge_checks(day),
             }
             existing = next((row for row in self.db.execute(select(LearningItem)).scalars() if (row.spec or {}).get("academy_key") == key and row.version == max(r.version for r in self.db.execute(select(LearningItem)).scalars() if (r.spec or {}).get("academy_key") == key)), None)
+            if existing and is_structured(existing.spec):
+                # AIL.5D.3: a structured Day is owned by explicit, versioned authoring (academy_structured_authoring),
+                # never reconciled in place by routine provisioning (which would overwrite authored steps and body).
+                self._program_item(version, day, existing, title)
+                continue
             if existing:
                 existing.title = f"Day {day}: {title}"
                 existing.body_md = _day_body(day)
@@ -659,4 +664,12 @@ class AcademyLevel1Service:
             score={"raw": sum(r["passed"] for r in results), "max": len(results), "items": results},
             question_origin=QuestionOrigin.REVIEWED,
         )
+        if is_structured(item.spec):
+            # AIL.5D.3: the canonical result is the evidence row above. The structured step additionally keeps the learner's
+            # own answers, and the authored rationale is returned only once EVERY item is right (so it cannot be used to
+            # copy answers into a passing evidence row).
+            AcademyStepService(self.db).record_check_submission(user_id, item, answers, evidence)
+            if passed:
+                by_id = {str(q["id"]): q.get("explanation") for q in questions}
+                results = [{**row, "explanation": by_id.get(row["id"])} for row in results]
         return evidence, results, LearnerStateService(self.db).state(user_id, item.concept_id)

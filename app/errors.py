@@ -58,6 +58,14 @@ class ConflictError(AppError):
     code = "conflict"
 
 
+class InvalidResponseError(AppError):
+    """AIL.5D.3: a learner's response to an authored step is not valid for that step (422). The message says what to
+    fix and never echoes private data."""
+
+    status_code = status.HTTP_422_UNPROCESSABLE_ENTITY
+    code = "invalid_response"
+
+
 class WorkflowValidationFailedError(AppError):
     """A workflow version failed publish-time validation (MA7.6A). ``detail``
     carries ``{"issues": [...]}`` -- one entry per problem -- so a client can

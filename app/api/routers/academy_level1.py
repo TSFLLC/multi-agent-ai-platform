@@ -18,7 +18,8 @@ from app.schemas.academy_level1 import (
     Level1AssessmentDraftRequest, Level1AssessmentStartRequest, Level1AssessmentSubmitRequest,
     Level1DayRead, Level1EvidenceRead, Level1GraduationRead, Level1ItemRead, Level1LabRead,
     Level1KnowledgeCheckRequest, Level1ReviewRead, Level1LabLaunchRequest, Level1LabResultRequest,
-    Level1AssistanceRequest, Level1LearningRead, Level1StepProgressRead, Level1StepsRead,
+    Level1AssistanceRequest, Level1LearningRead, Level1RevealRead, Level1StepProgressRead, Level1StepResponseRead,
+    Level1StepResponseRequest, Level1StepsRead,
 )
 from app.schemas.lab import ExperimentCreate
 from app.services.academy_level1_service import (
@@ -26,6 +27,7 @@ from app.services.academy_level1_service import (
     ensure_level1_capstone_template,
 )
 from app.academy_steps import strip_private
+from app.services.academy_structured_authoring import author_day_structure
 from app.services.academy_step_service import AcademyStepService
 from app.services.assessment_service import AssessmentService
 from app.services.experiment_learning_qualification_service import ExperimentLearningQualificationService
@@ -304,6 +306,13 @@ def review(db: Session = Depends(get_db), user: User = Depends(get_current_user)
 # Additive and learner-scoped. Opening a step never completes it; interactive steps cannot be completed by request.
 
 
+@router.post("/days/{day}/author-structure")
+def author_structure(day: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """AIL.5D.3: explicitly publish a Day's structured form as the next version of its Learning Item. Idempotent.
+    Routine provisioning never does this."""
+    return author_day_structure(db, day)
+
+
 @router.get("/days/{day}/learning", response_model=Level1LearningRead)
 def day_learning(day: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     """The learner read model of a Day. Structured Days return ordered public steps with this learner's status;
@@ -322,6 +331,23 @@ def day_learning(day: int, db: Session = Depends(get_db), user: User = Depends(g
 def item_steps(item_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     service = AcademyStepService(db)
     return {**service.structure(item_id), "progress": service.progress(user.id, item_id)}
+
+
+@router.put("/items/{item_id}/steps/{step_key}/response", response_model=Level1StepResponseRead)
+def respond_to_step(item_id: str, step_key: str, body: Level1StepResponseRequest, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """AIL.5D.3: save the learner's own response to an interactive step. Private, append-only, never graded."""
+    return AcademyStepService(db).respond(user.id, item_id, step_key, body.dict(exclude_none=True))
+
+
+@router.get("/items/{item_id}/steps/{step_key}/response", response_model=Level1StepResponseRead)
+def get_step_response(item_id: str, step_key: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    return AcademyStepService(db).responses(user.id, item_id, step_key)
+
+
+@router.post("/items/{item_id}/steps/{step_key}/reveal", response_model=Level1RevealRead)
+def reveal_step(item_id: str, step_key: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """The authored reveal of a think step. Served only after this learner has committed an answer."""
+    return AcademyStepService(db).reveal(user.id, item_id, step_key)
 
 
 @router.post("/items/{item_id}/steps/{step_key}/open", response_model=Level1StepProgressRead)
