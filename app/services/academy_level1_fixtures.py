@@ -42,6 +42,7 @@ from app.models.tasks import Task, TaskRun
 from app.models.workflow import Workflow, WorkflowVersion
 from app.models.workflow import WorkflowRun, WorkflowNodeRun
 from app.services.agent_registry_service import AgentRegistryService
+from app.services.independence_policy import with_practice_marker
 from app.services.system_project_service import ensure_ail_system_project
 from app.services.task_service import TaskService
 from app.services.workflow_definition_service import WorkflowDefinitionService
@@ -262,7 +263,7 @@ def qualify_agent_fixture(db: Session, user: User, agent_run_id: str, assistance
         user_id=user.id, concept_id=item.concept_id, concept_version_id=concept_version.id,
         learning_item_id=item.id, evidence_type=EvidenceType.LAB, grader=GradingMode.DETERMINISTIC,
         passed=True, ref_type=EvidenceRefType.AGENT_RUN, ref_id=run.id,
-        score={"fixture": fixture, "conclusion": conclusion, "observed_change": observed_change, "project_attempt_id": ((task_run.config_snapshot or {}).get("frozen_task_snapshot") or {}).get("project_attempt_id")},
+        score=with_practice_marker({"fixture": fixture, "conclusion": conclusion, "observed_change": observed_change, "project_attempt_id": ((task_run.config_snapshot or {}).get("frozen_task_snapshot") or {}).get("project_attempt_id")}, (task.requirements or {}).get("practice") is True or (task_run.config_snapshot or {}).get("practice") is True),
         assistance_level=level, execution_verification=ExecutionVerification.PLATFORM_VERIFIED,
         milestone_attempt_id=milestone_attempt_id,
     )

@@ -60,9 +60,12 @@ def sample_spec(*, day=1, kind="lab", key=None, steps=None, **over):
     return spec
 
 
-def make_structured_item(db, *, slug="ail5d1-concept", spec=None, title="Day 1: What AI Is and Isn't", est_minutes=60):
+def make_structured_item(db, *, slug="ail5d1-concept", spec=None, title="Day 1: What AI Is and Isn't", est_minutes=60, evidence_requirements=None):
     concept = make_concept(db, slug=slug, name=slug)
-    make_published_version(db, concept=concept)
+    if evidence_requirements is None:
+        make_published_version(db, concept=concept)
+    else:
+        make_published_version(db, concept=concept, evidence_requirements=evidence_requirements)
     item = ConceptGraphService(db).create_learning_item(
         concept_id=concept.id, item_type=LearningItemType.RESOURCE, title=title, body_md="legacy body",
         spec=spec if spec is not None else sample_spec(), reviewed=True, est_minutes=est_minutes,
@@ -74,4 +77,17 @@ def new_version(db, item, *, spec, title=None):
     return ConceptGraphService(db).create_learning_item_version(
         lineage_id=item.lineage_id, expected_current_version=item.version, item_type=item.item_type,
         title=title or item.title, body_md=item.body_md, spec=spec, reviewed=True, est_minutes=item.est_minutes,
+    )
+
+
+def make_legacy_item(db, *, slug="ail5d2-legacy", day=2):
+    """A NON-structured Level 1 Day: exactly the shape every existing Academy item has today."""
+    concept = make_concept(db, slug=slug, name=slug)
+    make_published_version(db, concept=concept)
+    spec = {
+        "academy_key": f"level1-v2-day-{day}", "curriculum": "ail5-level1-practical-ai-foundations-v2", "day": day,
+        "week": (day - 1) // 5 + 1, "kind": "lecture", "knowledge_check": [{"id": "q1", "prompt": "Q?", "answer": "a"}],
+    }
+    return ConceptGraphService(db).create_learning_item(
+        concept_id=concept.id, item_type=LearningItemType.RESOURCE, title=f"Day {day}: legacy", body_md="legacy body", spec=spec, reviewed=True, est_minutes=60,
     )

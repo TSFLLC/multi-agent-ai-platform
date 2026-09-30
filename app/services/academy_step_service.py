@@ -13,8 +13,11 @@ Rules it enforces
   interactive type needs a ``VerifiedCompletion`` that only server code can construct; nothing reachable from the
   API builds one in this slice, so an interactive step cannot be completed by asking for it.
 * Required steps cannot be skipped. Optional steps can.
-* Completion is never evidence. This service writes nothing to LearningEvidence, AIL.5C, Personal Lab or the
-  Professor. "Learning complete" is derived and labelled as not demonstrated knowledge.
+* Completion is never evidence, with ONE deliberate exception (AIL.5D.2): when the learner's last REQUIRED step
+  actually completes, a single ``lesson_completed`` evidence row is written (idempotent per learner and lineage). It
+  is the moral equivalent of the legacy "open" write, but earned: opening, viewing and skipping never write it.
+  Nothing is ever written to AIL.5C, Personal Lab or the Professor. "Learning complete" is derived and labelled as
+  not demonstrated knowledge.
 * Progress carries to a newer item version only for a step whose learner-visible fingerprint is unchanged.
 """
 
@@ -29,12 +32,15 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.academy_steps import SELF_COMPLETABLE, STEP_SCHEMA_VERSION, StepType, is_structured, public_steps
-from app.db.enums import AcademyStepStatus
+from app.db.enums import AcademyStepStatus, EvidenceType, GradingMode
 from app.db.mixins import utcnow
 from app.errors import ConflictError, NotFoundError
 from app.models.academy import AcademyStepProgress
 from app.models.concepts import LearningItem
+from app.models.learner import LearningEvidence
 from app.services.concept_graph_service import ConceptGraphService
+from app.services.learner_state_service import LearnerStateService
+from app.services.learning_evidence_service import LearningEvidenceService
 
 NOT_EVIDENCE = (
     "Learning complete is not demonstrated knowledge. Evidence is recorded by the knowledge check, the Personal Lab "
@@ -129,8 +135,10 @@ class AcademyStepService:
                 "open_count": own.open_count if own else 0,
                 "completed_at": row.completed_at if row is not None and row.status == AcademyStepStatus.COMPLETED else None,
             })
+        pending = [s["key"] for s in out_steps if s["status"] in ("not_started", "opened")]
         return {
             "item_id": item.id, "lineage_id": item.lineage_id, "version": item.version, "steps": out_steps,
+            "current_step_key": pending[0] if pending else None, "next_step_key": pending[1] if len(pending) > 1 else None,
             "required_total": req_total, "required_completed": req_done, "optional_total": opt_total, "optional_completed": opt_done,
             "learning_complete": req_total > 0 and req_done == req_total, "note": NOT_EVIDENCE,
         }
@@ -206,6 +214,8 @@ class AcademyStepService:
             row.completion_basis = basis
             row.step_fingerprint = step["fingerprint"]
         self.db.commit()
+        if step["required"] and self.progress(user_id, item.id)["learning_complete"]:
+            self._record_lesson_completed_once(user_id, item)
         return self._one(user_id, item, step_key)
 
     def skip_step(self, user_id: str, item_id: str, step_key: str) -> Dict[str, Any]:
@@ -220,7 +230,52 @@ class AcademyStepService:
         self.db.commit()
         return self._one(user_id, item, step_key)
 
+    def _record_lesson_completed_once(self, user_id: str, item: LearningItem) -> None:
+        """Earned, not opened: written only when every required step has completed, once per learner and lineage."""
+        version_ids = [
+            row for row in self.db.execute(select(LearningItem.id).where(LearningItem.lineage_id == item.lineage_id)).scalars()
+        ]
+        already = self.db.execute(select(LearningEvidence.id).where(
+            LearningEvidence.user_id == user_id, LearningEvidence.evidence_type == EvidenceType.LESSON_COMPLETED,
+            LearningEvidence.learning_item_id.in_(version_ids),
+        )).first()
+        concept_version = self._graph.get_current_version(item.concept_id)
+        if already is not None or concept_version is None:
+            return
+        LearningEvidenceService(self.db).record_evidence(
+            user_id=user_id, concept_id=item.concept_id, concept_version_id=concept_version.id, learning_item_id=item.id,
+            evidence_type=EvidenceType.LESSON_COMPLETED, grader=GradingMode.SELF, passed=True,
+        )
+
+    def learning_view(self, user_id: str, item_id: str) -> Dict[str, Any]:
+        """The learner-facing read model of one structured Day: ordered PUBLIC steps merged with THIS learner's
+        status, current/next derivation, learning completion, and demonstrated. Read-only; never writes; never
+        contains ``private``; nothing in it can be supplied by a client."""
+        item = self._item(item_id)
+        progress = self.progress(user_id, item_id)
+        status = {s["key"]: s for s in progress["steps"]}
+        steps = []
+        for step in self._steps(item):
+            s = status[step["key"]]
+            view = {k: step[k] for k in ("key", "position", "type", "title", "required", "estimated_minutes", "content", "binding") if k in step}
+            view.update(
+                status=s["status"], carried_from_version=s["carried_from_version"], open_count=s["open_count"], completed_at=s["completed_at"],
+                is_current=step["key"] == progress["current_step_key"], is_next=step["key"] == progress["next_step_key"],
+            )
+            steps.append(view)
+        ladder = LearnerStateService(self.db).state(user_id, item.concept_id).ladder
+        return {
+            "structured": True, "item_id": item.id, "lineage_id": item.lineage_id, "version": item.version, "title": item.title,
+            "day": item.spec.get("day"), "week": item.spec.get("week"), "kind": item.spec.get("kind"),
+            "step_schema_version": STEP_SCHEMA_VERSION, "steps": steps,
+            "current_step_key": progress["current_step_key"], "next_step_key": progress["next_step_key"],
+            "required_total": progress["required_total"], "required_completed": progress["required_completed"],
+            "optional_total": progress["optional_total"], "optional_completed": progress["optional_completed"],
+            "learning_complete": progress["learning_complete"], "demonstrated": ladder == "demonstrated", "concept_state": ladder,
+            "note": NOT_EVIDENCE,
+        }
+
     def _one(self, user_id: str, item: LearningItem, step_key: str) -> Dict[str, Any]:
         summary = self.progress(user_id, item.id)
         step = next(s for s in summary["steps"] if s["key"] == step_key)
-        return {"step": step, "day": {k: summary[k] for k in ("item_id", "version", "required_total", "required_completed", "optional_total", "optional_completed", "learning_complete", "note")}}
+        return {"step": step, "day": {k: summary[k] for k in ("item_id", "version", "current_step_key", "next_step_key", "required_total", "required_completed", "optional_total", "optional_completed", "learning_complete", "note")}}

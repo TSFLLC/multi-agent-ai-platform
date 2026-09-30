@@ -19,7 +19,9 @@ per requirement through ``max_assistance`` / ``min_verification`` /
 3. self-reported work (``execution_verification=self_reported`` or
    ``grader=self``) never counts;
 4. assistance above H2 never counts (H3 partial, H4 guided, H5 solution);
-5. project execution evidence must be platform- or sandbox-verified.
+5. project execution evidence must be platform- or sandbox-verified;
+6. practice evidence (AIL.5D: guided/independent practice, never a demonstration)
+   never counts.
 """
 
 from typing import Any, Iterable, Optional, Tuple
@@ -73,6 +75,40 @@ EXECUTION_EVIDENCE_TYPES = frozenset(
 JUDGMENT_EVIDENCE_TYPES = frozenset({EvidenceType.EXPLAIN_BACK})
 
 ATTESTATION_CHOICES = ("no_external_help", "used_docs", "used_ai_assistant", "other")
+
+# -- Practice is never a demonstration (AIL.5D.2) ------------------------------
+# Practice (guided or independent, repeatable, safe to fail) may at most count
+# toward PRACTICED. It is marked on the evidence row itself (``score_json.practice
+# is true``), so the marker is append-only history and needs no schema change. The
+# DEMONSTRATED floor below refuses any row that carries it, whatever wrote the row,
+# and the canonical write path refuses the marker on demonstration-only evidence.
+PRACTICE_MARKER = "practice"
+
+# Evidence types only a formal demonstration may write (AIL.5C's own writer).
+DEMONSTRATION_ONLY_EVIDENCE_TYPES = frozenset(
+    {
+        EvidenceType.EXPLAIN_BACK,
+        EvidenceType.MODIFICATION,
+        EvidenceType.REPRODUCTION,
+        EvidenceType.DEBUGGING,
+        EvidenceType.PROJECT_ASSESSMENT,
+    }
+)
+
+
+def is_practice_score(score: Any) -> bool:
+    return isinstance(score, dict) and score.get(PRACTICE_MARKER) is True
+
+
+def is_practice(row) -> bool:
+    return is_practice_score(getattr(row, "score", None))
+
+
+def with_practice_marker(score: Optional[dict], practice: bool) -> Optional[dict]:
+    """The score payload with the practice marker applied (unchanged when not practice)."""
+    if not practice:
+        return score
+    return {**(score or {}), PRACTICE_MARKER: True}
 
 
 def assistance_rank(level: Optional[AssistanceLevel]) -> Optional[int]:
@@ -131,6 +167,8 @@ def demonstration_floor(row) -> Tuple[bool, str]:
         return False, "superseded"
     if row.on_demo_data:
         return False, "demo_data"
+    if is_practice(row):
+        return False, "practice"
     if row.grader == GradingMode.SELF or row.execution_verification == ExecutionVerification.SELF_REPORTED:
         return False, "self_reported"
     rank = assistance_rank(row.assistance_level)

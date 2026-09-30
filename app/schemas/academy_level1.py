@@ -31,6 +31,11 @@ class Level1DayRead(BaseModel):
     evidence_earned: bool
     next: Optional[int] = None
     capstone_stage: Optional[str] = None
+    # AIL.5D.2 (additive). ``learning_complete`` is None for legacy Days; ``demonstrated`` is the canonical learner
+    # state for the Day's Concept. ``evidence_earned`` is unchanged for legacy Days.
+    structured: bool = False
+    learning_complete: Optional[bool] = None
+    demonstrated: bool = False
 
 
 class Level1ItemRead(BaseModel):
@@ -49,11 +54,14 @@ class Level1ItemRead(BaseModel):
 
 
 class Level1EvidenceRead(BaseModel):
-    evidence_id: str
+    evidence_id: Optional[str] = None
     concept_id: str
     learner_state: str
     passed: Optional[bool] = None
     results: Optional[List[dict]] = None
+    # AIL.5D.2: a structured Day is only opened, never completed, by /open.
+    opened: Optional[bool] = None
+    evidence_recorded: Optional[bool] = None
 
 
 class Level1LabRead(BaseModel):
@@ -128,6 +136,32 @@ class Level1StepsRead(BaseModel):
     step_schema_version: int
     steps: List[Dict[str, Any]]
     progress: Dict[str, Any]
+
+
+class Level1LearningRead(BaseModel):
+    """AIL.5D.2 learner read model of a Day. For a legacy Day only the identity fields and ``demonstrated`` are
+    meaningful (``structured`` is false, no steps). Never contains ``private``; nothing in it is client-supplied."""
+
+    structured: bool
+    item_id: str
+    lineage_id: Optional[str] = None
+    version: Optional[int] = None
+    title: str
+    day: Optional[int] = None
+    week: Optional[int] = None
+    kind: Optional[str] = None
+    step_schema_version: Optional[int] = None
+    steps: List[Dict[str, Any]] = Field(default_factory=list)
+    current_step_key: Optional[str] = None
+    next_step_key: Optional[str] = None
+    required_total: Optional[int] = None
+    required_completed: Optional[int] = None
+    optional_total: Optional[int] = None
+    optional_completed: Optional[int] = None
+    learning_complete: Optional[bool] = None
+    demonstrated: bool = False
+    concept_state: Optional[str] = None
+    note: Optional[str] = None
 
 
 class Level1StepProgressRead(BaseModel):

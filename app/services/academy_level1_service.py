@@ -23,6 +23,8 @@ from app.db.enums import (AssistanceLevel, AcademyProgramItemKind, AcademyProgra
                           ProjectAudienceLevel, ProjectLadderLevel, ProjectTemplateBuildMode,
                           QuestionOrigin, ConceptRelationType)
 from app.academy_curriculum import FOUNDATIONS_PROGRAM
+from app.academy_steps import is_structured
+from app.services.academy_step_service import AcademyStepService
 from app.practical_ai_foundations_manifest import CANONICAL_FOUNDATIONS_SLUGS
 from app.errors import ConflictError, NotFoundError
 from app.models.academy import (AcademyProgram, AcademyProgramItem, AcademyProgramVersion,
@@ -499,10 +501,32 @@ class AcademyLevel1Service:
         items = self._current_academy_items()
         evidence = LearningEvidenceService(self.db).list_evidence(user_id)
         by_item = {e.learning_item_id for e in evidence}
-        return [{"day": i.spec["day"], "week": i.spec["week"], "title": i.title, "kind": i.spec["kind"], "item_id": i.id, "estimated_minutes": i.est_minutes, "state": LearnerStateService(self.db).state(user_id, i.concept_id).ladder, "evidence_earned": i.id in by_item, "next": i.spec["day"] + 1 if i.spec["day"] < 30 else None, "capstone_stage": i.spec.get("capstone_stage")} for i in sorted(items, key=lambda x: x.spec["day"])]
+        # AIL.5D.2: for a structured Day "evidence earned" excludes lesson_completed (which only says the required
+        # steps were finished), so finishing a lesson is never mistaken for having shown knowledge.
+        real_by_item = {e.learning_item_id for e in evidence if e.evidence_type != EvidenceType.LESSON_COMPLETED}
+        steps = AcademyStepService(self.db)
+        rows = []
+        for i in sorted(items, key=lambda x: x.spec["day"]):
+            structured = is_structured(i.spec)
+            ladder = LearnerStateService(self.db).state(user_id, i.concept_id).ladder
+            rows.append({
+                "day": i.spec["day"], "week": i.spec["week"], "title": i.title, "kind": i.spec["kind"], "item_id": i.id,
+                "estimated_minutes": i.est_minutes, "state": ladder,
+                "evidence_earned": (i.id in real_by_item) if structured else (i.id in by_item),
+                "next": i.spec["day"] + 1 if i.spec["day"] < 30 else None, "capstone_stage": i.spec.get("capstone_stage"),
+                "structured": structured,
+                "learning_complete": steps.progress(user_id, i.id)["learning_complete"] if structured else None,
+                "demonstrated": ladder == "demonstrated",
+            })
+        return rows
 
     def expose(self, user_id: str, item_id: str):
-        item = self.item(item_id); version = self.graph.get_current_version(item.concept_id)
+        item = self.item(item_id)
+        # AIL.5D.2: opening a STRUCTURED Day is only opening. No evidence is written; lesson_completed is earned
+        # when the required steps complete (AcademyStepService). Legacy (non-structured) Days are unchanged.
+        if is_structured(item.spec):
+            return None
+        version = self.graph.get_current_version(item.concept_id)
         existing = [e for e in LearningEvidenceService(self.db).list_evidence(user_id, concept_id=item.concept_id) if e.learning_item_id == item.id and e.evidence_type == EvidenceType.LESSON_COMPLETED]
         if existing: return existing[0]
         return LearningEvidenceService(self.db).record_evidence(user_id=user_id, concept_id=item.concept_id, concept_version_id=version.id, learning_item_id=item.id, evidence_type=EvidenceType.LESSON_COMPLETED, grader=GradingMode.SELF, passed=True)

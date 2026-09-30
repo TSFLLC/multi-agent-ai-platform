@@ -48,6 +48,7 @@ from app.models.lab import Experiment
 from app.models.learner import LearningEvidence
 from app.models.tasks import AgentRun, TaskRun
 from app.services.experiment_execution_service import ExperimentExecutionService
+from app.services.independence_policy import with_practice_marker
 from app.services.learning_evidence_service import LearningEvidenceService
 
 READY = "READY"
@@ -165,7 +166,7 @@ class ExperimentLearningQualificationService:
                 concept_version_id=experiment.concept_version_id,
                 evidence_type=EvidenceType.LAB,
                 grader=GradingMode.DETERMINISTIC,
-                score=None,
+                score=with_practice_marker(None, config.get("practice") is True),
                 passed=True,
                 ref_type=EvidenceRefType.EXPERIMENT,
                 ref_id=experiment.id,

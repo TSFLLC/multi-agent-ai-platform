@@ -18,7 +18,7 @@ from app.schemas.academy_level1 import (
     Level1AssessmentDraftRequest, Level1AssessmentStartRequest, Level1AssessmentSubmitRequest,
     Level1DayRead, Level1EvidenceRead, Level1GraduationRead, Level1ItemRead, Level1LabRead,
     Level1KnowledgeCheckRequest, Level1ReviewRead, Level1LabLaunchRequest, Level1LabResultRequest,
-    Level1AssistanceRequest, Level1StepProgressRead, Level1StepsRead,
+    Level1AssistanceRequest, Level1LearningRead, Level1StepProgressRead, Level1StepsRead,
 )
 from app.schemas.lab import ExperimentCreate
 from app.services.academy_level1_service import (
@@ -99,7 +99,13 @@ def day(day: int, db: Session = Depends(get_db), user: User = Depends(get_curren
 
 @router.post("/items/{item_id}/open", response_model=Level1EvidenceRead)
 def open_item(item_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    evidence = AcademyLevel1Service(db).expose(user.id, item_id)
+    service = AcademyLevel1Service(db)
+    evidence = service.expose(user.id, item_id)
+    if evidence is None:
+        # AIL.5D.2: a structured Day is only opened. No evidence is written here, ever.
+        item = service.item(item_id)
+        ladder = LearnerStateService(db).state(user.id, item.concept_id).ladder
+        return {"evidence_id": None, "concept_id": item.concept_id, "learner_state": ladder, "passed": None, "opened": True, "evidence_recorded": False}
     state = LearnerStateService(db).state(user.id, evidence.concept_id)
     return {"evidence_id": evidence.id, "concept_id": evidence.concept_id, "learner_state": state.ladder, "passed": evidence.passed}
 
@@ -296,6 +302,20 @@ def review(db: Session = Depends(get_db), user: User = Depends(get_current_user)
 
 # -- AIL.5D.1: structured steps + learner step progress -----------------------------------------------------------------
 # Additive and learner-scoped. Opening a step never completes it; interactive steps cannot be completed by request.
+
+
+@router.get("/days/{day}/learning", response_model=Level1LearningRead)
+def day_learning(day: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """The learner read model of a Day. Structured Days return ordered public steps with this learner's status;
+    legacy Days answer ``structured: false`` and keep using ``GET /days/{day}``."""
+    level1 = AcademyLevel1Service(db)
+    rows = [row for row in level1.days(user.id) if row["day"] == day]
+    if not rows:
+        raise NotFoundError("Academy Level 1 day is not provisioned")
+    row = rows[0]
+    if not row["structured"]:
+        return {"structured": False, "item_id": row["item_id"], "title": row["title"], "day": row["day"], "week": row["week"], "kind": row["kind"], "demonstrated": row["demonstrated"], "concept_state": row["state"]}
+    return AcademyStepService(db).learning_view(user.id, row["item_id"])
 
 
 @router.get("/items/{item_id}/steps", response_model=Level1StepsRead)

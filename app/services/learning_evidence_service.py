@@ -54,6 +54,10 @@ class LearningEvidenceService:
         evidence) can commit or roll both back together. Nothing else about
         the row, the validation, or its append-only nature differs.
         """
+        from app.services.independence_policy import DEMONSTRATION_ONLY_EVIDENCE_TYPES, is_practice_score
+
+        if is_practice_score(score) and EvidenceType(evidence_type) in DEMONSTRATION_ONLY_EVIDENCE_TYPES:
+            raise ValueError("Practice work can never be recorded as demonstration evidence.")
         evidence = LearningEvidence(
             user_id=user_id,
             concept_id=concept_id,

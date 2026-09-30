@@ -64,7 +64,8 @@ DB CHECKs keep `completed_at` / `skipped_at` consistent with `status` and `open_
   server code constructs (no API path builds one in 5D.1), so an interactive step cannot be completed by asking;
 * required steps cannot be skipped; optional steps can;
 * progress carries to a newer item version only for a step whose fingerprint is unchanged and that was completed/skipped;
-* nothing is written to LearningEvidence, AIL.5C, Personal Lab or the Professor. "Learning complete" (all required steps
+* nothing is written to AIL.5C, Personal Lab or the Professor. (5D.2: a single `lesson_completed` row is earned when the last
+  required step completes; see `docs/ail5d2-step-read-model.md`. Opening, viewing and skipping never write evidence.) "Learning complete" (all required steps
   completed) is derived and labelled as not demonstrated knowledge.
 
 ## API (additive, learner-scoped, under `/academy/level-1`)
