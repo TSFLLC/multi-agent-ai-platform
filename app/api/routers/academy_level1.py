@@ -18,13 +18,15 @@ from app.schemas.academy_level1 import (
     Level1AssessmentDraftRequest, Level1AssessmentStartRequest, Level1AssessmentSubmitRequest,
     Level1DayRead, Level1EvidenceRead, Level1GraduationRead, Level1ItemRead, Level1LabRead,
     Level1KnowledgeCheckRequest, Level1ReviewRead, Level1LabLaunchRequest, Level1LabResultRequest,
-    Level1AssistanceRequest,
+    Level1AssistanceRequest, Level1StepProgressRead, Level1StepsRead,
 )
 from app.schemas.lab import ExperimentCreate
 from app.services.academy_level1_service import (
     AcademyLevel1Service, CAPSTONE_STAGES, LEVEL1_CAPSTONE_TEMPLATE_KEY,
     ensure_level1_capstone_template,
 )
+from app.academy_steps import strip_private
+from app.services.academy_step_service import AcademyStepService
 from app.services.assessment_service import AssessmentService
 from app.services.experiment_learning_qualification_service import ExperimentLearningQualificationService
 from app.services.lab_service import LabService
@@ -42,7 +44,8 @@ router = APIRouter(prefix="/academy/level-1", tags=["academy-level-1"])
 
 
 def _public_item(item) -> Level1ItemRead:
-    spec = dict(item.spec or {})
+    # AIL.5D.1: structured steps may carry server-only ``private`` content (reveals, answer keys); strip it here.
+    spec = dict(strip_private(item.spec or {}))
     spec["knowledge_check"] = [
         {key: value for key, value in question.items() if key not in ("answer", "explanation")}
         for question in spec.get("knowledge_check", [])
@@ -289,3 +292,28 @@ def graduation(db: Session = Depends(get_db), user: User = Depends(get_current_u
 @router.get("/days/30/review", response_model=Level1ReviewRead)
 def review(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     return AcademyLevel1Service(db).review(user.id)
+
+
+# -- AIL.5D.1: structured steps + learner step progress -----------------------------------------------------------------
+# Additive and learner-scoped. Opening a step never completes it; interactive steps cannot be completed by request.
+
+
+@router.get("/items/{item_id}/steps", response_model=Level1StepsRead)
+def item_steps(item_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    service = AcademyStepService(db)
+    return {**service.structure(item_id), "progress": service.progress(user.id, item_id)}
+
+
+@router.post("/items/{item_id}/steps/{step_key}/open", response_model=Level1StepProgressRead)
+def open_step(item_id: str, step_key: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    return AcademyStepService(db).open_step(user.id, item_id, step_key)
+
+
+@router.post("/items/{item_id}/steps/{step_key}/complete", response_model=Level1StepProgressRead)
+def complete_step(item_id: str, step_key: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    return AcademyStepService(db).complete_step(user.id, item_id, step_key)
+
+
+@router.post("/items/{item_id}/steps/{step_key}/skip", response_model=Level1StepProgressRead)
+def skip_step(item_id: str, step_key: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    return AcademyStepService(db).skip_step(user.id, item_id, step_key)

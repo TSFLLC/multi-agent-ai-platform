@@ -657,6 +657,15 @@ class AcademyEnrollmentStatus(str, enum.Enum):
     WITHDRAWN = "withdrawn"
 
 
+class AcademyStepStatus(str, enum.Enum):
+    """AIL.5D.1 learner progress on one authored step. ``opened`` is only "the learner viewed it": it never
+    counts as completion. ``completed`` is written only by the step service (see AcademyStepService)."""
+
+    OPENED = "opened"
+    COMPLETED = "completed"
+    SKIPPED = "skipped"
+
+
 class AcademyPace(str, enum.Enum):
     SCHEDULED = "scheduled"
     SELF_PACED = "self_paced"

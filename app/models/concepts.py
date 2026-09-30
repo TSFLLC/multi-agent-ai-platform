@@ -201,6 +201,16 @@ class LearningItem(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
             raise ValueError("A Learning Item lineage_id must be a canonical UUID string")
         return value.lower()
 
+    # AIL.5D.1: an item that opts into structured steps must satisfy the step contract. Fails closed at
+    # construction/assignment; every existing (non-structured) spec passes through untouched.
+    @validates("spec")
+    def _validate_spec(self, _key: str, value: object) -> object:
+        from app.academy_steps import is_structured, validate_structured_spec
+
+        if is_structured(value):
+            validate_structured_spec(value)
+        return value
+
     @validates("version")
     def _validate_version(self, _key: str, value: object) -> int:
         if isinstance(value, bool) or not isinstance(value, int) or value < 1:

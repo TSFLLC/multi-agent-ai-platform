@@ -20,9 +20,21 @@ entrypoint then never starts the Web/Worker pair.)
 | `academy_lineage_enforcement` | Forward revision (this is what new deployments add). Reversible. | Proves the data is valid, ensures the indexes exist, then enforces `lineage_id IS NOT NULL` and `version >= 1` in the database: SQLite triggers (`trg_learning_items_lineage_insert` / `_update`), or a real NOT NULL + CHECK on other engines. Downgrade removes only what it added. |
 
 The `ail5d_` prefix is a naming accident. **It does not mean the Structured
-Learning Experience (lesson steps, `academy_step_progress`, step-scoped Professor,
-step UI, curriculum v3) has started; it has not.** The revision is Learning Item
-revision infrastructure for the Level 1 Academy.
+Learning Experience (lesson steps, step progress, step-scoped Professor, step UI,
+curriculum v3) is that revision.** It is Learning Item revision infrastructure for
+the Level 1 Academy.
+
+## Structured Learning (AIL.5D.1): `academy_step_progress`
+
+| Revision | Status | What it does |
+|---|---|---|
+| `academy_step_progress` | Forward revision on top of `academy_lineage_enforcement`. **Reversible.** | Creates ONE table, `academy_step_progress` (mutable, user-scoped learner progress on the authored steps a Learning Item carries in `spec_json.steps`). Touches no existing table, row, index or trigger. |
+
+`downgrade` drops only that table (and its index) and **refuses, changing nothing,
+while any learner progress row exists**: that is learner data, and the platform's
+rollback is a restore of the pre-migration backup, not `downgrade`. This revision
+is deliberately **not** in `EXPECTED_IRREVERSIBLE`. It never renames, rewrites or
+depends on the body of `ail5d_learning_item_lineage`.
 
 Both paths reach the same contract: an already-migrated database (staging) runs
 only `academy_lineage_enforcement`; a fresh or pre-AIL5 database runs the whole

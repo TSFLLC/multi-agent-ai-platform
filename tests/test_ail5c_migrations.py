@@ -25,6 +25,7 @@ PREVIOUS_HEAD = "c31b7f4a1a5e"
 R1, R2, R3 = "ail5c_assessment_tables", "ail5c_evidence_enum_ext", "ail5c_grader_agent_role"
 R4 = "ail5d_learning_item_lineage"  # deployed history: keep this exact id
 R5 = "academy_lineage_enforcement"  # forward revision that adds the stronger enforcement
+R6 = "academy_step_progress"  # AIL.5D.1 structured learning foundation: the current head
 NOW = "2026-01-01T00:00:00"
 NEW_TABLES = {
     "assessment_definitions",
@@ -311,7 +312,7 @@ def test_full_chain_on_a_fresh_disposable_database(db_path):
         _clean(conn)
     assert command.current  # alembic api present
     heads = {row[0] for row in engine.connect().execute(text("SELECT version_num FROM alembic_version"))}
-    assert heads == {R5}
+    assert heads == {R6}
     engine.dispose()
 
 

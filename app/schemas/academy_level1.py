@@ -115,3 +115,21 @@ class Level1ReviewRead(BaseModel):
     revisit: List[str]
     recommendations: List[str]
     assessment_results_consulted: int
+
+
+class Level1StepsRead(BaseModel):
+    """AIL.5D.1: the learner-safe structured steps of one Day plus the learner's own progress. ``steps`` never
+    contains ``private`` (answers, reveals, rubric material)."""
+
+    item_id: str
+    lineage_id: str
+    version: int
+    title: str
+    step_schema_version: int
+    steps: List[Dict[str, Any]]
+    progress: Dict[str, Any]
+
+
+class Level1StepProgressRead(BaseModel):
+    step: Dict[str, Any]
+    day: Dict[str, Any]

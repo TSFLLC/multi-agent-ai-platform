@@ -310,7 +310,8 @@ class AcademyLevel1Service:
             if existing:
                 existing.title = f"Day {day}: {title}"
                 existing.body_md = _day_body(day)
-                existing.spec = spec
+                # AIL.5D.1: re-provisioning refreshes the legacy fields but must never drop authored structured steps.
+                existing.spec = {**spec, **{k: existing.spec[k] for k in ("step_schema_version", "steps") if existing.spec and k in existing.spec}}
                 existing.item_type = item_type
                 existing.reviewed = True
                 existing.est_minutes = 90 if item_type == LearningItemType.LAB else 60

@@ -17,6 +17,7 @@ from app.db.enums import (
     AcademyPace,
     AcademyProgramItemKind,
     AcademyProgramVersionStatus,
+    AcademyStepStatus,
     AssistanceLevel,
     ExecutionVerification,
     MilestoneAttemptMode,
@@ -264,3 +265,46 @@ class AssessmentReadySubmission(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     status: Mapped[str] = mapped_column(String(30), nullable=False, default="ready")
     snapshot: Mapped[dict] = mapped_column("snapshot_json", nullable=False, default=dict)
     finalized_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class AcademyStepProgress(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
+    """AIL.5D.1 — one learner's progress on one authored step of one immutable Learning Item version.
+
+    Authored content is never stored or edited here: the step lives in ``learning_items.spec_json.steps`` and
+    is identified by ``step_key``. This row is mutable learner state only. It writes no evidence and derives no
+    mastery: "learning complete" is a presentation state; demonstration stays with AIL.5C / LearningEvidence.
+
+    * ``learning_item_id`` is the exact version the learner acted on; ``lineage_id`` (set by the service from
+      that item, never by a client) lets progress be looked up across versions.
+    * ``step_fingerprint`` is the digest of the step's learner-visible definition at write time. A later version
+      of the Day only inherits this row when the step's fingerprint is unchanged.
+    * ``opened`` never means completed. Completion carries a ``completion_basis`` recording how it was earned.
+    """
+
+    __tablename__ = "academy_step_progress"
+    __table_args__ = (
+        UniqueConstraint("user_id", "learning_item_id", "step_key", name="uq_academy_step_progress_user_item_step"),
+        CheckConstraint("open_count >= 1", name="open_count"),
+        CheckConstraint(
+            "(status = 'completed' AND completed_at IS NOT NULL) OR (status <> 'completed' AND completed_at IS NULL)",
+            name="completed_at",
+        ),
+        CheckConstraint(
+            "(status = 'skipped' AND skipped_at IS NOT NULL) OR (status <> 'skipped' AND skipped_at IS NULL)",
+            name="skipped_at",
+        ),
+        Index("ix_academy_step_progress_user_lineage", "user_id", "lineage_id"),
+    )
+
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    learning_item_id: Mapped[str] = mapped_column(ForeignKey("learning_items.id", ondelete="RESTRICT"), nullable=False)
+    lineage_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    step_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    step_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[AcademyStepStatus] = mapped_column(sa_enum(AcademyStepStatus), nullable=False, default=AcademyStepStatus.OPENED)
+    open_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    first_opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+    last_opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    skipped_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    completion_basis: Mapped[Optional[dict]] = mapped_column("completion_basis_json", nullable=True)

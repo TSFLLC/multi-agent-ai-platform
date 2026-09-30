@@ -30,7 +30,7 @@ ROOT = Path(__file__).resolve().parent.parent
 PRE_AIL5 = "ail4c_professor_agent_role"
 R3 = "ail5c_grader_agent_role"
 DEPLOYED = "ail5d_learning_item_lineage"  # deployed history: exact id, exact body
-FORWARD = "academy_lineage_enforcement"
+FORWARD = "academy_lineage_enforcement"  # these tests target this revision explicitly; later revisions (academy_step_progress) sit above it
 NS = uuid.UUID("5d9a3b42-8a61-4cf8-b3e6-0a89d0de5d5d")  # the deployed backfill's namespace
 ITEMS = 94  # the live staging table size
 
@@ -280,7 +280,7 @@ def test_path_a_the_deployed_staging_shape_upgrades_by_running_only_the_forward_
         _behaviour(engine)["null_lineage"] == "accepted"
     ), "the deployed shape does not enforce it (why a forward revision is needed)"
 
-    steps = _run(_cfg(), "upgrade", "head")
+    steps = _run(_cfg(), "upgrade", FORWARD)
 
     assert steps == [f"Running upgrade {DEPLOYED} -> {FORWARD}"], "no historical migration is rerun"
     assert _items(engine) == before_items, "no lineage id or version changed, no row lost or added"
@@ -289,7 +289,7 @@ def test_path_a_the_deployed_staging_shape_upgrades_by_running_only_the_forward_
     _assert_target_contract(engine)
     with engine.begin() as conn:
         assert conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == FORWARD
-    assert _run(_cfg(), "upgrade", "head") == [], "a second upgrade is a no-op"
+    assert _run(_cfg(), "upgrade", FORWARD) == [], "a second upgrade is a no-op"
     engine.dispose()
 
 
@@ -303,7 +303,7 @@ def test_path_a_the_forward_revision_refuses_invalid_data_and_changes_nothing(tm
             conn.execute(text(statement))  # only possible because the deployed shape does not enforce it
         before = _shape(engine)
         with pytest.raises(RuntimeError, match=needle):
-            _run(_cfg(), "upgrade", "head")
+            _run(_cfg(), "upgrade", FORWARD)
         assert _shape(engine) == before and before["triggers"] == {}
         with engine.begin() as conn:
             assert conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == DEPLOYED
@@ -311,7 +311,7 @@ def test_path_a_the_forward_revision_refuses_invalid_data_and_changes_nothing(tm
                 text("UPDATE learning_items SET lineage_id = :l, version = 1 WHERE id = 'item-001'"),
                 {"l": str(uuid.uuid5(NS, "learning-item:item-001"))},
             )
-    _run(_cfg(), "upgrade", "head")  # repaired data now upgrades
+    _run(_cfg(), "upgrade", FORWARD)  # repaired data now upgrades
     _assert_target_contract(engine)
     engine.dispose()
 
@@ -324,7 +324,7 @@ def test_path_a_an_interrupted_forward_revision_resumes(tmp_path, monkeypatch):
                 "CREATE TRIGGER trg_learning_items_lineage_insert BEFORE INSERT ON learning_items WHEN NEW.lineage_id IS NULL BEGIN SELECT RAISE(ABORT, 'x'); END"
             )
         )
-    _run(_cfg(), "upgrade", "head")
+    _run(_cfg(), "upgrade", FORWARD)
     _assert_target_contract(engine)
     engine.dispose()
 
@@ -332,7 +332,7 @@ def test_path_a_an_interrupted_forward_revision_resumes(tmp_path, monkeypatch):
 def test_the_forward_revision_is_reversible_and_removes_only_its_own_triggers(tmp_path, monkeypatch):
     _path, engine = _deployed_shape_database(tmp_path, monkeypatch)
     deployed_shape, before_items, before_hash = _shape(engine), _items(engine), _content_hash(engine)
-    _run(_cfg(), "upgrade", "head")
+    _run(_cfg(), "upgrade", FORWARD)
     assert _run(_cfg(), "downgrade", DEPLOYED) == [f"Running downgrade {FORWARD} -> {DEPLOYED}"]
     assert _shape(engine) == deployed_shape, "back to exactly the deployed shape"
     assert _items(engine) == before_items and _content_hash(engine) == before_hash
@@ -349,7 +349,7 @@ def test_path_b_a_pre_ail5_database_runs_the_whole_chain_to_the_same_contract(tm
     _seed_items(engine, ITEMS)
     before_hash = _content_hash(engine)
 
-    steps = _run(_cfg(), "upgrade", "head")
+    steps = _run(_cfg(), "upgrade", FORWARD)
 
     assert steps[-2:] == [f"Running upgrade {R3} -> {DEPLOYED}", f"Running upgrade {DEPLOYED} -> {FORWARD}"]
     assert len(steps) == 8  # 5A, 5B (x2), 5C (x3), the deployed lineage revision, the forward revision
@@ -368,16 +368,16 @@ def test_path_b_a_pre_ail5_database_runs_the_whole_chain_to_the_same_contract(tm
 
 def test_paths_a_b_and_c_end_with_the_same_lineage_contract(tmp_path, monkeypatch):
     _path_a, engine_a = _deployed_shape_database(tmp_path, monkeypatch)
-    _run(_cfg(), "upgrade", "head")
+    _run(_cfg(), "upgrade", FORWARD)
 
     path_b = _database(tmp_path, monkeypatch, "path-b")
     _run(_cfg(), "upgrade", PRE_AIL5)
     engine_b = _engine(path_b)
     _seed_items(engine_b, 12)
-    _run(_cfg(), "upgrade", "head")
+    _run(_cfg(), "upgrade", FORWARD)
 
     path_c = _database(tmp_path, monkeypatch, "path-c")
-    assert _run(_cfg(), "upgrade", "head")[-1] == f"Running upgrade {DEPLOYED} -> {FORWARD}"
+    assert _run(_cfg(), "upgrade", FORWARD)[-1] == f"Running upgrade {DEPLOYED} -> {FORWARD}"
     engine_c = _engine(path_c)
 
     contracts = {name: _final_contract(e) for name, e in (("A", engine_a), ("B", engine_b), ("C", engine_c))}
