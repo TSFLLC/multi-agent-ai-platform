@@ -2,42 +2,19 @@ import { api } from "../api.js";
 import { el, mount } from "../dom.js";
 import { navigate } from "../router.js";
 import { academyEntryLinks, level1AssessmentAction } from "../academyLinks.js";
+import { renderWorkspace } from "../workspace/workspace.js";
 
-export async function renderAcademy(root) {
-  mount(root, el("section", { class: "page-section academy-page" }, [
-    el("h1", {}, ["AI Academy"]),
-    el("p", { class: "page-intro" }, ["Practical AI Foundations · 30 days · evidence over completion."]),
-    academyEntryLinks({ current: "level1" }),
-    el("div", { class: "academy-content" }, [el("p", {}, ["Loading Academy…"])]),
-  ]));
-  const content = root.querySelector(".academy-content");
-  try {
-    let days = await api.get("/academy/level-1/days");
-    if (!days.length) {
-      await api.post("/academy/level-1/provision");
-      days = await api.get("/academy/level-1/days");
-    }
-    const next = days.find((day) => !day.evidence_earned) || days[days.length - 1];
-    mount(content, el("div", {}, [
-      el("div", { class: "academy-continue" }, [
-        el("h2", {}, ["Continue Learning"]),
-        el("p", {}, [`Day ${next.day} · Week ${next.week} · ${next.kind === "lab" ? "Personal Lab" : "Lecture"} · ${next.estimated_minutes || 60} min`]),
-        el("button", { class: "primary", type: "button", onclick: () => navigate(`#/academy/level-1/${next.day}`) }, ["Continue"]),
-      ]),
-      el("h2", {}, ["Days 1–30"]),
-      el("ol", { class: "academy-day-list" }, days.map((day) => el("li", {}, [
-        el("a", { href: `#/academy/level-1/${day.day}` }, [`Day ${day.day}: ${day.title}`]),
-        el("span", { class: "muted" }, [` · ${day.kind === "lab" ? "Lab" : "Lecture"} · ${day.state}`]),
-      ]))),
-    ]));
-  } catch (err) {
-    mount(content, el("p", { class: "error-banner" }, [err.message || "Academy is unavailable."]));
-  }
-}
+export { renderProgramOverview as renderAcademy } from "../workspace/overview.js";
 
 export async function renderAcademyDay(root, { day }) {
   mount(root, el("section", { class: "page-section academy-lesson" }, [el("p", {}, ["Loading lesson…"])]));
   try {
+    // AIL5D.6: a structured Day opens in the Learning Workspace; a Day that has not been converted keeps the legacy page.
+    const learning = await api.get(`/academy/level-1/days/${encodeURIComponent(day)}/learning`);
+    if (learning.structured) {
+      const days = await api.get("/academy/level-1/days");
+      return await renderWorkspace(root, day, learning, days);
+    }
     const item = await api.get(`/academy/level-1/days/${encodeURIComponent(day)}`);
     await api.post(`/academy/level-1/items/${encodeURIComponent(item.id)}/open`);
     const assessment = level1AssessmentAction(item);

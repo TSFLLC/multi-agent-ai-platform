@@ -211,7 +211,8 @@ class AcademyPracticeService:
         state = "completed" if status == AgentRunStatus.COMPLETED and output is not None else \
             "failed" if status in _TERMINAL_FAILURES or (status == AgentRunStatus.COMPLETED and output is None) else "running"
         return {"seq": run.seq, "run_id": run.id, "variables": dict(run.variables), "state": state, "output": output,
-                "model": run.model_canonical_id, "created_at": run.created_at.isoformat()}
+                "model": run.model_canonical_id, "created_at": run.created_at.isoformat(),
+                "agent_run_id": run.agent_run_id, "task_run_id": run.task_run_id}
 
     def _responses(self, inst: AcademyPracticeInstance) -> Dict[str, Any]:
         prefix = inst.id.replace("-", "") + ":"

@@ -538,6 +538,7 @@ class AcademyStepService:
             steps.append(view)
         ladder = LearnerStateService(self.db).state(user_id, item.concept_id).ladder
         return {
+            "assessment": self.assessment_status(user_id, item),
             "structured": True, "item_id": item.id, "lineage_id": item.lineage_id, "version": item.version, "title": item.title,
             "day": item.spec.get("day"), "week": item.spec.get("week"), "kind": item.spec.get("kind"),
             "step_schema_version": STEP_SCHEMA_VERSION, "steps": steps,
@@ -547,6 +548,41 @@ class AcademyStepService:
             "learning_complete": progress["learning_complete"], "demonstrated": ladder == "demonstrated", "concept_state": ladder,
             "note": NOT_EVIDENCE,
         }
+
+    def assessment_status(self, user_id: str, item: LearningItem) -> Optional[Dict[str, Any]]:
+        """AIL.5D.6: where this learner is with the Day's AIL.5C assessment, DERIVED from canonical attempt and result rows
+        (never stored, never client-supplied). It is a presentation of AIL.5C, not a second status: ``demonstrated`` stays the
+        Concept-level state. ``None`` when the Day is not bound to an assessment."""
+        from app.db.enums import AssessmentAttemptStatus, AssessmentOutcome, AssessmentResultKind
+        from app.models.assessment import AssessmentAttempt, AssessmentDefinition, AssessmentResult
+
+        spec = item.spec or {}
+        key = spec.get("assessment_definition_key") or (spec.get("explain_back") or {}).get("assessment_definition_key")
+        if not key or spec.get("capstone_stage"):
+            return None
+        attempt = self.db.execute(
+            select(AssessmentAttempt).join(AssessmentDefinition, AssessmentDefinition.id == AssessmentAttempt.definition_id)
+            .where(AssessmentAttempt.user_id == user_id, AssessmentDefinition.definition_key == key)
+            .order_by(AssessmentAttempt.started_at.desc())
+        ).scalars().first()
+        out: Dict[str, Any] = {"definition_key": key, "status": "not_started", "attempt_id": None, "attempts_note": "Graded separately in the Assessment Center."}
+        if attempt is None:
+            return out
+        out["attempt_id"] = attempt.id
+        if attempt.status == AssessmentAttemptStatus.DRAFT:
+            out["status"] = "in_progress"
+        elif attempt.status == AssessmentAttemptStatus.ABANDONED:
+            out["status"] = "not_started"
+        elif attempt.status != AssessmentAttemptStatus.FINALIZED:
+            out["status"] = "submitted"
+        else:
+            final = self.db.execute(
+                select(AssessmentResult).where(AssessmentResult.attempt_id == attempt.id, AssessmentResult.result_kind.in_([AssessmentResultKind.FINAL, AssessmentResultKind.HUMAN]))
+                .order_by(AssessmentResult.seq.desc())
+            ).scalars().first()
+            outcome = final.outcome if final is not None else None
+            out["status"] = {AssessmentOutcome.PASSED: "passed", AssessmentOutcome.NEEDS_WORK: "needs_work"}.get(outcome, "in_review")
+        return out
 
     def _add_learner_view(self, user_id: str, item: LearningItem, step: dict, view: dict, all_steps: List[dict]) -> None:
         """This learner's OWN data for an interactive step. Never the reveal, never an answer key."""

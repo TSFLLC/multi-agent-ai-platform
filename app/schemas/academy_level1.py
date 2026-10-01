@@ -167,6 +167,7 @@ class Level1LearningRead(BaseModel):
     demonstrated: bool = False
     concept_state: Optional[str] = None
     note: Optional[str] = None
+    assessment: Optional[Dict[str, Any]] = None
 
 
 class Level1StepResponseRequest(BaseModel):
