@@ -85,10 +85,18 @@ function noteForm(label, kind, practice, ctx, redraw, { minRuns = 1, defaults })
 // call the legacy Day page used, remembers the server-built way back to this exact step, and takes the learner to that engine's page.
 function renderEngineLab(step, ctx) {
   const msg = el("p", { class: "d5-err", role: "alert", hidden: "" });
-  const open = el("button", { type: "button", class: "d5-btn primary" }, "Open the lab");
+  const open = el("button", { type: "button", class: "d5-btn primary" }, Number(ctx.day) >= 21 ? "Open your Capstone project" : "Open the lab");
   open.addEventListener("click", async () => {
     open.disabled = true; msg.hidden = true;
     try {
+      if (Number(ctx.day) >= 21) {
+        // The Capstone: one project across the Days, opened through the existing Build With Me capstone orchestration.
+        const cap = await api.post(`/academy/level-1/days/${encodeURIComponent(ctx.day)}/start-capstone`);
+        rememberReturn(`#/academy/level-1/${ctx.day}?step=${step.key}`);
+        if (cap.project_url && String(cap.project_url).startsWith("#/")) window.location.hash = cap.project_url;
+        else { open.disabled = false; msg.textContent = "Your Capstone project did not open. Try again."; msg.hidden = false; }
+        return;
+      }
       const lab = await api.post(`/academy/level-1/days/${encodeURIComponent(ctx.day)}/start-lab`);
       rememberReturn(`#/academy/level-1/${ctx.day}?step=${step.key}`);
       if (lab.experiment_id) window.location.hash = `#/ail/lab/experiments/${encodeURIComponent(lab.experiment_id)}`;

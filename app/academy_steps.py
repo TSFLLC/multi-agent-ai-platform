@@ -428,7 +428,7 @@ def validate_structured_spec(spec: Any) -> List[dict]:
         _fail("spec.steps", "at most one explain_back step per Day")
     if counts[StepType.CHECK] and not spec.get("knowledge_check"):
         _fail("spec.steps", "a check step needs the Day's knowledge_check questions")
-    if counts[StepType.LAB] and spec.get("kind") not in (None, "lab"):
+    if counts[StepType.LAB] and spec.get("kind") not in (None, "lab") and not spec.get("capstone_stage"):
         _fail("spec.steps", "a lab step is only valid on a lab Day")
     return steps
 

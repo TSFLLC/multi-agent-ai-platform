@@ -543,7 +543,7 @@ class AcademyStepService:
             steps.append(view)
         ladder = LearnerStateService(self.db).state(user_id, item.concept_id).ladder
         return {
-            "assessment": self.assessment_status(user_id, item),
+            "assessment": self.assessment_status(user_id, item), "capstone": self.capstone_progress(user_id, item),
             "structured": True, "item_id": item.id, "lineage_id": item.lineage_id, "version": item.version, "title": item.title,
             "day": item.spec.get("day"), "week": item.spec.get("week"), "kind": item.spec.get("kind"),
             "step_schema_version": STEP_SCHEMA_VERSION, "steps": steps,
@@ -554,6 +554,29 @@ class AcademyStepService:
             "note": NOT_EVIDENCE,
         }
 
+    def capstone_progress(self, user_id: str, item: LearningItem) -> Optional[Dict[str, Any]]:
+        """AIL.5D.6: the learner's OWN Capstone artifacts from the Days before this one, so the project visibly builds across the ten
+        Days and survives navigation and sessions (they are ordinary saved step responses, owned by this learner). None off the Capstone."""
+        from app.academy_capstone_structure import STAGES, artifact_key
+        from app.services.academy_level1_service import AcademyLevel1Service
+
+        spec = item.spec or {}
+        day = spec.get("day")
+        if not spec.get("capstone_stage") or not isinstance(day, int):
+            return None
+        by_day = {row.spec["day"]: row for row in AcademyLevel1Service(self.db)._current_academy_items()}
+        artifacts = []
+        for earlier in range(21, day):
+            row = by_day.get(earlier)
+            if row is None or not is_structured(row.spec):
+                continue
+            step = next((s for s in self._steps(row) if s["key"] == artifact_key(earlier)), None)
+            if step is None:
+                continue
+            mine = self._response_view(step, self._latest_responses(user_id, row, step))
+            artifacts.append({"day": earlier, "stage": STAGES[earlier].title(), "title": step["title"], "text": mine["text"] if mine else None})
+        return {"day": day, "stage": STAGES.get(day), "artifacts": artifacts, "artifact_key": artifact_key(day) if day < 29 else None}
+
     def assessment_status(self, user_id: str, item: LearningItem) -> Optional[Dict[str, Any]]:
         """AIL.5D.6: where this learner is with the Day's AIL.5C assessment, DERIVED from canonical attempt and result rows
         (never stored, never client-supplied). It is a presentation of AIL.5C, not a second status: ``demonstrated`` stays the
@@ -563,7 +586,7 @@ class AcademyStepService:
 
         spec = item.spec or {}
         key = spec.get("assessment_definition_key") or (spec.get("explain_back") or {}).get("assessment_definition_key")
-        if not key or spec.get("capstone_stage"):
+        if not key or (spec.get("capstone_stage") and spec.get("day") != 29):     # Day 29 is the Capstone's demonstration: its assessment is AIL.5C's
             return None
         attempt = self.db.execute(
             select(AssessmentAttempt).join(AssessmentDefinition, AssessmentDefinition.id == AssessmentAttempt.definition_id)

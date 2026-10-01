@@ -9,7 +9,7 @@ Day as the next immutable ``LearningItem`` version in the same lineage (``create
   fingerprint);
 * the operation is idempotent: if the current version already equals the built structure, nothing is written.
 
-Days 1-20 have a structural mapping (Day 1: ``app.academy_day1_structure``; Days 2-20: ``app.academy_day_structure``); every other Day (the Capstone) reports that plainly.
+Days 1-30 have a structural mapping (Day 1: ``app.academy_day1_structure``; Days 2-20: ``app.academy_day_structure``; the Capstone, Days 21-30: ``app.academy_capstone_structure``).
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ from typing import Any, Dict
 from sqlalchemy import update
 
 from app.academy_day1_structure import CONVERTER, build_day1_structure, legacy_body_md
+from app.academy_capstone_structure import CONVERTER as CAPSTONE_CONVERTER, FIRST_DAY as CAPSTONE_FIRST, LAST_DAY as CAPSTONE_LAST, build_capstone_structure
 from app.academy_day_structure import CONVERTER as DAYS_CONVERTER, FIRST_DAY, LAST_DAY, build_day_structure
 from app.academy_steps import STEP_SCHEMA_VERSION, is_structured
 from app.errors import ConflictError, NotFoundError
@@ -28,7 +29,7 @@ from app.models.academy import AcademyProgramItem
 from app.services.academy_level1_service import AcademyLevel1Service, _curriculum_text
 from app.services.concept_graph_service import ConceptGraphService
 
-AUTHORED_DAYS = (1, *range(FIRST_DAY, LAST_DAY + 1))
+AUTHORED_DAYS = (1, *range(FIRST_DAY, LAST_DAY + 1), *range(CAPSTONE_FIRST, CAPSTONE_LAST + 1))
 
 
 def author_day_structure(db, day: int) -> Dict[str, Any]:
@@ -43,6 +44,10 @@ def author_day_structure(db, day: int) -> Dict[str, Any]:
     if day == 1:
         built = build_day1_structure(_curriculum_text())
         converter = CONVERTER
+    elif day >= CAPSTONE_FIRST:
+        built = build_capstone_structure(_curriculum_text(), day, spec)
+        built["objectives"] = spec.get("objectives") or []        # the Capstone keeps its existing objectives; only the steps are new
+        converter = CAPSTONE_CONVERTER
     else:
         built = build_day_structure(_curriculum_text(), day, spec)
         converter = DAYS_CONVERTER
@@ -77,7 +82,7 @@ def author_day_structure(db, day: int) -> Dict[str, Any]:
 
 
 def author_all_days(db) -> Dict[int, Dict[str, Any]]:
-    """Author every mapped Day (1-20), in order. Idempotent per Day; a failure names the Day and stops, leaving earlier Days authored."""
+    """Author every mapped Day (1-30), in order. Idempotent per Day; a failure names the Day and stops, leaving earlier Days authored."""
     results: Dict[int, Dict[str, Any]] = {}
     for day in AUTHORED_DAYS:
         results[day] = author_day_structure(db, day)

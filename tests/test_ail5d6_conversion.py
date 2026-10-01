@@ -190,7 +190,8 @@ def test_authoring_every_mapped_day_publishes_immutable_versions_keeps_the_legac
     again = author_all_days(db)
     assert not any(r["authored"] for r in again.values())
     assert {i.spec["day"]: i.id for i in level1._current_academy_items()} == {d: i.id for d, i in after.items()}
-    assert not is_structured(after.get(21).spec if 21 in after else {})                      # the Capstone is not converted here
+    assert is_structured(after[21].spec) and is_structured(after[30].spec)                    # the Capstone is converted by its own mapping
+    assert after[21].spec["authoring"]["converter"] != after[2].spec["authoring"]["converter"]
 
 
 def test_the_learning_view_of_a_converted_lab_day_offers_the_kit_lab_and_never_a_lab_answer(client, auth_headers, db, level1, bootstrap):
@@ -215,3 +216,86 @@ def test_a_lecture_day_never_completes_by_being_opened(client, auth_headers, db,
     assert client.post(f"/academy/level-1/items/{item_id}/open", headers=auth_headers).json()["evidence_recorded"] is False
     after = client.get("/academy/level-1/days/2/learning", headers=auth_headers).json()
     assert after["learning_complete"] is False and after["demonstrated"] is False and after["required_completed"] == 0
+
+
+# -- the Capstone (Days 21-30) ----------------------------------------------------------------------------------------------------------------
+
+from app.academy_capstone_structure import EXCLUDED as CAPSTONE_EXCLUDED, STAGES as CAPSTONE_STAGES, artifact_key, build_capstone_structure, capstone_context
+from app.academy_capstone_structure import day_section as capstone_section
+
+CAPSTONE = range(21, 31)
+
+
+def _cap_spec(day, built):
+    return {"academy_key": f"level1-v2-day-{day}", "day": day, "week": 5, "kind": "lecture", "capstone_stage": CAPSTONE_STAGES[day], "engine_binding": None,
+            "assessment_definition_key": EXISTING_ASSESSMENT_BINDINGS.get(day), "knowledge_check": [], "step_schema_version": 1, "steps": built["steps"]}
+
+
+@pytest.mark.parametrize("day", CAPSTONE)
+def test_every_authored_capstone_line_reaches_a_step_except_the_grader_rubric(day):
+    built = build_capstone_structure(DOC, day)
+    blob = norm(" ".join(_strings(built["steps"])))
+    section = capstone_section(DOC, day)
+    lines = section.split("\n")[1:]
+    if day == 21:
+        overview, options = capstone_context(DOC)
+        lines += overview.split("\n") + options.split("\n")
+    excluded_block = set()
+    for heading in CAPSTONE_EXCLUDED.get(day, ()):
+        start = lines.index(heading)
+        excluded_block.add(start)
+        j = start + 1
+        while j < len(lines) and (not lines[j].strip() or lines[j].strip().startswith("|")):
+            excluded_block.add(j)
+            j += 1
+    missing = [ln.strip()[:100] for i, ln in enumerate(lines) if i not in excluded_block and ln.strip() and ln.strip() != "---" and norm(ln) not in blob]
+    assert missing == [], f"Day {day} dropped authored content: {missing[:5]}"
+
+
+def test_the_capstone_is_one_project_a_stage_per_day_and_the_rubric_is_never_learner_content():
+    for day in CAPSTONE:
+        steps = build_capstone_structure(DOC, day)["steps"]
+        types = [s["type"] for s in steps]
+        assert types[0] == "teach" or day == 21
+        assert ("reflect" in types) == (day < 29)                        # a learner artifact for Days 21-28 only
+        assert ("lab" in types) == (day < 29) and ("practice" not in types) and ("check" not in types)
+        validate_structured_spec(_cap_spec(day, {"steps": steps}))
+    day29 = json.dumps(build_capstone_structure(DOC, 29)["steps"])
+    assert "Grader rubric for explain-back" not in day29 and "Passing criteria" not in day29 and "Step-by-step walkthrough" not in day29
+    assert "Explain-back assessment" in day29                          # the learner-facing description of the demonstration stays
+    questions = next(s for s in build_capstone_structure(DOC, 28)["steps"] if s["type"] == "explain_back")
+    assert len(questions["content"]["points"]) == 5 and questions["content"]["points"][0]["label"].startswith('"Walk me through what happens')
+    assert [CAPSTONE_STAGES[d] for d in CAPSTONE] == ["DEFINE", "DESIGN", "BUILD", "TEST", "DIAGNOSE", "IMPROVE", "EVALUATE", "EXPLAIN", "DEMONSTRATE", "REVIEW"]
+
+
+def test_capstone_artifacts_carry_forward_per_learner_and_survive_navigation(client, auth_headers, db, level1, bootstrap):
+    from app.main import app as fastapi_app
+    from app.auth import get_current_user
+    from app.models.identity import User
+
+    author_all_days(db)
+    d21 = client.get("/academy/level-1/days/21/learning", headers=auth_headers).json()
+    assert d21["capstone"]["artifacts"] == [] and d21["capstone"]["artifact_key"] == artifact_key(21) and d21["capstone"]["stage"] == "DEFINE"
+    text = "Problem: nurses lose time to dosage lookups. Users: ward nurses. Scope: no diagnosis, no prescribing, no patient data."
+    saved = client.put(f"/academy/level-1/items/{d21['item_id']}/steps/{artifact_key(21)}/response", headers=auth_headers, json={"text": text})
+    assert saved.status_code == 200
+    d22 = client.get("/academy/level-1/days/22/learning", headers=auth_headers).json()
+    assert d22["capstone"]["artifacts"] == [{"day": 21, "stage": "Define", "title": "Your Day 21 artifact", "text": text}]
+    other = make_user(db, org=None, email="second@example.com")
+    db.commit()
+    fastapi_app.dependency_overrides[get_current_user] = lambda: db.get(User, other.id)
+    try:
+        theirs = client.get("/academy/level-1/days/22/learning", headers=auth_headers).json()
+        assert theirs["capstone"]["artifacts"][0]["text"] is None and text not in json.dumps(theirs)
+    finally:
+        fastapi_app.dependency_overrides.pop(get_current_user, None)
+    assert client.get("/academy/level-1/days/2/learning", headers=auth_headers).json()["capstone"] is None
+
+
+def test_day_29_is_the_demonstration_and_exposes_only_its_ail5c_assessment_status(client, auth_headers, db, level1, bootstrap):
+    author_all_days(db)
+    day29 = client.get("/academy/level-1/days/29/learning", headers=auth_headers).json()
+    assert day29["assessment"] == {"definition_key": EXISTING_ASSESSMENT_BINDINGS[29], "status": "not_started", "attempt_id": None, "attempts_note": "Graded separately in the Assessment Center."}
+    text = json.dumps(day29)
+    assert "Passing criteria" not in text and "Step-by-step walkthrough" not in text
+    assert client.get("/academy/level-1/days/25/learning", headers=auth_headers).json()["assessment"] is None

@@ -168,6 +168,7 @@ class Level1LearningRead(BaseModel):
     concept_state: Optional[str] = None
     note: Optional[str] = None
     assessment: Optional[Dict[str, Any]] = None
+    capstone: Optional[Dict[str, Any]] = None
 
 
 class Level1StepResponseRequest(BaseModel):

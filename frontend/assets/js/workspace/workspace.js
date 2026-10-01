@@ -150,6 +150,7 @@ export async function renderWorkspace(root, day, learning, days) {
           el("li", {}, [el("b", {}, status.demonstrated), " — demonstrating is separate from learning. Finishing the lesson never counts as having shown you can apply it."]),
           a ? el("li", {}, [el("b", {}, `Assessment: ${a.label}`), ` — ${a.note}`]) : null,
         ]),
+        reviewPanel(),
         a ? el("section", { class: "d5-labcard" }, [
           el("h3", {}, "Demonstrate what you learned"),
           el("p", { class: "d5-hint" }, "An authored assessment for this Day, graded separately. The AI Professor pauses while it is open, and nothing is recorded until you submit."),
@@ -168,6 +169,32 @@ export async function renderWorkspace(root, day, learning, days) {
     stepCleanups = [];
     helpHooks = [];
     fns.forEach((fn) => { try { fn(); } catch { /* cleanup must never block the page */ } });
+  }
+
+  // The Capstone is one project across ten Days: show the learner's OWN earlier artifacts (read from the server, so they survive
+  // navigation and sessions). Everything is inserted as text.
+  function capstonePanel() {
+    const cap = view.capstone;
+    if (!cap || !cap.artifacts.length) return null;
+    return el("details", { class: "d5-capstone-sofar", open: cap.artifacts.some((a) => a.text) ? "" : null }, [
+      el("summary", {}, `Your Capstone so far · ${cap.artifacts.filter((a) => a.text).length} of ${cap.artifacts.length} earlier artifacts saved`),
+      ...cap.artifacts.map((a) => el("section", { class: "d5-capstone-art" }, [
+        el("h4", {}, `Day ${a.day} · ${a.stage}`),
+        a.text ? el("p", { class: "d5-capstone-text" }, a.text) : el("p", { class: "d5-hint" }, `Not written yet — it will appear here once you save your Day ${a.day} artifact.`),
+      ])),
+    ]);
+  }
+
+  // Day 30: the existing evidence-only review (strengths, what to revisit, recommendations), read from the server.
+  function reviewPanel() {
+    if (view.day !== 30) return null;
+    const host = el("section", { class: "d5-labcard" }, [el("h3", {}, "Your portfolio review and next-learning plan"), el("p", { class: "d5-hint", role: "status" }, "Reading your evidence record…")]);
+    api.get("/academy/level-1/days/30/review").then((r) => {
+      const list = (title, items) => el("div", {}, [el("h4", {}, title), items.length ? el("ul", {}, items.map((x) => el("li", {}, x))) : el("p", { class: "d5-hint" }, "Nothing yet.")]);
+      fill(host, el("h3", {}, "Your portfolio review and next-learning plan"), el("p", { class: "d5-hint" }, `Derived from your own evidence record (${r.assessment_results_consulted} assessment result${r.assessment_results_consulted === 1 ? "" : "s"} consulted). It never grades you or changes what you have demonstrated.`),
+        list("Strengths", r.strengths), list("To revisit", r.revisit), list("Recommendations", r.recommendations));
+    }).catch((err) => fill(host, el("h3", {}, "Your portfolio review and next-learning plan"), el("p", { class: "d5-err", role: "alert" }, errText(err))));
+    return host;
   }
 
   function paintCenter() {
@@ -189,7 +216,7 @@ export async function renderWorkspace(root, day, learning, days) {
           el("span", { class: `d5-mode m-${mode}`, title: MODE_COPY[mode].note }, MODE_COPY[mode].label),
           el("button", { type: "button", class: "d5-askpill", onclick: () => { profOpen = true; paintRight(); tabTo("professor"); } }, [el("span", { class: "av sm" }, "P"), "Ask the Professor"]),
         ]),
-        el("div", { class: "d5-center-body" }, [body]),
+        el("div", { class: "d5-center-body" }, [showSummary ? null : capstonePanel(), body]),
       ]),
       actionbar);
     paintActions();

@@ -721,3 +721,7 @@ body.resizing { cursor: col-resize; user-select: none; }
 .d5-prose table { border-collapse: collapse; width: 100%; font-size: .92rem; }
 .d5-prose th, .d5-prose td { border: 1px solid var(--border); padding: 7px 10px; text-align: left; vertical-align: top; }
 .d5-prose th { background: var(--bg-card); color: var(--text); }
+.d5-capstone-sofar { margin-bottom: 18px; border: 1px solid var(--border-soft); border-radius: var(--radius-lg); background: var(--bg-card); padding: 10px 14px; }
+.d5-capstone-sofar summary { cursor: pointer; color: var(--text); font-weight: 600; }
+.d5-capstone-art h4 { margin: 12px 0 4px; }
+.d5-capstone-text { white-space: pre-wrap; color: var(--text) !important; background: var(--bg); border-radius: 8px; padding: 10px 12px; margin: 0; }
