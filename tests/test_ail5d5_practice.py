@@ -73,6 +73,8 @@ def test_a_guided_practice_walks_predict_run_observe_change_rerun_compare_reflec
     _predict(client, auth_headers, iid, "accuracy")
     assert client.get(f"{P}/{iid}", headers=auth_headers).json()["status"] == "created"             # one of two predictions
     _predict(client, auth_headers, iid, "unknown")
+    assert client.get(f"{P}/{iid}", headers=auth_headers).json()["status"] == "created"             # two of three
+    _predict(client, auth_headers, iid, "errors")
     assert client.get(f"{P}/{iid}", headers=auth_headers).json()["status"] == "predicted"
 
     first = _run(client, auth_headers, iid, source="none", question="q-opened")

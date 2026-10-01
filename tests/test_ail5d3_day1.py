@@ -98,7 +98,7 @@ def test_authoring_is_idempotent_and_only_day_1_has_a_mapping(db, legacy):
     first = author_day_structure(db, 1)
     second = author_day_structure(db, 1)
     assert second["authored"] is False and second["item_id"] == first["item_id"] and db.query(LearningItem).filter_by(lineage_id=legacy.lineage_id).count() == 2
-    for day in (2, 3, 30):
+    for day in (31, 0, -1):          # AIL5D.6: Days 1-30 are all mapped; anything else still says so plainly
         with pytest.raises(ConflictError) as err:
             author_day_structure(db, day)
         assert err.value.detail["code"] == "not_authored"
