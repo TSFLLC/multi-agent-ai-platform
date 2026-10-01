@@ -717,3 +717,7 @@ body.resizing { cursor: col-resize; user-select: none; }
   .d5-dayrow-status { display: none; }
 }
 #ail5d-return { position: fixed; z-index: 60; left: 50%; bottom: 18px; transform: translateX(-50%); background: var(--accent); color: #fff; border: 0; border-radius: 999px; padding: 11px 20px; font-weight: 600; cursor: pointer; box-shadow: 0 8px 28px rgba(0,0,0,.45); }
+.d5-prose .md-table { overflow-x: auto; margin: 10px 0; }
+.d5-prose table { border-collapse: collapse; width: 100%; font-size: .92rem; }
+.d5-prose th, .d5-prose td { border: 1px solid var(--border); padding: 7px 10px; text-align: left; vertical-align: top; }
+.d5-prose th { background: var(--bg-card); color: var(--text); }

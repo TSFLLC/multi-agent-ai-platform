@@ -387,7 +387,12 @@ class AcademyStepService:
         }
 
     def _check_view(self, user_id: str, item: LearningItem) -> Dict[str, Any]:
-        public = [{k: v for k, v in q.items() if k not in ("answer", "explanation", "pass_criteria")} for q in (item.spec or {}).get("knowledge_check", [])]
+        public = []
+        for q in (item.spec or {}).get("knowledge_check", []):
+            shown = {k: v for k, v in q.items() if k not in ("answer", "explanation", "pass_criteria", "tolerance")}
+            if "choices" not in q and isinstance(q.get("answer"), dict):
+                shown["fields"] = list(q["answer"])          # only the NAMES of the numeric answers, never a value or the tolerance
+            public.append(shown)
         rows = self._kc_evidence(user_id, item)
         result = None
         review = None

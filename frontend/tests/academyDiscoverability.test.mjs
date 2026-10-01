@@ -66,6 +66,8 @@ const DAY = (over = {}) => ({
 });
 const dayRoutes = (day, item) => ({
   [`GET /academy/level-1/days/${day}`]: item,
+  // AIL5D.6: the Day page first asks whether the Day is structured; a legacy Day answers structured:false and keeps this page.
+  [`GET /academy/level-1/days/${day}/learning`]: { structured: false, item_id: item.id, title: item.title },
   [`POST /academy/level-1/items/${item.id}/open`]: { evidence_id: "e", concept_id: "c1", learner_state: "exposed" },
 });
 

@@ -56,6 +56,9 @@ export function initialStepKey(view, wanted) {
 
 const COMPLETED = new Set(["completed"]);
 export const isDone = (step) => COMPLETED.has(step.status);
+// A lab that launches an existing platform engine (agent / workflow / build lab ...) rather than a Lab Kit practice. Its results live
+// in that engine's own surface, so the Workspace cannot verify it: it is optional, and the learner moves on (the server records a skip).
+export const isLauncherLab = (step) => step.type === "lab" && !(step.binding && step.binding.kit);
 export const isSkipped = (step) => step.status === "skipped";
 
 // May the learner press Continue? Completion is server-verified, so this only mirrors what the server will accept
@@ -75,8 +78,9 @@ export function canContinue(step, local = {}) {
     case "check":
       return Boolean(step.check_result && step.check_result.ever_passed);
     case "lab":
+      return isLauncherLab(step); // a kit lab is completed only by a completed Practice Instance (the server finishes the step itself)
     case "practice":
-      return false; // only a completed Practice Instance completes these (the server finishes the step itself)
+      return false;
     default:
       return Boolean(local.ready);
   }
@@ -90,7 +94,7 @@ export function continueHint(step) {
     case "think": return "Lock in your answer to see the explanation";
     case "check": return "Every item must be right to continue — you may retry";
     case "explain_back": return "Save your outline to continue";
-    case "lab": return "Finish the guided lab to continue";
+    case "lab": return isLauncherLab(step) ? "Optional — open the lab, or continue" : "Finish the guided lab to continue";
     case "practice": return step.required ? "Finish the practice to continue" : "Optional — try it, or continue";
     default: return "";
   }
@@ -189,18 +193,34 @@ export function safeReturnHash(path) {
   return parsed.day && String(path).startsWith("#/academy/level-1/") ? path : "#/academy/level-1";
 }
 
-// A knowledge-check question has either two named parts (choices is an object: Day 1) or one list of options (a list).
+// A knowledge-check question has one list of options (a list), two named parts (choices is an object: Day 1), or numeric
+// fields (no choices; the server names the fields and never the values).
 export function checkParts(question) {
   const c = question.choices;
   if (Array.isArray(c)) return [{ name: null, options: c.map((o) => [o.key, o.text]) }];
-  return Object.entries(c || {}).map(([name, values]) => ({ name, options: values.map((v) => [v, String(v).replace(/_/g, " ")]) }));
+  if (c && typeof c === "object") return Object.entries(c).map(([name, values]) => ({ name, options: values.map((v) => [v, String(v).replace(/_/g, " ")]) }));
+  return (question.fields || []).map((name) => ({ name, numeric: true, options: [] }));
 }
+
+const isNumber = (v) => v !== "" && v !== null && v !== undefined && Number.isFinite(Number(v));
 
 export function checkAnswered(question, picks) {
   const mine = picks[question.id];
   const parts = checkParts(question);
+  if (parts.length === 0) return false;
   if (parts.length === 1 && parts[0].name === null) return typeof mine === "string" && mine !== "";
-  return Boolean(mine) && parts.every((p) => typeof mine[p.name] === "string" && mine[p.name] !== "");
+  return Boolean(mine) && parts.every((p) => (p.numeric ? isNumber(mine[p.name]) : typeof mine[p.name] === "string" && mine[p.name] !== ""));
+}
+
+// The payload the knowledge-check endpoint takes: numeric fields become numbers, everything else is sent as chosen.
+export function checkPayload(questions, picks) {
+  const out = {};
+  for (const q of questions) {
+    const mine = picks[q.id];
+    const parts = checkParts(q);
+    out[q.id] = parts.some((p) => p.numeric) ? Object.fromEntries(parts.map((p) => [p.name, Number(mine[p.name])])) : mine;
+  }
+  return out;
 }
 
 export function checkComplete(questions, picks) {

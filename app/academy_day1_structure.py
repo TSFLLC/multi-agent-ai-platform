@@ -290,4 +290,8 @@ def legacy_body_md(steps: List[dict], objectives: List[str]) -> str:
             out.append(c["question_md"] if "question_md" in c else "\n".join(f"{i}. {s['text']}" for i, s in enumerate(c["statements"], start=1)))
         elif t == "check":
             out.append(c["intro_md"])
+        elif t == "lab":
+            out.append(c["problem_md"])
+        elif t == "practice":
+            out.append(c["prompt_md"])
     return "\n\n".join(out)

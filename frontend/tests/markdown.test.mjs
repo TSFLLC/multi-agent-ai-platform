@@ -137,3 +137,18 @@ test("a data: link never becomes a clickable href", () => {
   assert.ok(!/<a /.test(html));
   assert.ok(!/<script/i.test(html));
 });
+
+test("a pipe table renders as a table and every cell is escaped like any other text", () => {
+  const html = renderMarkdown("| Term | Definition |\n|------|------------|\n| **Model** | The <script>alert(1)</script> thing |\n| Token | A chunk |");
+  assert.match(html, /<table>/);
+  assert.match(html, /<th>Term<\/th>/);
+  assert.match(html, /<td><strong>Model<\/strong><\/td>/);
+  assert.ok(!html.includes("<script>"));
+  assert.match(html, /&lt;script&gt;/);
+  assert.equal((html.match(/<tr>/g) || []).length, 3);
+});
+
+test("a lone pipe line without a separator row stays a paragraph", () => {
+  const html = renderMarkdown("| not | a table |");
+  assert.ok(!html.includes("<table>"));
+});

@@ -16,7 +16,7 @@ from tests.ail5d5_factories import GUIDED, INDEPENDENT, KIT, LAB_STEP, PRACTICE_
 
 P = "/academy/practice"
 REVEAL_FRAGMENT = "the lens served 1891-1974"
-PREDICTIONS = {"accuracy": "I predict the grounded model will be much more accurate.", "unknown": "FALSE - models often guess instead of admitting it."}
+PREDICTIONS = {"accuracy": "I predict the grounded model will be much more accurate.", "unknown": "FALSE - models often guess instead of admitting it.", "errors": "At least one error in five grounded answers."}
 NOTE = "The grounded answer quoted the document; the ungrounded one guessed."
 
 

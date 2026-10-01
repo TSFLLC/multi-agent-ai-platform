@@ -39,7 +39,8 @@ test("Continue mirrors what the server will accept and never lets a lab or pract
   assert.equal(canContinue({ type: "think", status: "opened", committed: true }), true);
   assert.equal(canContinue({ type: "check", status: "opened", check_result: { ever_passed: false } }), false);
   assert.equal(canContinue({ type: "check", status: "opened", check_result: { ever_passed: true } }), true);
-  assert.equal(canContinue({ type: "lab", status: "opened" }), false);
+  assert.equal(canContinue({ type: "lab", status: "opened", binding: { kind: "personal_lab", engine: "personal_lab_experiment", kit: { kit_key: "k", scenario_key: "s" } } }), false);
+  assert.equal(canContinue({ type: "lab", status: "opened", binding: { kind: "personal_lab", engine: "agent_version" } }), true); // an engine launcher is optional
   assert.equal(canContinue({ type: "practice", status: "opened" }), false);
   assert.equal(canContinue({ type: "lab", status: "completed" }), true);
 });
@@ -109,4 +110,15 @@ test("the program overview groups by week, finds the next day, and counts learne
   assert.deepEqual(dayGroups(days).map((g) => [g.week, g.days.length]), [[1, 3], [2, 1]]);
   assert.equal(nextDay(days).day, 3);
   assert.deepEqual(programProgress(days), { total: 4, learned: 2, demonstrated: 1, pct: 50 });
+});
+
+test("a numeric knowledge-check question asks for the named fields and sends numbers", async () => {
+  const { checkPayload: payload } = await import("../assets/js/workspace/model.js");
+  const q = { id: "KC-17.1", prompt: "x", fields: ["recall", "precision"] };
+  assert.deepEqual(checkParts(q).map((p) => [p.name, p.numeric]), [["recall", true], ["precision", true]]);
+  assert.equal(checkAnswered(q, { "KC-17.1": { recall: "0.8" } }), false);
+  assert.equal(checkAnswered(q, { "KC-17.1": { recall: "0.8", precision: "abc" } }), false);
+  assert.equal(checkAnswered(q, { "KC-17.1": { recall: "0.8", precision: "0.29" } }), true);
+  assert.deepEqual(payload([q, { id: "q2", choices: [{ key: "A", text: "x" }] }], { "KC-17.1": { recall: "0.8", precision: "0.29" }, q2: "A" }), { "KC-17.1": { recall: 0.8, precision: 0.29 }, q2: "A" });
+  assert.equal(checkAnswered({ id: "z", prompt: "p" }, {}), false);
 });

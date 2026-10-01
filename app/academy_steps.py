@@ -240,8 +240,12 @@ def _content_explain_back(c: dict, path: str, ctx: dict) -> None:
 
 
 def _content_lab(c: dict, path: str, ctx: dict) -> None:
-    kit_bound = isinstance(ctx.get("binding"), dict) and "kit" in ctx["binding"]
-    _dict(c, path, allowed=frozenset({"problem_md", "predictions", "prompt_text", "record"}), required=frozenset({"problem_md"} if kit_bound else {"problem_md", "predictions"}))
+    binding = ctx.get("binding") if isinstance(ctx.get("binding"), dict) else {}
+    kit_bound = "kit" in binding
+    # A lab that launches an existing platform engine (agent / workflow / build lab ...) carries no experiment predictions of its
+    # own; a Personal Lab experiment without a Lab Kit still must.
+    launcher = bool(binding) and binding.get("engine") != "personal_lab_experiment"
+    _dict(c, path, allowed=frozenset({"problem_md", "predictions", "prompt_text", "record"}), required=frozenset({"problem_md"} if kit_bound or launcher else {"problem_md", "predictions"}))
     _text(c["problem_md"], f"{path}.problem_md")
     if kit_bound and "predictions" in c:
         _fail(f"{path}.predictions", "a kit-bound lab takes its predictions from the Lab Kit scenario")

@@ -9,7 +9,7 @@ Day as the next immutable ``LearningItem`` version in the same lineage (``create
   fingerprint);
 * the operation is idempotent: if the current version already equals the built structure, nothing is written.
 
-Only Day 1 has a structural mapping so far (``app.academy_day1_structure``); every other Day reports that plainly.
+Days 1-20 have a structural mapping (Day 1: ``app.academy_day1_structure``; Days 2-20: ``app.academy_day_structure``); every other Day (the Capstone) reports that plainly.
 """
 
 from __future__ import annotations
@@ -21,13 +21,14 @@ from typing import Any, Dict
 from sqlalchemy import update
 
 from app.academy_day1_structure import CONVERTER, build_day1_structure, legacy_body_md
+from app.academy_day_structure import CONVERTER as DAYS_CONVERTER, FIRST_DAY, LAST_DAY, build_day_structure
 from app.academy_steps import STEP_SCHEMA_VERSION, is_structured
 from app.errors import ConflictError, NotFoundError
 from app.models.academy import AcademyProgramItem
 from app.services.academy_level1_service import AcademyLevel1Service, _curriculum_text
 from app.services.concept_graph_service import ConceptGraphService
 
-AUTHORED_DAYS = (1,)
+AUTHORED_DAYS = (1, *range(FIRST_DAY, LAST_DAY + 1))
 
 
 def author_day_structure(db, day: int) -> Dict[str, Any]:
@@ -38,20 +39,26 @@ def author_day_structure(db, day: int) -> Dict[str, Any]:
     if current is None:
         raise NotFoundError("Academy Level 1 day is not provisioned")
 
-    built = build_day1_structure(_curriculum_text())
     spec = copy.deepcopy(current.spec or {})
+    if day == 1:
+        built = build_day1_structure(_curriculum_text())
+        converter = CONVERTER
+    else:
+        built = build_day_structure(_curriculum_text(), day, spec)
+        converter = DAYS_CONVERTER
     spec.update(
         objectives=built["objectives"], step_schema_version=STEP_SCHEMA_VERSION, steps=built["steps"],
-        authoring={"converter": CONVERTER, "source": "docs/ail5-level1-practical-ai-foundations-curriculum-v2.md", "source_sha256": built["source_sha256"]},
+        authoring={"converter": converter, "source": "docs/ail5-level1-practical-ai-foundations-curriculum-v2.md", "source_sha256": built["source_sha256"]},
     )
-    questions = []
-    for question in spec.get("knowledge_check", []):
-        question = dict(question)
-        match = re.fullmatch(r"KC-1-classification-(\d+)", str(question.get("id")))
-        if match:
-            question["explanation"] = built["explanations"][int(match.group(1))]
-        questions.append(question)
-    spec["knowledge_check"] = questions
+    if day == 1:
+        questions = []
+        for question in spec.get("knowledge_check", []):
+            question = dict(question)
+            match = re.fullmatch(r"KC-1-classification-(\d+)", str(question.get("id")))
+            if match:
+                question["explanation"] = built["explanations"][int(match.group(1))]
+            questions.append(question)
+        spec["knowledge_check"] = questions
     body = legacy_body_md(built["steps"], built["objectives"])
 
     if is_structured(current.spec) and current.spec == spec and current.body_md == body:
@@ -67,3 +74,11 @@ def author_day_structure(db, day: int) -> Dict[str, Any]:
     db.execute(update(AcademyProgramItem).where(AcademyProgramItem.learning_item_id == current.id).values(learning_item_id=new.id))
     db.commit()
     return {"day": day, "authored": True, "item_id": new.id, "version": new.version, "previous_item_id": current.id, "steps": len(built["steps"])}
+
+
+def author_all_days(db) -> Dict[int, Dict[str, Any]]:
+    """Author every mapped Day (1-20), in order. Idempotent per Day; a failure names the Day and stops, leaving earlier Days authored."""
+    results: Dict[int, Dict[str, Any]] = {}
+    for day in AUTHORED_DAYS:
+        results[day] = author_day_structure(db, day)
+    return results

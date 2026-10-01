@@ -5,7 +5,7 @@
 import { api } from "../api.js";
 import { assessmentDefinitionHref } from "../academyLinks.js";
 import { el, mount } from "../dom.js";
-import { MODE_COPY, assessmentSummary, canContinue, continueHint, initialStepKey, isDone, isSkipped, learningStatusLine, parseWorkspaceHash, progressText, stepIndex, stepMeta, workspaceMode } from "./model.js";
+import { MODE_COPY, assessmentSummary, canContinue, continueHint, initialStepKey, isDone, isLauncherLab, isSkipped, learningStatusLine, parseWorkspaceHash, progressText, stepIndex, stepMeta, workspaceMode } from "./model.js";
 import { professorPanel } from "./professor.js";
 import { renderStepBody } from "./steps.js";
 
@@ -17,6 +17,7 @@ export async function renderWorkspace(root, day, learning, days) {
   const itemId = learning.item_id;
   const cleanups = [];
   let stepCleanups = [];
+  let helpHooks = [];
   let view = learning;
   let current = initialStepKey(view, hashState.step);
   let practiceId = hashState.practice;
@@ -50,10 +51,13 @@ export async function renderWorkspace(root, day, learning, days) {
   // a lab in progress is not redrawn under the learner.
   const ctx = {
     get itemId() { return itemId; },
+    get day() { return day; },
     get practiceId() { return practiceId; },
     get stepKey() { return current; },
     get checkFeedback() { return checkFeedback; },
     onCleanup: (fn) => stepCleanups.push(fn),
+    // The step body can ask to be told when the Professor delivered help (e.g. a practice refreshing "hints used").
+    onHelp: (fn) => helpHooks.push(fn),
     async reload({ keepStep = true, quiet = false, feedback } = {}) {
       if (feedback) checkFeedback = feedback;
       const fresh = await fetchView();
@@ -115,7 +119,7 @@ export async function renderWorkspace(root, day, learning, days) {
   async function advance(s, last) {
     busy = true; message = ""; paintActions();
     try {
-      if (!isDone(s) && !isSkipped(s)) await api.post(`/academy/level-1/items/${itemId}/steps/${s.key}/complete`);
+      if (!isDone(s) && !isSkipped(s)) await api.post(`/academy/level-1/items/${itemId}/steps/${s.key}/${isLauncherLab(s) ? "skip" : "complete"}`);
       const fresh = await fetchView();
       if (fresh) view = fresh;
       busy = false;
@@ -162,6 +166,7 @@ export async function renderWorkspace(root, day, learning, days) {
   function runStepCleanups() {
     const fns = stepCleanups;
     stepCleanups = [];
+    helpHooks = [];
     fns.forEach((fn) => { try { fn(); } catch { /* cleanup must never block the page */ } });
   }
 
@@ -202,7 +207,7 @@ export async function renderWorkspace(root, day, learning, days) {
       return;
     }
     ws.classList.remove("prof-closed");
-    const panel = professorPanel(step(), ctx, { onHelp: () => { if (step().type === "lab" || step().type === "practice") ctx.reload({ keepStep: true, quiet: true }).catch(() => {}); } });
+    const panel = professorPanel(step(), ctx, { onHelp: () => { helpHooks.forEach((fn) => { try { fn(); } catch { /* a hook must never break the Professor */ } }); } });
     const collapse = el("button", { type: "button", class: "d5-x", "aria-label": "Collapse the Professor", onclick: () => { profOpen = false; paintRight(); } }, "⟩");
     panel.querySelector(".d5-prof-head").appendChild(collapse);
     fill(right, panel);

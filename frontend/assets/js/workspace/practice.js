@@ -7,7 +7,7 @@
 import { api } from "../api.js";
 import { el } from "../dom.js";
 import { renderMarkdown } from "../markdown.js";
-import { hintsText, labStages, limitsText, practiceActionHint, safeReturnHash } from "./model.js";
+import { hintsText, isLauncherLab, labStages, limitsText, practiceActionHint, safeReturnHash } from "./model.js";
 
 const md = (source, cls = "") => el("div", { class: `d5-prose ${cls}`.trim(), html: renderMarkdown(String(source || "")) });
 const fill = (host, ...kids) => host.replaceChildren(...kids.filter(Boolean));
@@ -81,7 +81,33 @@ function noteForm(label, kind, practice, ctx, redraw, { minRuns = 1, defaults })
   return el("div", { class: "d5-noteform" }, [el("label", {}, label), ta, el("div", { class: "d5-lockbar" }, [btn, msg])]);
 }
 
+// A lab that runs on an existing platform engine (agent, workflow, build lab ...): the Workspace launches it through the same server
+// call the legacy Day page used, remembers the server-built way back to this exact step, and takes the learner to that engine's page.
+function renderEngineLab(step, ctx) {
+  const msg = el("p", { class: "d5-err", role: "alert", hidden: "" });
+  const open = el("button", { type: "button", class: "d5-btn primary" }, "Open the lab");
+  open.addEventListener("click", async () => {
+    open.disabled = true; msg.hidden = true;
+    try {
+      const lab = await api.post(`/academy/level-1/days/${encodeURIComponent(ctx.day)}/start-lab`);
+      rememberReturn(`#/academy/level-1/${ctx.day}?step=${step.key}`);
+      if (lab.experiment_id) window.location.hash = `#/ail/lab/experiments/${encodeURIComponent(lab.experiment_id)}`;
+      else if (lab.workflow_run_id) window.location.hash = `#/workflow-runs/${encodeURIComponent(lab.workflow_run_id)}`;
+      else if (lab.agent_run_id) window.location.hash = `#/model-intelligence/agent-runs/${encodeURIComponent(lab.agent_run_id)}`;
+      else if (lab.project_attempt_id) window.location.hash = `#/academy/projects/attempts/${encodeURIComponent(lab.project_attempt_id)}`;
+      else { open.disabled = false; msg.textContent = "This lab did not open anything. Try again."; msg.hidden = false; }
+    } catch (err) { open.disabled = false; msg.textContent = errText(err); msg.hidden = false; }
+  });
+  return el("div", { class: "d5-stack d5-practice", "data-mode": "engine" }, [
+    el("span", { class: "d5-modechip gui" }, "Lab — runs on the Personal Lab engine"),
+    md(step.content.problem_md, "d5-lead"),
+    el("div", { class: "d5-lockbar" }, [open, el("span", { class: "d5-hint" }, "Your work is recorded there. Come back here with “Back to your lesson”, then reflect.")]),
+    msg,
+  ]);
+}
+
 export function renderPractice(step, ctx) {
+  if (isLauncherLab(step)) return renderEngineLab(step, ctx);
   const independent = step.type === "practice";
   const host = el("div", { class: "d5-stack d5-practice", "data-mode": independent ? "independent" : "guided" });
   const prompt = independent ? step.content.prompt_md : step.content.problem_md;
@@ -93,6 +119,7 @@ export function renderPractice(step, ctx) {
 
   const stop = () => { if (poll) { clearInterval(poll); poll = null; } };
   ctx.onCleanup(stop);
+  ctx.onHelp(async () => { if (practice) { try { practice = await api.get(`${P}/${practice.instance_id}`); draw(); } catch { /* the next refresh will show it */ } } });
 
   const load = async (id) => { practice = await api.get(`${P}/${id}`); schedule(); draw(); };
   const schedule = () => {

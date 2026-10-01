@@ -5,7 +5,7 @@ import { api } from "../api.js";
 import { el } from "../dom.js";
 import { renderMarkdown } from "../markdown.js";
 import { assessmentDefinitionHref } from "../academyLinks.js";
-import { checkAnswered, checkComplete, checkParts } from "./model.js";
+import { checkAnswered, checkComplete, checkParts, checkPayload } from "./model.js";
 import { renderPractice } from "./practice.js";
 
 export const md = (source, cls = "") => el("div", { class: `d5-prose ${cls}`.trim(), html: renderMarkdown(String(source || "")) });
@@ -204,7 +204,7 @@ function check(step, ctx) {
   const submit = async () => {
     submitting = true; error = ""; draw();
     try {
-      const out = await api.post(`/academy/level-1/items/${ctx.itemId}/knowledge-check`, { answers: picks });
+      const out = await api.post(`/academy/level-1/items/${ctx.itemId}/knowledge-check`, { answers: checkPayload(questions, picks) });
       feedback = out.feedback;
       await ctx.reload({ keepStep: true, feedback: { passed: out.passed, feedback: out.feedback, results: out.results } });
     } catch (err) { error = errText(err); submitting = false; draw(); }
@@ -223,11 +223,14 @@ function check(step, ctx) {
         return el("li", { class: `d5-q${passed ? " right" : wrong ? " wrong" : ""}` }, [
           el("p", { class: "d5-q-text" }, [el("b", {}, `${i + 1}. `), q.prompt]),
           el("div", { class: "d5-q-row" }, checkParts(q).flatMap((part) => [
-            part.name ? el("span", { class: "d5-q-lab" }, part.name === "system" ? "It is" : part.name === "claim" ? "The claim is" : part.name) : null,
-            segmented(part.name || "Answer", part.options, part.name ? (picks[q.id] || {})[part.name] : picks[q.id], (v) => {
-              if (part.name) picks[q.id] = { ...(picks[q.id] || {}), [part.name]: v }; else picks[q.id] = v;
-              draw();
-            }, passed || submitting),
+            part.name ? el("span", { class: "d5-q-lab" }, part.name === "system" ? "It is" : part.name === "claim" ? "The claim is" : part.name.replace(/_/g, " ")) : null,
+            part.numeric
+              ? el("input", { class: "d5-input", type: "text", inputmode: "decimal", "aria-label": part.name, placeholder: part.name, disabled: passed || submitting || null, value: (picks[q.id] || {})[part.name] || "",
+                  oninput: (e) => { picks[q.id] = { ...(picks[q.id] || {}), [part.name]: e.target.value }; const b = host.querySelector(".d5-lockbar button"); if (b) b.disabled = !checkComplete(questions, picks) || submitting; } })
+              : segmented(part.name || "Answer", part.options, part.name ? (picks[q.id] || {})[part.name] : picks[q.id], (v) => {
+                if (part.name) picks[q.id] = { ...(picks[q.id] || {}), [part.name]: v }; else picks[q.id] = v;
+                draw();
+              }, passed || submitting),
           ])),
           passed && reviewById[q.id] ? el("div", { class: "d5-reveal small" }, [el("small", {}, "WHY"), el("p", {}, reviewById[q.id])]) : null,
           !passed && wrong ? el("p", { class: "d5-hint" }, "Look at this one again.") : null,

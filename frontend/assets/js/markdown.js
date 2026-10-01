@@ -87,7 +87,7 @@ export function renderMarkdown(source) {
   let i = 0;
 
   const isBlockStart = (l) =>
-    /^\s*$/.test(l) || /^```/.test(l) || /^#{1,6}\s+/.test(l) || /^>\s?/.test(l) || /^[-*+]\s+/.test(l) || /^\d+\.\s+/.test(l);
+    /^\s*$/.test(l) || /^```/.test(l) || /^#{1,6}\s+/.test(l) || /^>\s?/.test(l) || /^[-*+]\s+/.test(l) || /^\d+\.\s+/.test(l) || /^\s*\|.*\|\s*$/.test(l);
 
   while (i < lines.length) {
     const line = lines[i];
@@ -149,7 +149,27 @@ export function renderMarkdown(source) {
       continue;
     }
 
-    const paraLines = [];
+    // Pipe tables (AIL5D.6): a header row, a |---| separator row, then body rows. Every cell goes through renderInline, so it is
+    // escaped exactly like any other text; nothing is ever passed through as markup.
+    if (/^\s*\|.*\|\s*$/.test(line) && i + 1 < lines.length && /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/.test(lines[i + 1])) {
+      const cells = (row) => row.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((c) => renderInline(c.trim()));
+      const head = cells(line);
+      i += 2;
+      const body = [];
+      while (i < lines.length && /^\s*\|.*\|\s*$/.test(lines[i])) {
+        body.push(cells(lines[i]));
+        i += 1;
+      }
+      html.push(
+        `<div class="md-table"><table><thead><tr>${head.map((c) => `<th>${c}</th>`).join("")}</tr></thead>` +
+          `<tbody>${body.map((r) => `<tr>${r.map((c) => `<td>${c}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`,
+      );
+      continue;
+    }
+
+    // The first line is always consumed (a pipe line that is not a table is plain text), so the loop always advances.
+    const paraLines = [lines[i]];
+    i += 1;
     while (i < lines.length && !isBlockStart(lines[i])) {
       paraLines.push(lines[i]);
       i += 1;

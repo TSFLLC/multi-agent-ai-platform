@@ -118,8 +118,13 @@ def main() -> None:
 
             provision_practical_ai_foundations(s)
             service.provision(identities.user)
-            for day in [int(x) for x in args.days.split(",") if x.strip()]:
-                author_day_structure(s, day)
+            if args.days == "all":
+                from app.services.academy_structured_authoring import author_all_days
+
+                author_all_days(s)
+            else:
+                for day in [int(x) for x in args.days.split(",") if x.strip()]:
+                    author_day_structure(s, day)
         finally:
             s.close()
 
