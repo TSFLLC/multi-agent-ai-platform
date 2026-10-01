@@ -50,6 +50,7 @@ class StepType(str, Enum):
     EXPLAIN_BACK = "explain_back"
     LAB = "lab"
     REFLECTION = "reflection"
+    PRACTICE = "practice"
 
 
 # Steps a learner may complete just by pressing Continue. Every other type is completed by its own
@@ -239,10 +240,13 @@ def _content_explain_back(c: dict, path: str, ctx: dict) -> None:
 
 
 def _content_lab(c: dict, path: str, ctx: dict) -> None:
-    _dict(c, path, allowed=frozenset({"problem_md", "predictions", "prompt_text", "record"}), required=frozenset({"problem_md", "predictions"}))
+    kit_bound = isinstance(ctx.get("binding"), dict) and "kit" in ctx["binding"]
+    _dict(c, path, allowed=frozenset({"problem_md", "predictions", "prompt_text", "record"}), required=frozenset({"problem_md"} if kit_bound else {"problem_md", "predictions"}))
     _text(c["problem_md"], f"{path}.problem_md")
+    if kit_bound and "predictions" in c:
+        _fail(f"{path}.predictions", "a kit-bound lab takes its predictions from the Lab Kit scenario")
     seen = set()
-    for i, p in enumerate(_list(c["predictions"], f"{path}.predictions", hi=8)):
+    for i, p in enumerate(_list(c["predictions"], f"{path}.predictions", hi=8) if "predictions" in c else []):
         p = _dict(p, f"{path}.predictions[{i}]", allowed=frozenset({"id", "text"}), required=frozenset({"id", "text"}))
         pid = _id(p["id"], f"{path}.predictions[{i}].id")
         if pid in seen:
@@ -253,6 +257,11 @@ def _content_lab(c: dict, path: str, ctx: dict) -> None:
     if "record" in c:
         for i, r in enumerate(_list(c["record"], f"{path}.record", hi=10)):
             _text(r, f"{path}.record[{i}]", max_len=300)
+
+
+def _content_practice(c: dict, path: str, ctx: dict) -> None:
+    _dict(c, path, allowed=frozenset({"prompt_md"}), required=frozenset({"prompt_md"}))
+    _text(c["prompt_md"], f"{path}.prompt_md")
 
 
 def _content_reflection(c: dict, path: str, ctx: dict) -> None:
@@ -267,7 +276,7 @@ def _content_reflection(c: dict, path: str, ctx: dict) -> None:
 _CONTENT = {
     StepType.TEACH: _content_teach, StepType.EXAMPLE: _content_example, StepType.REFLECT: _content_reflect,
     StepType.THINK: _content_think, StepType.CHECK: _content_check, StepType.EXPLAIN_BACK: _content_explain_back,
-    StepType.LAB: _content_lab, StepType.REFLECTION: _content_reflection,
+    StepType.LAB: _content_lab, StepType.REFLECTION: _content_reflection, StepType.PRACTICE: _content_practice,
 }
 
 
@@ -322,13 +331,31 @@ def _binding(step_type: StepType, step: dict, path: str, spec: dict) -> None:
     elif step_type == StepType.LAB:
         if not has:
             _fail(path, "a lab step must bind to an existing execution engine")
-        b = _dict(step["binding"], path, allowed=frozenset({"kind", "engine"}), required=frozenset({"kind", "engine"}))
+        b = _dict(step["binding"], path, allowed=frozenset({"kind", "engine", "kit"}), required=frozenset({"kind", "engine"}))
+        if "kit" in b:
+            kit = _dict(b["kit"], f"{path}.kit", allowed=frozenset({"kit_key", "scenario_key"}), required=frozenset({"kit_key", "scenario_key"}))
+            _id(kit["kit_key"], f"{path}.kit.kit_key")
+            _id(kit["scenario_key"], f"{path}.kit.scenario_key")
+            if b["engine"] != "personal_lab_experiment":
+                _fail(f"{path}.engine", "a kit-bound lab runs on the Personal Lab engine ('personal_lab_experiment')")
         if b["kind"] != "personal_lab":
             _fail(f"{path}.kind", "must be 'personal_lab'")
         if b["engine"] not in LAB_ENGINES:
             _fail(f"{path}.engine", f"must be one of {', '.join(LAB_ENGINES)}")
         if spec.get("engine_binding") and spec["engine_binding"] != b["engine"]:
             _fail(f"{path}.engine", "must equal the Day's engine_binding")
+    elif step_type == StepType.PRACTICE:
+        if not has:
+            _fail(path, "a practice step must bind to an Educational Lab Kit")
+        b = _dict(step["binding"], path, allowed=frozenset({"kind", "kit_key", "scenario_keys"}), required=frozenset({"kind", "kit_key", "scenario_keys"}))
+        if b["kind"] != "academy_lab_kit":
+            _fail(f"{path}.kind", "must be 'academy_lab_kit'")
+        _id(b["kit_key"], f"{path}.kit_key")
+        keys = _list(b["scenario_keys"], f"{path}.scenario_keys", hi=6)
+        for i, k in enumerate(keys):
+            _id(k, f"{path}.scenario_keys[{i}]")
+        if len(set(keys)) != len(keys):
+            _fail(f"{path}.scenario_keys", "must not repeat a scenario")
     elif has:
         _fail(path, f"a {step_type.value} step must not carry a binding")
 
@@ -381,7 +408,7 @@ def validate_structured_spec(spec: Any) -> List[dict]:
             _fail(f"{path}.required", "must be true or false")
         _text(step.get("professor_hint"), f"{path}.professor_hint", max_len=500, optional=True)
         content = _dict(step["content"], f"{path}.content")
-        _CONTENT[step_type](content, f"{path}.content", {"earlier_reflect_keys": list(earlier_reflect)})
+        _CONTENT[step_type](content, f"{path}.content", {"earlier_reflect_keys": list(earlier_reflect), "binding": step.get("binding")})
         _private(step_type, step, f"{path}.private")
         _binding(step_type, step, f"{path}.binding", spec)
         counts[step_type] += 1

@@ -176,6 +176,13 @@ class Settings(BaseSettings):
     # deliberately configurable rather than commercial pricing policy.
     professor_max_context_chars: int = 80_000
     professor_max_output_tokens: int = 1_200
+
+    # AIL.5D.5 Academy practice controls. Server-side only: a client can never raise a cap, pick a budget or select a model.
+    # ``academy_practice_budget_usd`` is each learner's own USER-scope Budget for Academy practice runs (the existing Budget
+    # engine enforces it); the run caps bound spend on free models, which a Budget cannot see.
+    academy_practice_budget_usd: float = 2.0
+    academy_practice_daily_run_cap: int = 30
+    academy_practice_max_attempts_per_step: int = 10
     # Staging-only AIL.4C UAT pin. This is a Model Registry
     # ``provider_models.id`` configured outside the application; leaving it
     # unset preserves the normal Professor AUTO/MA8 policy.

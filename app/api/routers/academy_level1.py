@@ -26,7 +26,9 @@ from app.services.academy_level1_service import (
     AcademyLevel1Service, CAPSTONE_STAGES, LEVEL1_CAPSTONE_TEMPLATE_KEY,
     ensure_level1_capstone_template,
 )
-from app.academy_steps import strip_private
+from app.academy_lab_kits import DAY_KITS
+from app.academy_steps import is_structured, public_steps, strip_private
+from app.services.academy_practice_service import AcademyPracticeService
 from app.schemas.professor import ProfessorContextRequest, ProfessorIntent, ProfessorInteractionRead, ProfessorTarget, ProfessorTargetType
 from app.services.professor_execution_service import ProfessorExecutionService
 from app.services.academy_structured_authoring import author_day_structure
@@ -155,24 +157,20 @@ def start_lab(day: int, body: Optional[Level1LabLaunchRequest] = None, db: Sessi
         fixture = ensure_day20(db, user, item)
         baseline = TaskService(db).start_task_run(task_id=fixture["task"].id, agent_version_id=fixture["baseline_agent_version"].id, frozen_task_snapshot={**context, "fixture_key": fixture["fixture_key"], "fixture_version": 1, "run_role": "baseline", "requires_improved_run": True, "improved_agent_version_id": fixture["improved_agent_version"].id})
         return {**context, "title": item.title, "learning_objective": item.spec["objectives"][0], "experiment_id": None, "engine": "evaluation_agent", "fixture_key": fixture["fixture_key"], "task_id": fixture["task"].id, "task_run_id": baseline.id, "agent_version_id": fixture["baseline_agent_version"].id, "agent_run_id": baseline.agent_runs[0].id, "instructions": "Run the baseline, record the failure, make only the permitted change, then run the improved version and compare both runs. A conclusion without both runs cannot qualify."}
-    if day not in (4, 5, 9):
+    if day not in DAY_KITS:
         raise ConflictError(f"Academy Day {day} has no governed execution binding")
-    _kits, versions = LabService(db).starter_kits(user)
-    if not versions:
-        raise ConflictError("No learner-visible Personal Lab Test Kit is available")
-    agent_versions = db.execute(
-        select(AgentVersion).join(Agent, Agent.id == AgentVersion.agent_id).join(ProjectMembership, ProjectMembership.project_id == Agent.project_id)
-        .where(ProjectMembership.user_id == user.id, AgentVersion.status == VersionStatus.ACTIVE).order_by(AgentVersion.created_at)
-    ).scalars().all()
-    if len(agent_versions) < 2:
-        raise ConflictError("The existing Personal Lab requires two active Agent Versions for Prompt Comparison")
-    experiment = LabService(db).create_experiment(user, ExperimentCreate(
-        experiment_type="prompt_comparison", hypothesis=f"Academy Day {day}: {item.title}",
-        eval_set_version_id=versions[0].id, agent_version_ids=[row.id for row in agent_versions[:2]],
-        learning_item_id=item.id, concept_id=item.concept_id,
-        config={"academy_program": "practical-ai-foundations", "academy_week": item.spec["week"], "academy_day": day, "academy_title": item.title, "academy_learning_objective": item.spec["objectives"][0], "return_to": f"#/academy/level-1/{day}", "assistance_level": "UNKNOWN", "assistance_required_for_qualification": True, "capability_boundary": item.spec.get("capability_boundary")},
-    ))
-    return {"academy_program": "practical-ai-foundations", "week": item.spec["week"], "day": day, "title": item.title, "learning_objective": item.spec["objectives"][0], "learning_item_id": item.id, "experiment_id": experiment.id, "engine": "personal_lab_experiment", "fixture_key": f"level1-day-{day}-experiment", "return_to": f"#/academy/level-1/{day}", "capability_boundary": item.spec.get("capability_boundary")}
+    # AIL.5D.5: Days 4, 5 and 9 run on an Educational Lab Kit practice instance over the governed execution engine. The old path
+    # created a prompt-comparison Experiment with no models, which could not be launched and could not be counted.
+    step_key = "lab"
+    if is_structured(item.spec):
+        step_key = next((s["key"] for s in public_steps(item.spec) if s["type"] == "lab" and "kit" in (s.get("binding") or {})), None)
+        if step_key is None:
+            raise ConflictError(f"Academy Day {day} has no Lab Kit step")
+    practice = AcademyPracticeService(db).create(user, item.id, step_key)
+    return {**context, "title": item.title, "learning_objective": item.spec["objectives"][0], "week": item.spec["week"], "day": day,
+            "experiment_id": None, "engine": "academy_lab_kit", "fixture_key": f"level1-day-{day}-lab-kit", "learning_item_id": item.id,
+            "practice_instance_id": practice["instance_id"], "practice_mode": practice["mode"], "step_key": step_key,
+            "return_to": practice["return"]["path"], "instructions": practice["scenario"]["instructions_md"]}
 
 
 @router.post("/agent-runs/{agent_run_id}/qualify")

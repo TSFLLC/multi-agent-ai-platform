@@ -32,7 +32,7 @@ def _step(spec, key):
 
 def test_a_valid_structured_day_covers_every_step_type_and_keeps_authored_order():
     steps = validate_structured_spec(_spec())
-    assert {s["type"] for s in steps} == {t.value for t in StepType}
+    assert {s["type"] for s in steps} == {t.value for t in StepType if t != StepType.PRACTICE}  # practice: AIL.5D.5 (own tests)
     assert [s["key"] for s in steps] == [s["key"] for s in sample_steps()]
 
 

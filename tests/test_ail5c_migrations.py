@@ -27,7 +27,8 @@ R4 = "ail5d_learning_item_lineage"  # deployed history: keep this exact id
 R5 = "academy_lineage_enforcement"  # forward revision that adds the stronger enforcement
 R6 = "academy_step_progress"  # AIL.5D.1 structured learning foundation
 R7 = "academy_step_response"  # AIL.5D.3 learner step responses
-R8 = "academy_professor_help"  # AIL.5D.4 step Professor help tracking: the current head
+R8 = "academy_professor_help"  # AIL.5D.4 step Professor help tracking
+R9 = "academy_practice_instances"  # AIL.5D.5 Lab Kit practice instances: the current head
 NOW = "2026-01-01T00:00:00"
 NEW_TABLES = {
     "assessment_definitions",
@@ -314,7 +315,7 @@ def test_full_chain_on_a_fresh_disposable_database(db_path):
         _clean(conn)
     assert command.current  # alembic api present
     heads = {row[0] for row in engine.connect().execute(text("SELECT version_num FROM alembic_version"))}
-    assert heads == {R8}
+    assert heads == {R9}
     engine.dispose()
 
 

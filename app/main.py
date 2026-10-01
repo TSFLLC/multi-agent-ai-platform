@@ -19,6 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from app.api.routers import (
     academy,
     academy_level1,
+    academy_practice,
     assessments,
     agents,
     approvals,
@@ -180,6 +181,7 @@ register_exception_handlers(app)
 for router in (
     academy.router,
     academy_level1.router,
+    academy_practice.router,
     assessments.router,
     build_with_me.router,
     projects.router,

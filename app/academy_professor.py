@@ -64,7 +64,9 @@ _TEACHING_TYPES = frozenset({StepType.TEACH.value, StepType.EXAMPLE.value})
 
 
 def mode_for_step(step: Dict[str, Any]) -> ProfessorMode:
-    """The mode of a step, from the authored step only. A future ``practice`` step declares ``mode: independent``."""
+    """The mode of a step, from the authored step only. A ``practice`` step is always independent."""
+    if step["type"] == StepType.PRACTICE.value:
+        return ProfessorMode.INDEPENDENT        # a practice step is independent by definition (AIL.5D.5)
     declared = step.get("mode")
     if declared in (ProfessorMode.INDEPENDENT.value, ProfessorMode.GUIDED.value):
         return ProfessorMode(declared)

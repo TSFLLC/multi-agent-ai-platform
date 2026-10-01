@@ -89,6 +89,9 @@ class Level1LabRead(BaseModel):
     instructions: Optional[str] = None
     return_to: str
     capability_boundary: Optional[str] = None
+    practice_instance_id: Optional[str] = None
+    practice_mode: Optional[str] = None
+    step_key: Optional[str] = None
 
 
 class Level1AssessmentStartRequest(BaseModel):

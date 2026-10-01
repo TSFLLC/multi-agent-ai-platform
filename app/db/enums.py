@@ -680,6 +680,27 @@ class AcademyStepResponseKind(str, enum.Enum):
     NOTE = "note"
 
 
+class PracticeInstanceStatus(str, enum.Enum):
+    """AIL.5D.5 server-owned lifecycle of one learner's Practice Instance. Only the practice service moves it, only forward,
+    and only from recorded facts (saved predictions, completed runs, saved responses); a client never sets it."""
+
+    CREATED = "created"
+    PREDICTED = "predicted"
+    RUNNING = "running"
+    OBSERVING = "observing"
+    COMPARING = "comparing"
+    REFLECTING = "reflecting"
+    COMPLETED = "completed"
+    ABANDONED = "abandoned"
+
+
+class PracticeMode(str, enum.Enum):
+    """``guided``: structured, Professor coaches under the guided rules. ``independent``: less guidance, progressive hints."""
+
+    GUIDED = "guided"
+    INDEPENDENT = "independent"
+
+
 class AcademyPace(str, enum.Enum):
     SCHEDULED = "scheduled"
     SELF_PACED = "self_paced"

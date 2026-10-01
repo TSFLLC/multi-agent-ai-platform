@@ -36,7 +36,7 @@ def _row(conn, **over):
 
 def test_there_is_one_head_above_the_step_progress_revision():
     script = ScriptDirectory.from_config(_cfg())
-    assert script.get_heads() == ["academy_professor_help"]  # AIL.5D.4 sits directly above this revision
+    assert script.get_heads() == ["academy_practice_instances"]  # later slices sit above this revision
     assert script.get_revision("academy_professor_help").down_revision == NEW
     assert script.get_revision(NEW).down_revision == PREVIOUS
     assert script.get_revision(PREVIOUS).down_revision == "academy_lineage_enforcement"

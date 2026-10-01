@@ -34,7 +34,8 @@ def _row(conn, **over):
 
 def test_there_is_one_head_above_the_step_response_revision():
     script = ScriptDirectory.from_config(_cfg())
-    assert script.get_heads() == [NEW]
+    assert script.get_heads() == ["academy_practice_instances"]  # AIL.5D.5 sits directly above this revision
+    assert script.get_revision("academy_practice_instances").down_revision == NEW
     assert script.get_revision(NEW).down_revision == PREVIOUS
     assert script.get_revision(PREVIOUS).down_revision == "academy_step_progress"
     assert not NEW.startswith("ail5d_") and script.get_revision(DEPLOYED) is not None
@@ -46,7 +47,7 @@ def test_upgrading_from_the_previous_head_runs_only_the_new_revision_and_loses_n
     _seed(engine)
     before = _content_hash(engine)
     engine.dispose()
-    assert _run("upgrade", "head") == [f"Running upgrade {PREVIOUS} -> {NEW}"]
+    assert _run("upgrade", NEW) == [f"Running upgrade {PREVIOUS} -> {NEW}"]
     engine = _engine(path)
     assert _version(engine) == NEW and TABLE in _tables(engine) and _content_hash(engine) == before
     with engine.begin() as conn:
@@ -56,7 +57,7 @@ def test_upgrading_from_the_previous_head_runs_only_the_new_revision_and_loses_n
 
 
 def test_the_whole_chain_on_a_fresh_database_reaches_the_head(path):
-    steps = _run("upgrade", "head")
+    steps = _run("upgrade", NEW)
     assert steps[-1] == f"Running upgrade {PREVIOUS} -> {NEW}" and any(DEPLOYED in s for s in steps)
     engine = _engine(path)
     assert _version(engine) == NEW and {TABLE, "academy_step_responses", "academy_step_progress"} <= _tables(engine)
@@ -70,7 +71,7 @@ def test_the_new_revision_changes_no_existing_table(path):
     with engine.begin() as conn:
         before = {r[0]: r[1] for r in conn.execute(text("SELECT name, sql FROM sqlite_master WHERE tbl_name <> 'alembic_version'"))}
     engine.dispose()
-    command.upgrade(_cfg(), "head")
+    command.upgrade(_cfg(), NEW)
     engine = _engine(path)
     with engine.begin() as conn:
         after = {r[0]: r[1] for r in conn.execute(text("SELECT name, sql FROM sqlite_master WHERE tbl_name <> 'alembic_version'"))}
@@ -80,7 +81,7 @@ def test_the_new_revision_changes_no_existing_table(path):
 
 
 def test_the_migrated_table_matches_the_orm_model(path):
-    command.upgrade(_cfg(), "head")
+    command.upgrade(_cfg(), NEW)
     engine = _engine(path)
     with engine.connect() as conn:
         diffs = compare_metadata(MigrationContext.configure(conn, opts={"compare_type": False}), Base.metadata)
@@ -89,7 +90,7 @@ def test_the_migrated_table_matches_the_orm_model(path):
 
 
 def test_the_database_rejects_rows_that_break_the_help_invariants(path):
-    command.upgrade(_cfg(), "head")
+    command.upgrade(_cfg(), NEW)
     engine = _engine(path)
     _seed(engine)
     with engine.begin() as conn:
@@ -114,7 +115,7 @@ def test_the_database_rejects_rows_that_break_the_help_invariants(path):
 
 
 def test_learner_deletion_cascades_and_an_item_with_help_cannot_be_deleted(path):
-    command.upgrade(_cfg(), "head")
+    command.upgrade(_cfg(), NEW)
     engine = _engine(path)
     _seed(engine)
     with engine.begin() as conn:
@@ -130,7 +131,7 @@ def test_learner_deletion_cascades_and_an_item_with_help_cannot_be_deleted(path)
 
 
 def test_downgrade_with_no_help_removes_only_the_new_table_and_can_be_reapplied(path):
-    command.upgrade(_cfg(), "head")
+    command.upgrade(_cfg(), NEW)
     engine = _engine(path)
     _seed(engine)
     content = _content_hash(engine)
@@ -141,14 +142,14 @@ def test_downgrade_with_no_help_removes_only_the_new_table_and_can_be_reapplied(
     assert _content_hash(engine) == content
     _health(engine)
     engine.dispose()
-    command.upgrade(_cfg(), "head")
+    command.upgrade(_cfg(), NEW)
     engine = _engine(path)
     assert TABLE in _tables(engine) and _content_hash(engine) == content
     engine.dispose()
 
 
 def test_downgrade_refuses_while_help_rows_exist_and_changes_nothing(path):
-    command.upgrade(_cfg(), "head")
+    command.upgrade(_cfg(), NEW)
     engine = _engine(path)
     _seed(engine)
     with engine.begin() as conn:

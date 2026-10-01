@@ -417,7 +417,13 @@ class AcademyStepService:
             kind = {StepType.THINK: "committed_answer", StepType.EXPLAIN_BACK: "outline_saved"}.get(t, "response_saved")
             newest = max((r for k, r in latest.items() if k[0] != AcademyStepResponseKind.NOTE), key=lambda r: r.created_at)
             return VerifiedCompletion(kind, newest.id)
-        return None  # lab: only the Lab slice can verify it
+        if t in (StepType.LAB, StepType.PRACTICE):
+            # AIL.5D.5: a lab / practice step is completed by a COMPLETED Practice Instance the server itself finished
+            # (never by a request). A lab step without a Lab Kit has no instance and still cannot be completed.
+            from app.services.academy_practice_service import AcademyPracticeService
+
+            return AcademyPracticeService(self.db, clock=self._clock).verified_completion(user_id, item, step)
+        return None
 
     # -- step-scoped Professor (AIL.5D.4) ------------------------------------------------------------------------------------
 
@@ -472,6 +478,12 @@ class AcademyStepService:
             state["passed"] = learner["passed"]
             if learner["passed"]:
                 rationales = check["review"]
+        elif t in (StepType.LAB, StepType.PRACTICE):
+            # AIL.5D.5: the learner's own practice on this step (predictions, runs, notes) so the Professor can coach it. The
+            # authored lab answer is never part of it, and ``solution_eligible`` keeps the ladder below "explain".
+            from app.services.academy_practice_service import AcademyPracticeService
+
+            learner["practice"] = AcademyPracticeService(self.db, clock=self._clock).professor_state(user_id, item, step_key)
         vocabulary = []
         for s in steps:
             for block in (s["content"].get("blocks") or []):
@@ -552,6 +564,10 @@ class AcademyStepService:
         elif t == StepType.CHECK:
             check = self._check_view(user_id, item)
             view["questions"], view["check_result"], view["review"] = check["questions"], check["result"], check["review"]
+        elif t in (StepType.LAB, StepType.PRACTICE):
+            from app.services.academy_practice_service import AcademyPracticeService   # AIL.5D.5: this learner's practice instances (summary only)
+
+            view["practice"] = AcademyPracticeService(self.db, clock=self._clock).for_step(user_id, item.id, step["key"])
 
     def _one(self, user_id: str, item: LearningItem, step_key: str) -> Dict[str, Any]:
         summary = self.progress(user_id, item.id)

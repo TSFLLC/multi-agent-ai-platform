@@ -24,6 +24,8 @@ from app.db.enums import (
     ExecutionVerification,
     MilestoneAttemptMode,
     MilestoneAttemptStatus,
+    PracticeInstanceStatus,
+    PracticeMode,
     ProjectAudienceLevel,
     ProjectAttemptStatus,
     ProjectLadderLevel,
@@ -379,3 +381,64 @@ class AcademyProfessorHelp(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     revealed_solution: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     interaction_id: Mapped[str] = mapped_column(String(36), nullable=False)
     context_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
+class AcademyPracticeInstance(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
+    """AIL.5D.5 - one learner's own Practice Instance of an authored Lab Kit scenario.
+
+    The master Lab Kit is authored curriculum (``app.academy_lab_kits``) and is immutable to learners. An instance is the
+    learner's private copy of ONE scenario: ``scenario`` freezes it at creation (so a later kit revision never changes work
+    in progress) and ``scenario_sha256`` identifies it. It is bound to the exact Day version (``learning_item_id`` +
+    ``lineage_id``) and step the learner was on, so the return from Personal Lab restores that exact Day, step and
+    instance. ``status`` is server-owned and forward-only; ``completed`` is written only when the recorded facts
+    (saved responses and completed governed runs) satisfy the scenario's completion conditions.
+
+    Practice is not an assessment: an instance never writes demonstration evidence. On completion it records ONE
+    practice-marked LAB evidence row (``evidence_id``) that can lift a concept to PRACTICED and never to DEMONSTRATED.
+    ``max_runs`` is copied from the scenario at creation (the per-instance cap) and ``assistance`` is the canonical
+    Professor-help summary derived from ``academy_professor_help`` at completion, never a learner-supplied value.
+    """
+
+    __tablename__ = "academy_practice_instances"
+    __table_args__ = (
+        CheckConstraint("max_runs >= 1", name="max_runs"),
+        CheckConstraint("attempt_no >= 1", name="attempt_no"),
+        Index("ix_academy_practice_instances_user_lineage_step", "user_id", "lineage_id", "step_key"),
+    )
+
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    learning_item_id: Mapped[str] = mapped_column(ForeignKey("learning_items.id", ondelete="RESTRICT"), nullable=False)
+    lineage_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    step_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    mode: Mapped[PracticeMode] = mapped_column(sa_enum(PracticeMode), nullable=False)
+    kit_key: Mapped[str] = mapped_column(String(80), nullable=False)
+    kit_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    scenario_key: Mapped[str] = mapped_column(String(80), nullable=False)
+    scenario_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    scenario: Mapped[dict] = mapped_column("scenario_json", nullable=False)
+    status: Mapped[PracticeInstanceStatus] = mapped_column(sa_enum(PracticeInstanceStatus), nullable=False, default=PracticeInstanceStatus.CREATED)
+    attempt_no: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    max_runs: Mapped[int] = mapped_column(Integer, nullable=False)
+    budget_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    abandoned_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    evidence_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
+    assistance: Mapped[Optional[dict]] = mapped_column("assistance_json", nullable=True)
+
+
+class AcademyPracticeRun(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
+    """AIL.5D.5 - one governed run of a Practice Instance. The raw execution result stays in the existing execution system
+    (``task_run_id`` -> Task Run / Agent Run / Artifact); this row records only what the learner chose to run
+    (``variables``, validated against the frozen scenario) and links to that run. ``seq`` is 1-based and gapless."""
+
+    __tablename__ = "academy_practice_runs"
+    __table_args__ = (UniqueConstraint("instance_id", "seq", name="uq_academy_practice_runs_instance_seq"),)
+
+    instance_id: Mapped[str] = mapped_column(ForeignKey("academy_practice_instances.id", ondelete="RESTRICT"), nullable=False)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    seq: Mapped[int] = mapped_column(Integer, nullable=False)
+    variables: Mapped[dict] = mapped_column("variables_json", nullable=False)
+    prompt_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    model_canonical_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    task_run_id: Mapped[str] = mapped_column(ForeignKey("task_runs.id", ondelete="RESTRICT"), nullable=False)
+    agent_run_id: Mapped[str] = mapped_column(String(36), nullable=False)
